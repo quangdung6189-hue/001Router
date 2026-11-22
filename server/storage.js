@@ -1,8 +1,10 @@
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 import bcrypt from "bcryptjs";
 import { nanoid } from "nanoid";
+import { Pool } from "pg";
 import { maskKey } from "./auth.js";
 import {
   decryptSecret,
@@ -16,7 +18,9 @@ import { redactSecrets } from "./security/redact.js";
 export const MAX_LOGS = 5000;
 export const DEFAULT_PORT = 20128;
 
-const DEFAULT_DATA_DIR = path.resolve(import.meta.dirname, "../data");
+const DEFAULT_DATA_DIR = process.env.VERCEL
+  ? path.join(os.tmpdir(), "001router-data")
+  : path.resolve(import.meta.dirname, "../data");
 
 /**
  * Create a default initial database object on first boot.
@@ -27,12 +31,7 @@ async function createInitialData(port = DEFAULT_PORT) {
   const defaultKeyId = nanoid();
   const defaultKeyValue = `sk-001r-${nanoid(24)}`;
   const { keyHash, prefix, last4 } = deriveRouterKeyFields(defaultKeyValue);
-  const envPassword =
-    typeof process.env.ROUTER001_ADMIN_PASSWORD === "string"
-      ? process.env.ROUTER001_ADMIN_PASSWORD.trim()
-      : "";
-  const initialPassword = envPassword || "1234";
-  const passwordHash = await bcrypt.hash(initialPassword, 10);
+  const passwordHash = await bcrypt.hash("1234", 10);
 
   const initial = {
     version: 1,
@@ -126,13 +125,29 @@ async function atomicRename(src, dest) {
 
 export class Storage {
   /**
-   * @param {{ dataDir?: string, port?: number, bindHost?: string }} [options]
+   * @param {{ dataDir?: string, port?: number, bindHost?: string, databaseUrl?: string }} [options]
    */
   constructor(options = {}) {
     this.dataDir = options.dataDir ? path.resolve(options.dataDir) : DEFAULT_DATA_DIR;
     this.dbPath = path.join(this.dataDir, "db.json");
     this.port = Number(options.port) || DEFAULT_PORT;
     this.bindHost = options.bindHost || process.env.HOST || "127.0.0.1";
+    this.databaseUrl =
+      typeof options.databaseUrl === "string"
+        ? options.databaseUrl.trim()
+        : !options.dataDir
+          ? String(process.env.DATABASE_URL || process.env.POSTGRES_URL || "").trim()
+          : "";
+    this.pgPool = this.databaseUrl
+      ? new Pool({
+          connectionString: this.databaseUrl,
+          max: 3,
+          idleTimeoutMillis: 10000,
+          ssl: /sslmode=disable|localhost|127\.0\.0\.1/i.test(this.databaseUrl)
+            ? undefined
+            : { rejectUnauthorized: false }
+        })
+      : null;
     this.data = null;
     this.masterKey = null;
     this._isDefaultPassword = true;
@@ -141,8 +156,20 @@ export class Storage {
     this._writeQueue = Promise.resolve();
   }
 
+  async _ensurePgTable() {
+    if (!this.pgPool) return;
+    await this.pgPool.query(`
+      CREATE TABLE IF NOT EXISTS router001_state (
+        id TEXT PRIMARY KEY,
+        payload TEXT NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+  }
+
   /**
-   * Initialize storage: load master key, load/migrate db.json or create initial db.json atomically.
+   * Initialize storage: load master key, load/migrate state from Postgres (when DATABASE_URL/POSTGRES_URL is set)
+   * or local db.json atomically.
    */
   async init() {
     await fs.mkdir(this.dataDir, { recursive: true });
@@ -150,24 +177,45 @@ export class Storage {
     let loaded = null;
     let needsSave = false;
 
-    try {
-      const raw = await fs.readFile(this.dbPath, "utf8");
-      loaded = JSON.parse(raw);
-    } catch (err) {
-      if (err && err.code !== "ENOENT") {
-        // Backup corrupted file if unreadable JSON before reinitializing
+    if (this.pgPool) {
+      await this._ensurePgTable();
+      const res = await this.pgPool.query(
+        "SELECT payload FROM router001_state WHERE id = 'primary' LIMIT 1"
+      );
+      if (res.rows[0]?.payload) {
         try {
-          const backupPath = `${this.dbPath}.corrupt.${Date.now()}`;
-          await fs.rename(this.dbPath, backupPath);
+          loaded = JSON.parse(res.rows[0].payload);
         } catch {
-          // ignore backup failure
+          loaded = null;
         }
       }
-      loaded = await createInitialData(this.port);
-      if (loaded._initialPlaintextKey) {
-        this._initialRouterKey = loaded._initialPlaintextKey;
+      if (!loaded) {
+        loaded = await createInitialData(this.port);
+        if (loaded._initialPlaintextKey) {
+          this._initialRouterKey = loaded._initialPlaintextKey;
+        }
+        needsSave = true;
       }
-      needsSave = true;
+    } else {
+      try {
+        const raw = await fs.readFile(this.dbPath, "utf8");
+        loaded = JSON.parse(raw);
+      } catch (err) {
+        if (err && err.code !== "ENOENT") {
+          // Backup corrupted file if unreadable JSON before reinitializing
+          try {
+            const backupPath = `${this.dbPath}.corrupt.${Date.now()}`;
+            await fs.rename(this.dbPath, backupPath);
+          } catch {
+            // ignore backup failure
+          }
+        }
+        loaded = await createInitialData(this.port);
+        if (loaded._initialPlaintextKey) {
+          this._initialRouterKey = loaded._initialPlaintextKey;
+        }
+        needsSave = true;
+      }
     }
 
     // Ensure all expected fields exist cleanly
@@ -545,28 +593,42 @@ export class Storage {
     return JSON.stringify(diskClone, null, 2);
   }
 
+  async _writePayload(payload) {
+    if (this.pgPool) {
+      await this.pgPool.query(
+        `INSERT INTO router001_state (id, payload, updated_at)
+         VALUES ('primary', $1, NOW())
+         ON CONFLICT (id) DO UPDATE SET payload = EXCLUDED.payload, updated_at = NOW()`,
+        [payload]
+      );
+      return;
+    }
+
+    await fs.mkdir(this.dataDir, { recursive: true });
+    const tmpPath = `${this.dbPath}.${process.pid}.${Date.now()}.${Math.random()
+      .toString(36)
+      .slice(2, 8)}.tmp`;
+    try {
+      await fs.writeFile(tmpPath, payload, "utf8");
+      await atomicRename(tmpPath, this.dbPath);
+    } catch (err) {
+      try {
+        await fs.unlink(tmpPath);
+      } catch {
+        // ignore cleanup failure
+      }
+      throw err;
+    }
+  }
+
   /**
-   * Persist current in-memory data atomically via temp file + rename on a serialized queue.
+   * Persist current in-memory data atomically via Postgres or temp file + rename on a serialized queue.
    * @returns {Promise<void>}
    */
   _persist() {
     const task = this._writeQueue.then(async () => {
-      await fs.mkdir(this.dataDir, { recursive: true });
-      const tmpPath = `${this.dbPath}.${process.pid}.${Date.now()}.${Math.random()
-        .toString(36)
-        .slice(2, 8)}.tmp`;
       const payload = this._prepareDiskPayload();
-      try {
-        await fs.writeFile(tmpPath, payload, "utf8");
-        await atomicRename(tmpPath, this.dbPath);
-      } catch (err) {
-        try {
-          await fs.unlink(tmpPath);
-        } catch {
-          // ignore cleanup failure
-        }
-        throw err;
-      }
+      await this._writePayload(payload);
     });
     this._writeQueue = task.catch(() => {});
     return task;
@@ -581,22 +643,8 @@ export class Storage {
   update(mutator) {
     const task = this._writeQueue.then(async () => {
       const result = await mutator(this.data);
-      await fs.mkdir(this.dataDir, { recursive: true });
-      const tmpPath = `${this.dbPath}.${process.pid}.${Date.now()}.${Math.random()
-        .toString(36)
-        .slice(2, 8)}.tmp`;
       const payload = this._prepareDiskPayload();
-      try {
-        await fs.writeFile(tmpPath, payload, "utf8");
-        await atomicRename(tmpPath, this.dbPath);
-      } catch (err) {
-        try {
-          await fs.unlink(tmpPath);
-        } catch {
-          // ignore cleanup failure
-        }
-        throw err;
-      }
+      await this._writePayload(payload);
       return result;
     });
     this._writeQueue = task.catch(() => {});

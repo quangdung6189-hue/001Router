@@ -66,6 +66,8 @@ import {
   getGoogleOAuthAccessToken,
   inspectGoogleAccountAndPlan,
   parseGoogleClientSecretJson,
+  peekGooglePkceState,
+  restoreGooglePkceState,
   startGoogleOAuthPkce
 } from "../googleOAuth.js";
 import {
@@ -1621,6 +1623,23 @@ export function createDashboardRouter(storage, liveEvents = null) {
         }
       }
 
+      // Persist encrypted PKCE state in storage so multi-instance serverless (Vercel) can complete callback
+      try {
+        const pkceRec = peekGooglePkceState(started.state);
+        if (pkceRec) {
+          const encPkce = storage.encryptSecret(JSON.stringify(pkceRec));
+          const nowMs = Date.now();
+          await storage.update((data) => {
+            const list = Array.isArray(data.pendingGooglePkce) ? data.pendingGooglePkce : [];
+            const pruned = list.filter((item) => item && item.expiresAt > nowMs && item.state !== started.state);
+            pruned.push({ state: started.state, enc: encPkce, expiresAt: pkceRec.expiresAt });
+            data.pendingGooglePkce = pruned.slice(-30);
+          });
+        }
+      } catch {
+        // Best-effort cross-instance PKCE persistence
+      }
+
       return res.json({
         ok: true,
         usedSavedClient: usedSaved,
@@ -1648,6 +1667,35 @@ export function createDashboardRouter(storage, liveEvents = null) {
         .find((p) => p.preset === "gemini" || p.slug === "gemini") || null;
     const dispatcher = existingGemini ? getProxyDispatcher(existingGemini, storage) : undefined;
     const googleOpts = extractGoogleOAuthOptions(req);
+
+    // Always consume any persisted cross-instance PKCE record to prevent replay attacks
+    if (typeof body.state === "string" && body.state.trim()) {
+      const targetState = body.state.trim();
+      const inMemory = Boolean(peekGooglePkceState(targetState));
+      let restoredEnc = "";
+      const hasPersisted =
+        Array.isArray(storage.data?.pendingGooglePkce) &&
+        storage.data.pendingGooglePkce.some((item) => item && item.state === targetState);
+      if (hasPersisted) {
+        await storage.update((data) => {
+          const list = Array.isArray(data.pendingGooglePkce) ? data.pendingGooglePkce : [];
+          const idx = list.findIndex((item) => item && item.state === targetState);
+          if (idx >= 0) {
+            restoredEnc = list[idx].enc || "";
+            list.splice(idx, 1);
+            data.pendingGooglePkce = list;
+          }
+        });
+      }
+      if (!inMemory && restoredEnc) {
+        try {
+          const rec = JSON.parse(storage.decryptSecret(restoredEnc));
+          restoreGooglePkceState(targetState, rec);
+        } catch {
+          // Ignore malformed encrypted state
+        }
+      }
+    }
 
     let exchanged;
     try {

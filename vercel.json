@@ -1,0 +1,21 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "npm install && npm --prefix web install && npm run build",
+  "outputDirectory": "web/dist",
+  "functions": {
+    "api/index.js": {
+      "maxDuration": 60,
+      "includeFiles": "server/**"
+    }
+  },
+  "rewrites": [
+    { "source": "/api/(.*)", "destination": "/api/index.js" },
+    { "source": "/v1/(.*)", "destination": "/api/index.js" },
+    { "source": "/v1beta/(.*)", "destination": "/api/index.js" },
+    { "source": "/health", "destination": "/api/index.js" },
+    {
+      "source": "/((?!assets/|providers/|favicon|manifest|robots\\.txt).*)",
+      "destination": "/index.html"
+    }
+  ]
+}

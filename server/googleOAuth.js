@@ -920,6 +920,16 @@ export async function getGoogleOAuthAccessToken(oauthCredsStringOrObj, options =
   }
 }
 
+export function peekGooglePkceState(state) {
+  return googlePkceStates.get(state) || null;
+}
+
+export function restoreGooglePkceState(state, record) {
+  if (!state || !record || typeof record !== "object") return;
+  pruneExpiredGoogleStates();
+  googlePkceStates.set(state, record);
+}
+
 /**
  * Clear cached Google OAuth access tokens (useful for tests verifying refresh_token behavior).
  */
