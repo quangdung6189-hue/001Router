@@ -1,0 +1,891 @@
+@import "tailwindcss";
+
+/* ==========================================================================
+   001Router Design Tokens (9Router-inspired Light & Dark Theme)
+   Follows modern-web-guidance: dark-mode, dark-mode-toggle,
+   and component-specific-light-dark-theme.
+   ========================================================================== */
+
+:root {
+  /* Base declaration MUST remain `light dark`; map <meta name="color-scheme"> back */
+  color-scheme: light dark;
+
+  &:has(> head > meta[name="color-scheme"][content="dark"]) {
+    color-scheme: dark;
+  }
+
+  &:has(> head > meta[name="color-scheme"][content="light"]) {
+    color-scheme: light;
+  }
+
+  /* Raw palette pairs */
+  --bg-main-light: #fdfaf6;
+  --bg-main-dark: #1a1a1a;
+
+  --bg-sidebar-light: #f4f1ec;
+  --bg-sidebar-dark: #1f1f1e;
+
+  --bg-card-light: #ffffff;
+  --bg-card-dark: #262626;
+
+  --bg-elevated-light: #f7f4ef;
+  --bg-elevated-dark: #2e2e2d;
+
+  --bg-subtle-light: #efebe4;
+  --bg-subtle-dark: #20201f;
+
+  --bg-input-light: #ffffff;
+  --bg-input-dark: #303030;
+
+  --border-subtle-light: #e5e7eb;
+  --border-subtle-dark: #333333;
+
+  --border-strong-light: #d1d5db;
+  --border-strong-dark: #454545;
+
+  --text-primary-light: #0a0a0a;
+  --text-primary-dark: #ededed;
+
+  --text-secondary-light: #525252;
+  --text-secondary-dark: #a3a3a3;
+
+  --text-muted-light: #737373;
+  --text-muted-dark: #787878;
+
+  --accent-light: #e56a4a;
+  --accent-dark: #e56a4a;
+
+  --accent-hover-light: #cc5236;
+  --accent-hover-dark: #f07b5c;
+
+  --contrast-bg-light: #141414;
+  --contrast-bg-dark: #f5f5f5;
+  --contrast-text-light: #ffffff;
+  --contrast-text-dark: #141414;
+
+  --grid-line-light: rgba(15, 23, 42, 0.045);
+  --grid-line-dark: rgba(255, 255, 255, 0.035);
+
+  --scrollbar-thumb-light: #c8c4bc;
+  --scrollbar-thumb-dark: #4b4b4b;
+  --scrollbar-track-light: #f4f1ec;
+  --scrollbar-track-dark: #1a1a1a;
+
+  /* Default fallback tokens (light) */
+  --bg-main: var(--bg-main-light);
+  --bg-sidebar: var(--bg-sidebar-light);
+  --bg-card: var(--bg-card-light);
+  --bg-elevated: var(--bg-elevated-light);
+  --bg-subtle: var(--bg-subtle-light);
+  --bg-input: var(--bg-input-light);
+  --border-subtle: var(--border-subtle-light);
+  --border-strong: var(--border-strong-light);
+  --text-primary: var(--text-primary-light);
+  --text-secondary: var(--text-secondary-light);
+  --text-muted: var(--text-muted-light);
+  --accent: var(--accent-light);
+  --accent-hover: var(--accent-hover-light);
+  --contrast-bg: var(--contrast-bg-light);
+  --contrast-text: var(--contrast-text-light);
+  --grid-line: var(--grid-line-light);
+  --scrollbar-thumb: var(--scrollbar-thumb-light);
+  --scrollbar-track: var(--scrollbar-track-light);
+
+  /* Lucian UX/UI Prompt theme tokens mapped to 001Router variables */
+  --ux-page: var(--bg-main);
+  --ux-surface: var(--bg-card);
+  --ux-surface-2: var(--bg-elevated);
+  --ux-surface-3: var(--bg-subtle);
+  --ux-ink: var(--text-primary);
+  --ux-ink-2: var(--text-secondary);
+  --ux-ink-3: var(--text-muted);
+  --ux-line: var(--border-subtle);
+  --ux-line-2: var(--border-strong);
+  --ux-accent: var(--accent);
+  --ux-accent-2: #f59e0b;
+  --ux-accent-soft: rgba(229, 106, 74, 0.14);
+  --ux-accent-ink: #ffffff;
+  --ux-mint: #10b981;
+  --ux-warn: #d97706;
+  --ux-danger: #ef4444;
+  --ux-glass: rgba(255, 255, 255, 0.6);
+  --ux-glass-line: rgba(255, 255, 255, 0.85);
+  --ux-shadow: rgba(15, 23, 42, 0.12);
+  --ux-shadow-strong: rgba(15, 23, 42, 0.24);
+  --ux-grad: linear-gradient(120deg, #e56a4a, #f59e0b 55%, #ea580c);
+  --ux-ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --ux-spring: cubic-bezier(0.34, 1.45, 0.64, 1);
+
+  /* Fallback for browsers without light-dark() */
+  @media (prefers-color-scheme: dark) {
+    --bg-main: var(--bg-main-dark);
+    --bg-sidebar: var(--bg-sidebar-dark);
+    --bg-card: var(--bg-card-dark);
+    --bg-elevated: var(--bg-elevated-dark);
+    --bg-subtle: var(--bg-subtle-dark);
+    --bg-input: var(--bg-input-dark);
+    --border-subtle: var(--border-subtle-dark);
+    --border-strong: var(--border-strong-dark);
+    --text-primary: var(--text-primary-dark);
+    --text-secondary: var(--text-secondary-dark);
+    --text-muted: var(--text-muted-dark);
+    --accent: var(--accent-dark);
+    --accent-hover: var(--accent-hover-dark);
+    --contrast-bg: var(--contrast-bg-dark);
+    --contrast-text: var(--contrast-text-dark);
+    --grid-line: var(--grid-line-dark);
+    --scrollbar-thumb: var(--scrollbar-thumb-dark);
+    --scrollbar-track: var(--scrollbar-track-dark);
+    --ux-mint: #34d399;
+    --ux-glass: rgba(255, 255, 255, 0.07);
+    --ux-glass-line: rgba(255, 255, 255, 0.18);
+    --ux-shadow: rgba(0, 0, 0, 0.45);
+    --ux-shadow-strong: rgba(0, 0, 0, 0.72);
+  }
+
+  /* Modern CSS light-dark() — automatically tracks computed color-scheme */
+  @supports (color: light-dark(white, black)) {
+    --bg-main: light-dark(var(--bg-main-light), var(--bg-main-dark));
+    --bg-sidebar: light-dark(var(--bg-sidebar-light), var(--bg-sidebar-dark));
+    --bg-card: light-dark(var(--bg-card-light), var(--bg-card-dark));
+    --bg-elevated: light-dark(var(--bg-elevated-light), var(--bg-elevated-dark));
+    --bg-subtle: light-dark(var(--bg-subtle-light), var(--bg-subtle-dark));
+    --bg-input: light-dark(var(--bg-input-light), var(--bg-input-dark));
+    --border-subtle: light-dark(var(--border-subtle-light), var(--border-subtle-dark));
+    --border-strong: light-dark(var(--border-strong-light), var(--border-strong-dark));
+    --text-primary: light-dark(var(--text-primary-light), var(--text-primary-dark));
+    --text-secondary: light-dark(var(--text-secondary-light), var(--text-secondary-dark));
+    --text-muted: light-dark(var(--text-muted-light), var(--text-muted-dark));
+    --accent: light-dark(var(--accent-light), var(--accent-dark));
+    --accent-hover: light-dark(var(--accent-hover-light), var(--accent-hover-dark));
+    --contrast-bg: light-dark(var(--contrast-bg-light), var(--contrast-bg-dark));
+    --contrast-text: light-dark(var(--contrast-text-light), var(--contrast-text-dark));
+    --grid-line: light-dark(var(--grid-line-light), var(--grid-line-dark));
+    --scrollbar-thumb: light-dark(var(--scrollbar-thumb-light), var(--scrollbar-thumb-dark));
+    --scrollbar-track: light-dark(var(--scrollbar-track-light), var(--scrollbar-track-dark));
+    --ux-mint: light-dark(#10b981, #34d399);
+    --ux-glass: light-dark(rgba(255, 255, 255, 0.6), rgba(255, 255, 255, 0.07));
+    --ux-glass-line: light-dark(rgba(255, 255, 255, 0.85), rgba(255, 255, 255, 0.18));
+    --ux-shadow: light-dark(rgba(15, 23, 42, 0.12), rgba(0, 0, 0, 0.45));
+    --ux-shadow-strong: light-dark(rgba(15, 23, 42, 0.24), rgba(0, 0, 0, 0.72));
+  }
+
+  accent-color: var(--accent);
+  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+    Oxygen, Ubuntu, Cantarell, sans-serif;
+}
+
+/* Explicit attribute fallback for older browsers without light-dark() */
+:root[data-theme="dark"] {
+  --bg-main: var(--bg-main-dark);
+  --bg-sidebar: var(--bg-sidebar-dark);
+  --bg-card: var(--bg-card-dark);
+  --bg-elevated: var(--bg-elevated-dark);
+  --bg-subtle: var(--bg-subtle-dark);
+  --bg-input: var(--bg-input-dark);
+  --border-subtle: var(--border-subtle-dark);
+  --border-strong: var(--border-strong-dark);
+  --text-primary: var(--text-primary-dark);
+  --text-secondary: var(--text-secondary-dark);
+  --text-muted: var(--text-muted-dark);
+  --accent-hover: var(--accent-hover-dark);
+  --contrast-bg: var(--contrast-bg-dark);
+  --contrast-text: var(--contrast-text-dark);
+  --grid-line: var(--grid-line-dark);
+  --scrollbar-thumb: var(--scrollbar-thumb-dark);
+  --scrollbar-track: var(--scrollbar-track-dark);
+  --ux-mint: #34d399;
+  --ux-glass: rgba(255, 255, 255, 0.07);
+  --ux-glass-line: rgba(255, 255, 255, 0.18);
+  --ux-shadow: rgba(0, 0, 0, 0.45);
+  --ux-shadow-strong: rgba(0, 0, 0, 0.72);
+}
+
+:root[data-theme="light"] {
+  --bg-main: var(--bg-main-light);
+  --bg-sidebar: var(--bg-sidebar-light);
+  --bg-card: var(--bg-card-light);
+  --bg-elevated: var(--bg-elevated-light);
+  --bg-subtle: var(--bg-subtle-light);
+  --bg-input: var(--bg-input-light);
+  --border-subtle: var(--border-subtle-light);
+  --border-strong: var(--border-strong-light);
+  --text-primary: var(--text-primary-light);
+  --text-secondary: var(--text-secondary-light);
+  --text-muted: var(--text-muted-light);
+  --accent-hover: var(--accent-hover-light);
+  --contrast-bg: var(--contrast-bg-light);
+  --contrast-text: var(--contrast-text-light);
+  --grid-line: var(--grid-line-light);
+  --scrollbar-thumb: var(--scrollbar-thumb-light);
+  --scrollbar-track: var(--scrollbar-track-light);
+  --ux-mint: #10b981;
+  --ux-glass: rgba(255, 255, 255, 0.6);
+  --ux-glass-line: rgba(255, 255, 255, 0.85);
+  --ux-shadow: rgba(15, 23, 42, 0.12);
+  --ux-shadow-strong: rgba(15, 23, 42, 0.24);
+}
+
+@supports not (scrollbar-color: auto) {
+  * {
+    scrollbar-width: auto;
+  }
+  *::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  *::-webkit-scrollbar-thumb {
+    background: var(--scrollbar-thumb);
+    border-radius: 5px;
+  }
+  *::-webkit-scrollbar-track {
+    background: var(--scrollbar-track);
+  }
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background-color: var(--bg-main);
+  color: var(--text-primary);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+code,
+pre,
+.font-mono {
+  font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco,
+    Consolas, 'Liberation Mono', monospace;
+}
+
+/* 9Router faint architectural background grid */
+.landing-grid {
+  background-color: var(--bg-main);
+  background-image:
+    linear-gradient(to right, var(--grid-line) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--grid-line) 1px, transparent 1px);
+  background-size: 32px 32px;
+}
+
+/* Component-specific always-dark surfaces (code blocks, live console log)
+   Per component-specific-light-dark-theme guidance: always provide explicit
+   background and re-specify inherited <color> properties so light-dark()
+   re-resolves inside the dark subtree. */
+.code-surface,
+.terminal-surface {
+  color-scheme: only dark;
+  background-color: #141414;
+  color: #e5e5e5;
+  accent-color: #e56a4a;
+  border-color: #2e2e2e;
+}
+
+/* Reusable semantic surfaces & buttons */
+.r-card {
+  background-color: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-primary);
+  border-radius: 0.75rem;
+}
+
+.r-card-subtle {
+  background-color: var(--bg-subtle);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-primary);
+  border-radius: 0.625rem;
+}
+
+.r-btn-primary {
+  background-color: var(--accent);
+  color: #ffffff;
+  font-weight: 600;
+  border-radius: 0.5rem;
+  transition: background-color 0.15s ease, opacity 0.15s ease;
+}
+
+.r-btn-primary:hover:not(:disabled) {
+  background-color: var(--accent-hover);
+}
+
+.r-btn-primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.r-btn-secondary {
+  background-color: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-primary);
+  font-weight: 500;
+  border-radius: 0.5rem;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.r-btn-secondary:hover:not(:disabled) {
+  background-color: var(--bg-elevated);
+  border-color: var(--border-strong);
+}
+
+.r-btn-secondary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.r-btn-contrast {
+  background-color: var(--contrast-bg);
+  color: var(--contrast-text);
+  font-weight: 600;
+  border-radius: 0.5rem;
+  transition: opacity 0.15s ease;
+}
+
+.r-btn-contrast:hover:not(:disabled) {
+  opacity: 0.9;
+}
+
+/* Native Modal Dialogs — prevent background scroll chaining */
+dialog:modal {
+  overscroll-behavior: contain;
+  margin: auto;
+  border: 1px solid var(--border-subtle);
+  background-color: var(--bg-card);
+  color: var(--text-primary);
+  border-radius: 0.875rem;
+  padding: 0;
+  max-width: min(94vw, 44rem);
+  max-height: min(90dvh, 52rem);
+  width: 100%;
+  box-shadow: 0 24px 60px rgb(0 0 0 / 0.5);
+}
+
+dialog[data-size="sm"]:modal {
+  max-width: min(92vw, 28rem);
+}
+
+dialog[data-size="lg"]:modal {
+  max-width: min(95vw, 54rem);
+}
+
+dialog::backdrop {
+  overflow: hidden;
+  overscroll-behavior: contain;
+  background-color: rgb(10 10 10 / 0.65);
+  backdrop-filter: blur(3px);
+}
+
+/* Navigation Drawer Modal on small screens */
+dialog.nav-drawer:modal {
+  inset: 0;
+  margin: 0;
+  max-width: 17.5rem;
+  width: min(84vw, 17.5rem);
+  height: 100svh;
+  max-height: 100svh;
+  border-radius: 0;
+  border-top: 0;
+  border-bottom: 0;
+  border-left: 0;
+  border-right: 1px solid var(--border-subtle);
+  background-color: var(--bg-sidebar);
+  color: var(--text-primary);
+}
+
+/* Post-interaction form validation (:user-invalid + JS fallback) */
+.field-input {
+  background-color: var(--bg-input);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-primary);
+  border-radius: 0.5rem;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.field-input::placeholder {
+  color: var(--text-muted);
+}
+
+.field-input:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgb(229 106 74 / 0.25);
+}
+
+.field-input:is(:user-invalid, .user-invalid-fallback) {
+  border-color: #ef4444;
+  background-color: rgb(239 68 68 / 0.08);
+}
+
+.error-msg {
+  display: none;
+  color: #ef4444;
+  font-size: 0.8125rem;
+  margin-top: 0.35rem;
+}
+
+.field-input:is(:user-invalid, .user-invalid-fallback) + .error-msg,
+.field-group:has(.field-input:is(:user-invalid, .user-invalid-fallback)) > .error-msg {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+/* Responsive Data Table container queries + sticky headers */
+.responsive-table-wrapper {
+  overflow: auto;
+  max-inline-size: 100%;
+  container-type: inline-size;
+  border-radius: 0.75rem;
+  border: 1px solid var(--border-subtle);
+  background-color: var(--bg-card);
+}
+
+.responsive-table-wrapper:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.responsive-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  text-align: left;
+}
+
+.responsive-table thead {
+  position: sticky;
+  inset-block-start: 0;
+  z-index: 2;
+  background-color: var(--bg-subtle);
+}
+
+.responsive-table th {
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid var(--border-subtle);
+  white-space: nowrap;
+}
+
+.responsive-table td {
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid var(--border-subtle);
+  vertical-align: middle;
+}
+
+.responsive-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.responsive-table tbody tr:hover {
+  background-color: rgb(229 106 74 / 0.04);
+}
+
+@container (width < 680px) {
+  .responsive-table--stack,
+  .responsive-table--stack thead,
+  .responsive-table--stack tbody,
+  .responsive-table--stack tr,
+  .responsive-table--stack th,
+  .responsive-table--stack td {
+    display: block;
+  }
+
+  .responsive-table--stack thead {
+    display: none;
+  }
+
+  .responsive-table--stack tbody tr {
+    margin: 0.75rem;
+    border: 1px solid var(--border-subtle);
+    border-radius: 0.5rem;
+    background-color: var(--bg-subtle);
+    padding: 0.25rem 0;
+  }
+
+  .responsive-table--stack td {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.5rem 0.875rem;
+    border-bottom: 1px solid var(--border-subtle);
+    text-align: right;
+  }
+
+  .responsive-table--stack td:last-child {
+    border-bottom: none;
+  }
+
+  .responsive-table--stack td::before {
+    content: attr(data-label);
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    text-align: left;
+    flex-shrink: 0;
+  }
+}
+
+/* Single-line truncation keeping full text in DOM */
+.single-line-truncate {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Visually hidden accessible text */
+.visually-hidden:where(:not(:focus-within, :active)) {
+  position: absolute !important;
+  clip-path: inset(50%) !important;
+  overflow: hidden !important;
+  width: 1px !important;
+  height: 1px !important;
+  margin: -1px !important;
+  padding: 0 !important;
+  border: 0 !important;
+  white-space: nowrap !important;
+}
+
+/* Toast notifications region & top-layer transitions */
+.toast-stack {
+  position: fixed;
+  inset: auto 1rem 1rem auto;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  z-index: 60;
+  flex-direction: column;
+  gap: 0.5rem;
+  max-width: min(92vw, 24rem);
+  pointer-events: none;
+}
+
+.toast-stack:not([popover]) {
+  display: flex;
+}
+
+.toast-stack[popover]:is(:popover-open, .\:popover-open) {
+  display: flex;
+}
+
+.toast-card {
+  pointer-events: auto;
+  border-radius: 0.625rem;
+  border: 1px solid var(--border-strong);
+  background-color: var(--bg-card);
+  color: var(--text-primary);
+  box-shadow: 0 12px 32px rgb(0 0 0 / 0.35);
+  transition: opacity 0.18s ease, transform 0.18s ease;
+  transition-behavior: allow-discrete;
+}
+
+/* Lucian UX/UI Prompt base rules · MIT License (c) 2026 Seokwoooo */
+.ux,
+.ux *,
+.ux *::before,
+.ux *::after {
+  box-sizing: border-box;
+}
+
+.ux {
+  font-family: inherit;
+  color: var(--ux-ink);
+  -webkit-font-smoothing: antialiased;
+  -webkit-tap-highlight-color: transparent;
+  overflow-wrap: break-word;
+}
+
+:where(.ux) :is(button, input, textarea, select) {
+  font: inherit;
+  color: inherit;
+}
+
+:where(.ux) button {
+  cursor: pointer;
+}
+
+.ux :focus-visible {
+  outline: 2px solid var(--ux-accent);
+  outline-offset: 3px;
+}
+
+.ux [hidden] {
+  display: none !important;
+}
+
+/* Subtle GPU-composited route entry animation (opt-in under no-preference) */
+@keyframes page-enter-kf {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.page-enter {
+  @media (prefers-reduced-motion: no-preference) {
+    animation: page-enter-kf 180ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  }
+}
+
+/* Project-wide reduced-motion guard: clamp spatial/entry animations while keeping color feedback */
+@media (prefers-reduced-motion: reduce) {
+  .page-enter {
+    animation: none;
+  }
+
+  .toast-card,
+  .field-input {
+    transition: none;
+  }
+
+  .ux,
+  .ux *,
+  .ux *::before,
+  .ux *::after {
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+  }
+
+  .topology-router-core,
+  .topology-node-active,
+  .topology-router-icon,
+  .topology-router-label,
+  .topology-edge-kame,
+  .topology-edge-halo,
+  .topology-edge-plasma {
+    animation: none !important;
+  }
+}
+
+/* ==========================================================================
+   9Router Parity: Native <details> Sidebar Accordion (modern-web-guidance: accordion)
+   ========================================================================== */
+.sidebar-accordion > summary {
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: pointer;
+}
+
+.sidebar-accordion > summary::-webkit-details-marker {
+  display: none;
+}
+
+.sidebar-accordion > summary .accordion-chevron {
+  display: inline-flex;
+  transition: rotate 0.2s ease;
+  rotate: -90deg;
+}
+
+.sidebar-accordion[open] > summary .accordion-chevron {
+  rotate: 0deg;
+}
+
+.sidebar-accordion::details-content {
+  interpolate-size: allow-keywords;
+  overflow: clip;
+  contain: layout;
+}
+
+.sidebar-accordion:not([open])::details-content {
+  block-size: 0;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .sidebar-accordion::details-content {
+    transition: block-size, content-visibility, display;
+    transition-duration: 0.22s;
+    transition-timing-function: ease-in-out;
+    transition-behavior: allow-discrete;
+  }
+}
+
+/* ==========================================================================
+   9Router Parity: Semantic Breadcrumbs (modern-web-guidance: breadcrumbs)
+   ========================================================================== */
+.r-breadcrumb > ol {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.375rem;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.r-breadcrumb > ol > li {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  min-width: 0;
+}
+
+.r-breadcrumb > ol > li + li::before {
+  content: "/" / "";
+  color: var(--text-muted);
+  font-size: 0.875rem;
+  user-select: none;
+}
+
+.r-breadcrumb > ol > li > a {
+  position: relative;
+  text-decoration: none;
+  border-radius: 0.25rem;
+}
+
+.r-breadcrumb > ol > li > a:hover,
+.r-breadcrumb > ol > li > a:focus-visible {
+  text-decoration: underline;
+}
+
+.r-breadcrumb > ol > li > a:focus-visible {
+  z-index: 1;
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+@media (forced-colors: active) {
+  .r-breadcrumb > ol > li > a[aria-current="page"] {
+    text-decoration: underline;
+    border-bottom: 1px solid CanvasText;
+  }
+}
+
+/* ==========================================================================
+   9Router Parity: Header Action Popover Menu (modern-web-guidance: menu)
+   ========================================================================== */
+.header-menu-popover {
+  margin: 0;
+  padding: 0.25rem 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: 0.75rem;
+  background-color: var(--bg-card);
+  color: var(--text-primary);
+  box-shadow: 0 18px 40px rgb(0 0 0 / 0.28);
+  min-width: 14.5rem;
+}
+
+.header-menu-popover:is(:popover-open, .\:popover-open) {
+  display: block;
+}
+
+@supports (position-area: block-end) {
+  .header-menu-popover {
+    position-area: block-end span-inline-start;
+    position-try-fallbacks: flip-block, flip-inline, flip-block flip-inline;
+    inset: auto;
+    margin-block-start: 0.375rem;
+  }
+}
+
+@supports not (position-area: block-end) {
+  .header-menu-popover {
+    position: fixed;
+    inset: auto;
+    margin: 0;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .header-menu-popover {
+    opacity: 0;
+    translate: 0 -0.25rem;
+    transition: opacity, translate, display, overlay;
+    transition-duration: 0.14s;
+    transition-behavior: allow-discrete;
+  }
+
+  .header-menu-popover:is(:popover-open, .\:popover-open) {
+    opacity: 1;
+    translate: 0 0;
+    transition-duration: 0.1s;
+    @starting-style {
+      opacity: 0;
+      translate: 0 -0.25rem;
+    }
+  }
+}
+
+/* ==========================================================================
+   9Router Parity: Live Provider Topology Smooth Silk Beams & Soft Core Aura
+   ========================================================================== */
+@keyframes topology-router-breathe {
+  0%, 100% {
+    box-shadow:
+      0 0 0 1px color-mix(in srgb, var(--accent) 55%, transparent),
+      0 6px 24px -4px color-mix(in srgb, var(--accent) 34%, transparent),
+      0 0 36px -6px rgba(56, 189, 248, 0.22);
+  }
+  50% {
+    box-shadow:
+      0 0 0 1px color-mix(in srgb, var(--accent) 80%, transparent),
+      0 10px 32px -4px color-mix(in srgb, var(--accent) 48%, transparent),
+      0 0 48px -4px rgba(52, 211, 153, 0.3);
+  }
+}
+
+@keyframes topology-node-glow {
+  0%, 100% {
+    box-shadow:
+      0 0 0 1px color-mix(in srgb, var(--accent) 50%, transparent),
+      0 6px 20px -4px color-mix(in srgb, var(--accent) 26%, transparent);
+  }
+  50% {
+    box-shadow:
+      0 0 0 1px rgba(52, 211, 153, 0.65),
+      0 8px 26px -4px rgba(52, 211, 153, 0.34);
+  }
+}
+
+@keyframes topology-edge-flow {
+  from {
+    stroke-dashoffset: 120;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes topology-aura-breathe {
+  0%, 100% {
+    opacity: 0.2;
+  }
+  50% {
+    opacity: 0.36;
+  }
+}
+
+.topology-router-core {
+  animation: topology-router-breathe 2.4s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+.topology-node-active {
+  animation: topology-node-glow 2.4s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+.topology-edge-halo {
+  animation: topology-aura-breathe 2.2s ease-in-out infinite;
+}
+
+.topology-edge-kame {
+  stroke-dasharray: 28 92;
+  animation: topology-edge-flow 1.35s linear infinite;
+}
+
+.topology-edge-plasma {
+  stroke-dasharray: 46 74;
+  animation: topology-edge-flow 1.9s linear infinite;
+}

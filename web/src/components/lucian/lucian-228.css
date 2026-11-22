@@ -1,0 +1,44 @@
+/* Lucian UX/UI Prompt #228 · MIT License (c) 2026 Seokwoooo · https://lucianlabs.dev/uxui-prompt/#228 */
+.u228 {
+  position: relative;
+  --x: -500px;
+  --y: -500px;
+  --o: 0;
+}
+
+.u228-c {
+  position: relative;
+  border-radius: 13px;
+  padding: 1px;
+  background:
+    radial-gradient(
+      220px circle at var(--cx, -500px) var(--cy, -500px),
+      color-mix(in srgb, var(--ux-accent) calc(var(--o, 0) * 90%), transparent),
+      color-mix(in srgb, var(--ux-accent-2) calc(var(--o, 0) * 45%), transparent) 42%,
+      transparent 72%
+    ),
+    var(--ux-line);
+}
+
+.u228-in {
+  position: relative;
+  height: 100%;
+  border-radius: 12px;
+  background:
+    radial-gradient(
+      260px circle at var(--cx, -500px) var(--cy, -500px),
+      color-mix(in srgb, var(--ux-accent) calc(var(--o, 0) * 11%), transparent),
+      transparent 62%
+    ),
+    var(--ux-surface);
+  overflow: hidden;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .u228-c {
+    background: var(--ux-line);
+  }
+  .u228-in {
+    background: var(--ux-surface);
+  }
+}

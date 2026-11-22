@@ -1,0 +1,61 @@
+/* Lucian UX/UI Prompt #263 · MIT License (c) 2026 Seokwoooo · https://lucianlabs.dev/uxui-prompt/#263 */
+.u263-flow {
+  --g: linear-gradient(90deg, #e56a4a, #f59e0b, #fb7185, #ea580c, #e56a4a);
+  display: inline;
+  font-style: normal;
+  background: var(--g);
+  background-size: 300% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .u263-flow {
+    animation: u263-flow 5s linear infinite;
+  }
+}
+
+@keyframes u263-flow {
+  to {
+    background-position: -300% 0;
+  }
+}
+
+.u263-sh {
+  display: inline-block;
+  font-weight: 700;
+  color: var(--ux-ink-2);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .u263-sh {
+    background: linear-gradient(
+      90deg,
+      var(--ux-ink-3) 0 40%,
+      var(--ux-ink) 50%,
+      var(--ux-ink-3) 60% 100%
+    );
+    background-size: 250% 100%;
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    animation: u263-sh 1.5s linear infinite;
+  }
+}
+
+@keyframes u263-sh {
+  from {
+    background-position: 100% 0;
+  }
+  to {
+    background-position: -150% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .u263-flow,
+  .u263-sh {
+    animation: none;
+  }
+}

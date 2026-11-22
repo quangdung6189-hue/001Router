@@ -1,0 +1,202 @@
+/* Lucian UX/UI Prompt #008 · MIT License (c) 2026 Seokwoooo · https://lucianlabs.dev/uxui-prompt/#008 */
+.u008 {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  vertical-align: middle;
+}
+
+.u008-btn {
+  position: relative;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 1px solid var(--ux-line);
+  border-radius: 8px;
+  background: var(--ux-surface);
+  color: var(--ux-ink-2);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.25;
+  overflow: hidden;
+  transition:
+    background-color 0.35s var(--ux-ease),
+    border-color 0.35s var(--ux-ease),
+    color 0.35s var(--ux-ease),
+    transform 0.45s var(--ux-spring),
+    box-shadow 0.45s var(--ux-ease);
+}
+
+.u008-btn--sm {
+  height: 30px;
+  padding: 0 10px;
+}
+
+.u008-btn--xs {
+  height: 26px;
+  padding: 0 8px;
+}
+
+.u008-btn--icon.u008-btn--sm {
+  width: 30px;
+  padding: 0;
+}
+
+.u008-btn--icon.u008-btn--xs {
+  width: 26px;
+  padding: 0;
+}
+
+.u008-btn::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    100deg,
+    transparent 20%,
+    color-mix(in srgb, var(--ux-mint) 30%, transparent) 50%,
+    transparent 80%
+  );
+  transform: translateX(-110%);
+  pointer-events: none;
+}
+
+.u008.is-copied .u008-btn::after {
+  animation: u008-sweep 0.7s var(--ux-ease);
+}
+
+@keyframes u008-sweep {
+  to {
+    transform: translateX(110%);
+  }
+}
+
+.u008-btn:hover {
+  background: var(--ux-surface-2);
+  border-color: var(--ux-line-2);
+  color: var(--ux-ink);
+}
+
+.u008-btn:active {
+  transform: scale(0.88);
+}
+
+.u008-btn:focus-visible {
+  outline: 2px solid var(--ux-accent);
+  outline-offset: 2px;
+}
+
+.u008-ico {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  width: 14px;
+  height: 14px;
+  flex: none;
+}
+
+.u008-ico svg {
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.9;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transition:
+    opacity 0.25s var(--ux-ease),
+    transform 0.5s var(--ux-spring);
+}
+
+.u008-ok {
+  opacity: 0;
+  transform: scale(0.4) rotate(-30deg);
+}
+
+.u008-ok path {
+  stroke-width: 2.6;
+  stroke-dasharray: 22;
+  stroke-dashoffset: 22;
+  transition: stroke-dashoffset 0.4s var(--ux-ease) 0.1s;
+}
+
+.u008.is-copied .u008-btn {
+  background: var(--ux-mint);
+  border-color: var(--ux-mint);
+  color: var(--ux-accent-ink);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ux-mint) 18%, transparent);
+}
+
+.u008.is-copied .u008-cp {
+  opacity: 0;
+  transform: scale(0.4) rotate(30deg);
+}
+
+.u008.is-copied .u008-ok {
+  opacity: 1;
+  transform: none;
+}
+
+.u008.is-copied .u008-ok path {
+  stroke-dashoffset: 0;
+}
+
+.u008-label {
+  white-space: nowrap;
+}
+
+.u008-tip {
+  position: absolute;
+  right: 50%;
+  top: -36px;
+  padding: 5px 9px;
+  border-radius: 8px;
+  background: var(--ux-ink);
+  color: var(--ux-page);
+  font-size: 11.5px;
+  font-weight: 650;
+  line-height: 1.1;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transform: translate(50%, 6px) scale(0.8);
+  transform-origin: 50% 100%;
+  z-index: 20;
+  transition:
+    opacity 0.25s var(--ux-ease),
+    transform 0.5s var(--ux-spring);
+}
+
+.u008-tip::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: -4px;
+  width: 8px;
+  height: 8px;
+  margin-left: -4px;
+  background: inherit;
+  border-radius: 2px;
+  transform: rotate(45deg);
+}
+
+.u008.is-copied .u008-tip {
+  opacity: 1;
+  transform: translate(50%, 0) scale(1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .u008.is-copied .u008-btn::after {
+    animation: none;
+  }
+
+  .u008-btn,
+  .u008-ico svg,
+  .u008-ok path,
+  .u008-tip {
+    transition: none;
+  }
+}

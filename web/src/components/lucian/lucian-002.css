@@ -1,0 +1,224 @@
+/* Lucian UX/UI Prompt #002 · MIT License (c) 2026 Seokwoooo · https://lucianlabs.dev/uxui-prompt/#002 */
+.u002 {
+  --bg: var(--contrast-bg, #141414);
+  --fg: var(--contrast-text, #ffffff);
+  --blob: var(--ux-grad, linear-gradient(120deg, #e56a4a, #f59e0b 55%, #ea580c));
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  max-width: 100%;
+  padding: 6px;
+}
+
+.u002-mag {
+  transition: translate 0.9s var(--ux-spring);
+  max-width: 100%;
+}
+
+.u002-btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 14px;
+  height: 52px;
+  max-width: 100%;
+  padding: 0 7px 0 22px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--bg);
+  color: var(--fg);
+  text-decoration: none;
+  overflow: hidden;
+  isolation: isolate;
+  box-shadow:
+    0 18px 34px -20px color-mix(in srgb, var(--ux-accent) 45%, transparent),
+    0 0 0 1px color-mix(in srgb, var(--fg) 10%, transparent);
+  transition:
+    transform 0.6s var(--ux-spring),
+    box-shadow 0.6s var(--ux-ease);
+}
+
+.u002-btn--sm {
+  height: 44px;
+  gap: 10px;
+  padding: 0 6px 0 18px;
+}
+
+.u002-btn:hover {
+  box-shadow:
+    0 24px 44px -18px color-mix(in srgb, var(--ux-accent) 68%, transparent),
+    0 0 0 1px transparent;
+}
+
+.u002-btn:active {
+  transform: scale(0.96);
+}
+
+.u002-btn:focus-visible {
+  outline: 2px solid var(--ux-accent);
+  outline-offset: 4px;
+}
+
+.u002-fill {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background: var(--blob);
+  clip-path: circle(19px at calc(100% - 26px) 50%);
+  transition: clip-path 0.8s var(--ux-ease);
+}
+
+.u002-btn--sm .u002-fill {
+  clip-path: circle(16px at calc(100% - 22px) 50%);
+}
+
+.u002-btn:hover .u002-fill,
+.u002-btn:focus-visible .u002-fill {
+  clip-path: circle(160% at calc(100% - 26px) 50%);
+}
+
+.u002-txt {
+  position: relative;
+  overflow: hidden;
+  padding: 4px 0;
+  font-size: 14.5px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  white-space: nowrap;
+  transition:
+    translate 0.7s var(--ux-spring),
+    color 0.5s var(--ux-ease);
+}
+
+.u002-btn--sm .u002-txt {
+  font-size: 13px;
+}
+
+.u002-btn:hover .u002-txt,
+.u002-btn:focus-visible .u002-txt {
+  color: #ffffff;
+}
+
+.u002-txt span {
+  display: block;
+  transition:
+    transform 0.6s var(--ux-spring),
+    opacity 0.35s var(--ux-ease);
+}
+
+.u002-txt span + span {
+  position: absolute;
+  left: 0;
+  top: 4px;
+  transform: translateY(130%);
+  opacity: 0;
+}
+
+.u002[data-state="go"] .u002-txt span:first-child {
+  transform: translateY(-130%);
+  opacity: 0;
+}
+
+.u002[data-state="go"] .u002-txt span + span {
+  transform: none;
+  opacity: 1;
+}
+
+.u002-orb {
+  position: relative;
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  color: #ffffff;
+  overflow: hidden;
+  flex: none;
+  transition: translate 0.7s var(--ux-spring);
+}
+
+.u002-btn--sm .u002-orb {
+  width: 32px;
+  height: 32px;
+}
+
+.u002-orb svg {
+  position: absolute;
+  width: 17px;
+  height: 17px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.u002-orb svg:last-child {
+  transform: translateX(-46px);
+}
+
+.u002[data-state="go"] .u002-orb svg:first-child {
+  animation: u002-out 0.55s var(--ux-ease) forwards;
+}
+
+.u002[data-state="go"] .u002-orb svg:last-child {
+  animation: u002-in 0.6s var(--ux-spring) 0.28s forwards;
+}
+
+@keyframes u002-out {
+  to {
+    transform: translateX(46px);
+  }
+}
+
+@keyframes u002-in {
+  to {
+    transform: none;
+  }
+}
+
+.u002-glow {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 220px;
+  height: 76px;
+  margin: -38px 0 0 -110px;
+  border-radius: 50%;
+  background: var(--blob);
+  filter: blur(30px);
+  opacity: 0;
+  z-index: -1;
+  pointer-events: none;
+  transition: opacity 0.7s var(--ux-ease);
+}
+
+.u002:hover .u002-glow {
+  opacity: 0.42;
+}
+
+.u002-live {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .u002-mag,
+  .u002-btn,
+  .u002-fill,
+  .u002-txt,
+  .u002-txt span,
+  .u002-orb,
+  .u002-glow {
+    transition: none;
+  }
+
+  .u002[data-state="go"] .u002-orb svg:first-child,
+  .u002[data-state="go"] .u002-orb svg:last-child {
+    animation: none;
+  }
+}
