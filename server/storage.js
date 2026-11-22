@@ -27,7 +27,12 @@ async function createInitialData(port = DEFAULT_PORT) {
   const defaultKeyId = nanoid();
   const defaultKeyValue = `sk-001r-${nanoid(24)}`;
   const { keyHash, prefix, last4 } = deriveRouterKeyFields(defaultKeyValue);
-  const passwordHash = await bcrypt.hash("1234", 10);
+  const envPassword =
+    typeof process.env.ROUTER001_ADMIN_PASSWORD === "string"
+      ? process.env.ROUTER001_ADMIN_PASSWORD.trim()
+      : "";
+  const initialPassword = envPassword || "1234";
+  const passwordHash = await bcrypt.hash(initialPassword, 10);
 
   const initial = {
     version: 1,
