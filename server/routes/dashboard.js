@@ -83,13 +83,9 @@ import {
 } from "../oauthFlows.js";
 import {
   GEMINI_CLI_DEFAULT_REDIRECT,
-  GEMINI_CLI_LOAD_CODE_ASSIST_URL,
-  GEMINI_CLI_ONBOARD_USER_URL,
-  GEMINI_CLI_QUOTA_URL,
-  buildGeminiCliDiscoveryHeaders,
+  diagnoseGeminiCliConnection,
   exchangeGeminiCliOAuth,
   fetchGeminiCliQuota,
-  geminiCliClientMetadata,
   getGeminiCliAccessToken,
   loadGeminiCliProject,
   peekGeminiCliState,
@@ -2145,11 +2141,15 @@ export function createDashboardRouter(storage, liveEvents = null) {
     }
 
     const dispatcher = getProxyDispatcher(provider, storage);
+    const googleOpts = extractGoogleOAuthOptions(req);
+    const fetchOpts = googleOpts.fetchImpl ? { fetchImpl: googleOpts.fetchImpl } : {};
     const steps = [];
     let accessToken = "";
 
     try {
       const tokenRes = await getGeminiCliAccessToken(keyEntry.oauthCredentials, {
+        ...fetchOpts,
+        ...(googleOpts.tokenUrl ? { tokenUrlOverride: googleOpts.tokenUrl } : {}),
         ...(dispatcher ? { dispatcher } : {}),
         forceRefresh: body.forceRefresh === true
       });
@@ -2160,88 +2160,32 @@ export function createDashboardRouter(storage, liveEvents = null) {
         projectIdInCreds: tokenRes.projectId || ""
       });
     } catch (err) {
+      const message = sanitizeSecrets(err?.message || "Token refresh failed");
       return res.status(400).json({
-        error: sanitizeSecrets(err?.message || "Token refresh failed"),
-        steps: [{ step: "refreshToken", ok: false, error: err?.message || "" }]
+        error: message,
+        steps: [{ step: "refreshToken", ok: false, error: message }]
       });
     }
 
-    // 1. Raw loadCodeAssist — include the full JSON body so the exact shape is visible.
-    let loadData = null;
+    // loadCodeAssist -> onboardUser -> retrieveUserQuota, replaying the real sign-in flow and
+    // returning Google's raw answers (see diagnoseGeminiCliConnection for the fidelity rules).
+    const requestedTier =
+      typeof body.tierId === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(body.tierId.trim())
+        ? body.tierId.trim()
+        : "";
+    let diagnosis;
     try {
-      const loadRes = await upstreamFetch(GEMINI_CLI_LOAD_CODE_ASSIST_URL, {
-        method: "POST",
-        headers: buildGeminiCliDiscoveryHeaders(accessToken),
-        body: JSON.stringify({ metadata: geminiCliClientMetadata(), mode: 1 }),
-        ...(dispatcher ? { dispatcher } : {})
-      });
-      const text = await loadRes.text().catch(() => "");
-      try {
-        loadData = JSON.parse(text);
-      } catch {
-        loadData = { _raw: text.slice(0, 800) };
-      }
-      steps.push({
-        step: "loadCodeAssist",
-        ok: loadRes.ok,
-        status: loadRes.status,
-        response: loadData
+      diagnosis = await diagnoseGeminiCliConnection(accessToken, {
+        ...fetchOpts,
+        ...(dispatcher ? { dispatcher } : {}),
+        tierId: requestedTier,
+        forceOnboard: body.forceOnboard === true
       });
     } catch (err) {
-      steps.push({ step: "loadCodeAssist", ok: false, error: err?.message || "" });
-    }
-
-    // 2. Raw onboardUser — one attempt, full body, so a rejection reason is visible.
-    try {
-      const onboardRes = await upstreamFetch(GEMINI_CLI_ONBOARD_USER_URL, {
-        method: "POST",
-        headers: buildGeminiCliDiscoveryHeaders(accessToken),
-        body: JSON.stringify({
-          tierId: body.tierId || "legacy-tier",
-          metadata: geminiCliClientMetadata()
-        }),
-        ...(dispatcher ? { dispatcher } : {})
+      return res.status(Number(err?.status) || 502).json({
+        error: sanitizeSecrets(err?.message || "Gemini CLI diagnostics failed"),
+        steps
       });
-      const text = await onboardRes.text().catch(() => "");
-      let parsed = null;
-      try {
-        parsed = JSON.parse(text);
-      } catch {
-        parsed = { _raw: text.slice(0, 800) };
-      }
-      steps.push({
-        step: "onboardUser",
-        ok: onboardRes.ok,
-        status: onboardRes.status,
-        response: parsed
-      });
-    } catch (err) {
-      steps.push({ step: "onboardUser", ok: false, error: err?.message || "" });
-    }
-
-    // 3. Raw retrieveUserQuota — tells us whether the account has any entitlement at all.
-    try {
-      const quotaRes = await upstreamFetch(GEMINI_CLI_QUOTA_URL, {
-        method: "POST",
-        headers: buildGeminiCliDiscoveryHeaders(accessToken),
-        body: JSON.stringify({}),
-        ...(dispatcher ? { dispatcher } : {})
-      });
-      const text = await quotaRes.text().catch(() => "");
-      let parsed = null;
-      try {
-        parsed = JSON.parse(text);
-      } catch {
-        parsed = { _raw: text.slice(0, 800) };
-      }
-      steps.push({
-        step: "retrieveUserQuota",
-        ok: quotaRes.ok,
-        status: quotaRes.status,
-        response: parsed
-      });
-    } catch (err) {
-      steps.push({ step: "retrieveUserQuota", ok: false, error: err?.message || "" });
     }
 
     return res.json({
@@ -2249,7 +2193,9 @@ export function createDashboardRouter(storage, liveEvents = null) {
       email: keyEntry.oauthMeta?.email || "",
       savedProjectId: keyEntry.oauthMeta?.projectId || "",
       savedTier: keyEntry.oauthMeta?.tier || "",
-      steps
+      discoveredProjectId: diagnosis.projectId,
+      onboardTierId: diagnosis.tierId,
+      steps: [...steps, ...diagnosis.steps]
     });
   });
 

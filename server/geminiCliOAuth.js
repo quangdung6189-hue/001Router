@@ -381,7 +381,7 @@ export async function loadGeminiCliProject(accessToken, options = {}) {
  * @param {any} data
  * @returns {string}
  */
-function extractCloudCodeProjectId(data) {
+export function extractCloudCodeProjectId(data) {
   if (!data || typeof data !== "object") return "";
   const raw = data.cloudaicompanionProject ?? data.response?.cloudaicompanionProject;
   if (typeof raw === "string") return raw.trim();
@@ -395,7 +395,7 @@ function extractCloudCodeProjectId(data) {
  * @param {any} data
  * @returns {string}
  */
-function pickOnboardTierId(data) {
+export function pickOnboardTierId(data) {
   if (Array.isArray(data?.allowedTiers)) {
     for (const tier of data.allowedTiers) {
       if (tier && typeof tier === "object" && tier.isDefault === true) {
@@ -482,6 +482,151 @@ export async function onboardGeminiCliUser(accessToken, tierId = "legacy-tier", 
   }
 
   return "";
+}
+
+/**
+ * POST a JSON body to a Cloud Code RPC and return Google's answer verbatim (never throws).
+ * @param {typeof globalThis.fetch} fetchImpl
+ * @param {string} step
+ * @param {string} url
+ * @param {Record<string, string>} headers
+ * @param {any} body
+ * @param {string} token
+ * @param {any} [dispatcher]
+ * @returns {Promise<{ step: string, ok: boolean, status?: number, response?: any, error?: string }>}
+ */
+async function probeCloudCode(fetchImpl, step, url, headers, body, token, dispatcher) {
+  try {
+    const res = await fetchImpl(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+      ...(dispatcher ? { dispatcher } : {})
+    });
+    const text = redactSecrets(await res.text().catch(() => ""), [token]);
+    let response;
+    try {
+      response = JSON.parse(text);
+    } catch {
+      response = { _raw: text.slice(0, 800) };
+    }
+    return { step, ok: Boolean(res.ok), status: res.status, response };
+  } catch (err) {
+    return {
+      step,
+      ok: false,
+      error: redactSecrets(err?.message || "network error", [token])
+    };
+  }
+}
+
+/**
+ * Diagnostic replay of the project-discovery handshake that returns Google's raw answers.
+ *
+ * It mirrors the real flow on purpose, so a failure here is a failure the real sign-in hits too:
+ *  - `onboardUser` uses the default tier from `allowedTiers` (not a hardcoded one), is skipped when
+ *    `loadCodeAssist` already returned a project, and polls like `onboardGeminiCliUser`;
+ *  - `retrieveUserQuota` sends `{ project }` with the same headers as `fetchGeminiCliQuota`.
+ *
+ * @param {string} accessToken
+ * @param {{
+ *   fetchImpl?: typeof globalThis.fetch,
+ *   dispatcher?: any,
+ *   tierId?: string,
+ *   forceOnboard?: boolean,
+ *   retryDelayMs?: number,
+ *   maxAttempts?: number
+ * }} [options]
+ * @returns {Promise<{ projectId: string, tierId: string, steps: Array<Record<string, any>> }>}
+ */
+export async function diagnoseGeminiCliConnection(accessToken, options = {}) {
+  const {
+    fetchImpl = upstreamFetch,
+    dispatcher,
+    tierId = "",
+    forceOnboard = false,
+    retryDelayMs = 3000,
+    maxAttempts = 5
+  } = options;
+  const token = String(accessToken || "").trim();
+  if (!token) throw httpError(400, "Missing access token for Gemini CLI diagnostics");
+
+  const steps = [];
+  const discoveryHeaders = buildGeminiCliDiscoveryHeaders(token);
+
+  const loadStep = await probeCloudCode(
+    fetchImpl,
+    "loadCodeAssist",
+    GEMINI_CLI_LOAD_CODE_ASSIST_URL,
+    discoveryHeaders,
+    { metadata: geminiCliClientMetadata(), mode: 1 },
+    token,
+    dispatcher
+  );
+  steps.push(loadStep);
+
+  const loadData =
+    loadStep.response && typeof loadStep.response === "object" ? loadStep.response : null;
+  let projectId = extractCloudCodeProjectId(loadData);
+  const resolvedTierId = String(tierId || "").trim() || pickOnboardTierId(loadData);
+
+  if (projectId && !forceOnboard) {
+    steps.push({
+      step: "onboardUser",
+      skipped: true,
+      reason: "loadCodeAssist already returned a project, so the real flow does not onboard."
+    });
+  } else {
+    const attempts = [];
+    let last = null;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      last = await probeCloudCode(
+        fetchImpl,
+        "onboardUser",
+        GEMINI_CLI_ONBOARD_USER_URL,
+        discoveryHeaders,
+        { tierId: resolvedTierId, metadata: geminiCliClientMetadata() },
+        token,
+        dispatcher
+      );
+      const found = extractCloudCodeProjectId(last.response);
+      attempts.push({
+        attempt,
+        status: last.status ?? null,
+        done: typeof last.response?.done === "boolean" ? last.response.done : null,
+        hasProject: Boolean(found)
+      });
+      if (found) {
+        projectId = found;
+        break;
+      }
+      // A finished operation without a project, or a deterministic 4xx, will not change by waiting.
+      const permanent =
+        last.response?.done === true ||
+        (typeof last.status === "number" &&
+          last.status >= 400 &&
+          last.status < 500 &&
+          last.status !== 429);
+      if (permanent) break;
+      if (attempt < maxAttempts) {
+        await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+      }
+    }
+    steps.push({ ...last, tierId: resolvedTierId, attempts });
+  }
+
+  const quotaStep = await probeCloudCode(
+    fetchImpl,
+    "retrieveUserQuota",
+    GEMINI_CLI_QUOTA_URL,
+    buildGeminiCliHeaders(token),
+    projectId ? { project: projectId } : {},
+    token,
+    dispatcher
+  );
+  steps.push({ ...quotaStep, projectSent: projectId || "" });
+
+  return { projectId, tierId: resolvedTierId, steps };
 }
 
 /**
