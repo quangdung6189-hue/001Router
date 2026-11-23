@@ -50,6 +50,7 @@ import { CopyButton } from '../components/CopyButton';
 import { ProviderLogo } from '../components/ProviderLogo';
 import { ProviderCard } from '../components/providers/ProviderCard';
 import { GoogleMark } from '../components/providers/GoogleMark';
+import { GeminiCliSignIn } from '../components/providers/GeminiCliSignIn';
 import {
   getGoogleOAuthMeta,
   getGoogleTierDotClass,
@@ -1513,7 +1514,11 @@ export function ProvidersPage() {
   const connectedGoogleKeys = useMemo(() => {
     if (!form?.apiKeys) return [];
     return form.apiKeys
-      .filter((k) => !k.isNew && getKeyAuthKind(k) === 'google_oauth')
+      .filter((k) => {
+        if (k.isNew) return false;
+        const kind = getKeyAuthKind(k);
+        return kind === 'google_oauth' || kind === 'gemini_cli';
+      })
       .map((k) => ({ key: k, meta: getGoogleOAuthMeta(k) }));
   }, [form]);
 
@@ -2167,6 +2172,26 @@ export function ProvidersPage() {
 
   const completeGoogleManualSignIn = async (pastedUrl) => {
     const res = await providersApi.exchangeGoogleOAuth({ pastedUrl });
+    await finishGoogleExchange(res);
+  };
+
+  // Gemini CLI (Cloud Code Assist) — public CLI OAuth client, loopback redirect + pasted callback.
+  const startGeminiCliSignIn = async (redirectUri) => {
+    const res = await providersApi.startGeminiCliOAuth({
+      callbackUrl: redirectUri,
+      selectAccount: true,
+    });
+    const url = res?.authUrl || '';
+    if (!url) throw new Error('Server did not return a Gemini CLI authorization URL.');
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+      throw new Error('Invalid OAuth redirect URL protocol.');
+    }
+    return url;
+  };
+
+  const completeGeminiCliSignIn = async (pastedUrl) => {
+    const res = await providersApi.exchangeGeminiCliOAuth({ pastedUrl });
     await finishGoogleExchange(res);
   };
 
@@ -4876,6 +4901,12 @@ export function ProvidersPage() {
                             </div>
                           </div>
                         ) : null}
+
+                        {/* Gemini CLI / Cloud Code Assist — primary path, no GCP project needed */}
+                        <GeminiCliSignIn
+                          onStart={startGeminiCliSignIn}
+                          onComplete={completeGeminiCliSignIn}
+                        />
 
                         {/* Primary Official Google OAuth 2.0 + PKCE Card */}
                         <div className="space-y-4 rounded-xl border border-blue-500/35 bg-blue-500/8 p-4">

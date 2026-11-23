@@ -157,6 +157,20 @@ export const providersApi = {
     apiFetch(`/api/providers/${encodeURIComponent(providerId)}/oauth/google/refresh-plan`, {
       method: 'POST',
     }),
+  geminiCliStatus: () => apiFetch('/api/providers/oauth/gemini-cli/status'),
+  startGeminiCliOAuth: (payload = {}) =>
+    apiFetch('/api/providers/oauth/gemini-cli/start', {
+      method: 'POST',
+      body: payload,
+    }),
+  exchangeGeminiCliOAuth: (codeOrPayload, state) =>
+    apiFetch('/api/providers/oauth/gemini-cli/exchange', {
+      method: 'POST',
+      body:
+        codeOrPayload && typeof codeOrPayload === 'object'
+          ? codeOrPayload
+          : { code: codeOrPayload, state },
+    }),
   startOAuth: (provider, payload) =>
     apiFetch(`/api/providers/oauth/${encodeURIComponent(provider)}/start`, {
       method: 'POST',

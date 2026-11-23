@@ -1,5 +1,16 @@
 import { nanoid } from "nanoid";
 import { PRESETS, buildUpstreamUrl, getPreset, isKeyOptionalProvider } from "./presets.js";
+import {
+  GEMINI_CLI_GENERATE_URL,
+  GEMINI_CLI_STREAM_URL,
+  buildGeminiCliHeaders
+} from "./geminiCliOAuth.js";
+import { buildCloudCodeRequest } from "./geminiCliTranslator.js";
+import {
+  cloudCodeChunkToOpenAI,
+  cloudCodeToOpenAIResponse,
+  unwrapCloudCodeResponse
+} from "./geminiCliTranslator.js";
 import { isRouterKeyModelAllowed, sanitizeSecrets } from "./auth.js";
 import {
   applyCavemanMode,
@@ -1207,10 +1218,35 @@ export class RouterService {
               );
               this.liveEvents?.markRequestStart(provider.slug);
               markedActive = true;
-              let upstreamRes = await upstreamFetch(upstreamUrl, {
+
+              // Gemini CLI / Cloud Code Assist keys speak a different wire format: the payload is
+              // wrapped in a Cloud Code envelope and the endpoint is `v1internal:generateContent`.
+              const isGeminiCliKey =
+                keyEntry?.authMethod === "gemini_cli" && !isEmbeddings;
+              let effectiveUrl = upstreamUrl;
+              let effectiveBody = JSON.stringify(upstreamPayload);
+              let effectiveHeaders = headers;
+              if (isGeminiCliKey) {
+                const cloudProject =
+                  keyEntry?.oauthMeta?.projectId ||
+                  keyEntry?.oauthCredentials?.projectId ||
+                  "";
+                effectiveUrl = isStream ? GEMINI_CLI_STREAM_URL : GEMINI_CLI_GENERATE_URL;
+                effectiveBody = JSON.stringify(
+                  buildCloudCodeRequest(target.upstreamModel, savedBody, cloudProject)
+                );
+                effectiveHeaders = {
+                  ...buildGeminiCliHeaders(resolvedSecret, {
+                    model: target.upstreamModel
+                  }),
+                  accept: isStream ? "text/event-stream" : "application/json"
+                };
+              }
+
+              let upstreamRes = await upstreamFetch(effectiveUrl, {
                 method: "POST",
-                headers,
-                body: JSON.stringify(upstreamPayload),
+                headers: effectiveHeaders,
+                body: effectiveBody,
                 signal: controller.signal,
                 ...(dispatcher ? { dispatcher } : {})
               });
@@ -1361,6 +1397,17 @@ export class RouterService {
                     upstreamJson?.usage?.prompt_tokens_details?.cached_tokens ??
                     upstreamJson?.usage?.cached_tokens ??
                     0;
+                }
+
+                // Cloud Code Assist wraps Gemini payloads in `{ response: {...} }` and reports
+                // usage as `usageMetadata`, so normalize both before any format mapping.
+                if (isGeminiCliKey) {
+                  const rawCloud = unwrapCloudCodeResponse(upstreamJson);
+                  const usageMeta = rawCloud?.usageMetadata || {};
+                  promptTokens = Number(usageMeta.promptTokenCount) || 0;
+                  completionTokens = Number(usageMeta.candidatesTokenCount) || 0;
+                  cachedTokens = Number(usageMeta.cachedContentTokenCount) || 0;
+                  upstreamJson = cloudCodeToOpenAIResponse(upstreamJson, target.upstreamModel);
                 }
 
                 let responseBody;
@@ -1558,6 +1605,7 @@ export class RouterService {
                 timeoutTimer: timer,
                 isClientAborted: () => clientAborted,
                 isTimedOut: () => timedOut,
+                cloudCode: isGeminiCliKey,
                 onFirstByteSent: () => {
                   hasSentBytesToClient = true;
                 }
@@ -1840,7 +1888,8 @@ export class RouterService {
     timeoutTimer,
     isClientAborted,
     isTimedOut,
-    onFirstByteSent
+    onFirstByteSent,
+    cloudCode = false
   }) {
     const reader = upstreamRes.body.getReader();
     const decoder = new TextDecoder();
@@ -1881,6 +1930,117 @@ export class RouterService {
         clearTimeout(timeoutTimer);
       }
     };
+
+    // Cloud Code Assist SSE: each frame is `{ response: { candidates: [...] } }`, so the frames
+    // must be translated into OpenAI chunks before they ever reach the client.
+    if (cloudCode) {
+      const chunkId = `chatcmpl-${nanoid(20)}`;
+      let doneSeen = false;
+      let roleSent = false;
+
+      const parser = createSSEParser(({ data }) => {
+        if (!data || data === "[DONE]") return;
+        let parsed;
+        try {
+          parsed = JSON.parse(data);
+        } catch {
+          return;
+        }
+        const raw = unwrapCloudCodeResponse(parsed);
+        const usageMeta = raw?.usageMetadata || {};
+        if (usageMeta.promptTokenCount) promptTokens = Number(usageMeta.promptTokenCount) || 0;
+        if (usageMeta.candidatesTokenCount) {
+          completionTokens = Number(usageMeta.candidatesTokenCount) || 0;
+        }
+
+        const chunk = cloudCodeChunkToOpenAI(parsed, requestedModel, chunkId);
+        if (!chunk) return;
+
+        if (!roleSent) {
+          roleSent = true;
+          chunk.choices[0].delta = { role: "assistant", ...chunk.choices[0].delta };
+        }
+
+        if (clientFormat === "openai") {
+          writeToClient(`data: ${JSON.stringify(chunk)}\n\n`);
+          return;
+        }
+        const tx = createStreamTransformer(clientFormat, "openai", requestedModel);
+        const out = tx.pushChunk(chunk);
+        if (out) writeToClient(out);
+        const tail = tx.finalize();
+        if (tail) writeToClient(tail);
+      });
+
+      try {
+        while (true) {
+          if (isClientAborted()) {
+            await reader.cancel().catch(() => {});
+            return {
+              failedBeforeFirstByte: !firstByteSent,
+              abortedByClient: true,
+              midStreamError: false,
+              promptTokens,
+              completionTokens
+            };
+          }
+
+          const { value, done } = await reader.read();
+          if (done) {
+            parser.flush();
+            break;
+          }
+          if (value && value.length > 0) {
+            clearTtfbTimer();
+            parser.feed(decoder.decode(value, { stream: true }));
+          }
+        }
+
+        if (!firstByteSent) {
+          return {
+            failedBeforeFirstByte: true,
+            timedOut: false,
+            error: "Upstream Cloud Code stream ended with no data",
+            promptTokens,
+            completionTokens
+          };
+        }
+
+        if (!doneSeen && clientFormat === "openai") {
+          writeToClient("data: [DONE]\n\n");
+        }
+
+        return {
+          failedBeforeFirstByte: false,
+          abortedByClient: false,
+          midStreamError: false,
+          promptTokens,
+          completionTokens
+        };
+      } catch (err) {
+        clearTtfbTimer();
+        await reader.cancel().catch(() => {});
+        if (isClientAborted()) {
+          return {
+            failedBeforeFirstByte: !firstByteSent,
+            abortedByClient: true,
+            midStreamError: false,
+            error: "Client aborted stream",
+            promptTokens,
+            completionTokens
+          };
+        }
+        return {
+          failedBeforeFirstByte: !firstByteSent,
+          abortedByClient: false,
+          midStreamError: firstByteSent,
+          timedOut: Boolean(isTimedOut?.()) || err?.name === "AbortError",
+          error: err?.message || "Upstream Cloud Code stream interrupted",
+          promptTokens,
+          completionTokens
+        };
+      }
+    }
 
     // Passthrough SSE (same format on client and upstream)
     if (clientFormat === upstreamFormat) {

@@ -31,6 +31,11 @@ export function getKeyAuthKind(keyEntry) {
   ) {
     return 'device_code';
   }
+  // Gemini CLI / Cloud Code Assist accounts are Google OAuth, but surfaced as their own kind so
+  // the UI can show the Cloud Code quota buckets instead of the AI Studio free/paid tier.
+  if (rawType === 'gemini_cli' || keyEntry.oauthMeta?.flow === 'gemini_cli') {
+    return 'gemini_cli';
+  }
   if (
     rawType === 'google_oauth' ||
     rawType === 'google-oauth' ||
@@ -109,26 +114,37 @@ export function getGoogleOAuthMeta(keyEntry, overrideMeta = null) {
   const quotaSummary =
     meta.quotaSummary && typeof meta.quotaSummary === 'object'
       ? meta.quotaSummary
-      : billingActive
+      : Array.isArray(meta.quotaBuckets) && meta.quotaBuckets.length > 0
         ? {
-            label: 'Pay-as-you-go (Tier 1+)',
-            rpmEstimate: '150–1,000+ RPM',
-            rpdEstimate: '10,000+ RPD',
-            note: 'Cloud Billing đã bật — hạn mức theo Google Cloud Quotas.',
+            label: 'Cloud Code Assist',
+            rpmEstimate: `${meta.quotaBuckets.length} model buckets`,
+            rpdEstimate: `${Math.round(
+              (meta.quotaBuckets.reduce((sum, b) => sum + (Number(b?.remainingFraction) || 0), 0) /
+                meta.quotaBuckets.length) *
+                100
+            )}% còn lại`,
+            note: 'Quota đọc trực tiếp từ cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota.',
           }
-        : isFreeTier
+        : billingActive
           ? {
-              label: 'Gemini API Free Tier',
-              rpmEstimate: '5–15 RPM',
-              rpdEstimate: '25–1,500 RPD',
-              note: 'Gói miễn phí (Flash ~15 RPM / 1,500 RPD; Pro ~2–5 RPM).',
+              label: 'Pay-as-you-go (Tier 1+)',
+              rpmEstimate: '150–1,000+ RPM',
+              rpdEstimate: '10,000+ RPD',
+              note: 'Cloud Billing đã bật — hạn mức theo Google Cloud Quotas.',
             }
-          : {
-              label: 'Google Account (Standard)',
-              rpmEstimate: 'Theo hạn mức GCP Project',
-              rpdEstimate: 'Xem Cloud Console Quotas',
-              note: 'Bật Cloud Billing API trên GCP Project để đọc trạng thái thanh toán.',
-            };
+          : isFreeTier
+            ? {
+                label: 'Gemini API Free Tier',
+                rpmEstimate: '5–15 RPM',
+                rpdEstimate: '25–1,500 RPD',
+                note: 'Gói miễn phí (Flash ~15 RPM / 1,500 RPD; Pro ~2–5 RPM).',
+              }
+            : {
+                label: 'Google Account (Standard)',
+                rpmEstimate: 'Theo hạn mức GCP Project',
+                rpdEstimate: 'Xem Cloud Console Quotas',
+                note: 'Bật Cloud Billing API trên GCP Project để đọc trạng thái thanh toán.',
+              };
 
   const checkedAt = meta.checkedAt || meta.refreshedAt || meta.updatedAt || null;
 

@@ -81,6 +81,13 @@ import {
   startDeviceCodeFlow,
   startGenericOAuthPkce
 } from "../oauthFlows.js";
+import {
+  GEMINI_CLI_DEFAULT_REDIRECT,
+  exchangeGeminiCliOAuth,
+  peekGeminiCliState,
+  restoreGeminiCliState,
+  startGeminiCliOAuth
+} from "../geminiCliOAuth.js";
 
 const VALID_COMBO_STRATEGIES = new Set(["fallback", "round-robin"]);
 const TEST_ALL_CONCURRENCY = 5;
@@ -1862,6 +1869,203 @@ export function createDashboardRouter(storage, liveEvents = null) {
         baseUrl: normalizeBaseUrl(
           geminiPreset?.baseUrl ||
             "https://generativelanguage.googleapis.com/v1beta/openai"
+        ),
+        formatType: geminiPreset?.formatType || "gemini-openai",
+        apiKeys: [newKey],
+        models: [...(geminiPreset?.models || geminiPreset?.defaultModels || [])],
+        proxyPoolId: null,
+        enabled: true,
+        createdAt: now,
+        updatedAt: now
+      };
+      data.providers.push(created);
+      return created;
+    });
+
+    return res.json({
+      ok: true,
+      keyId: savedKeyId,
+      oauthMeta,
+      provider: toPublicProvider(savedProvider)
+    });
+  });
+
+  // --- Gemini CLI (Cloud Code Assist) OAuth — the 9router-style flow, web-safe ---
+  router.get("/providers/oauth/gemini-cli/status", (_req, res) => {
+    return res.json({ ok: true, defaultRedirect: GEMINI_CLI_DEFAULT_REDIRECT });
+  });
+
+  router.post("/providers/oauth/gemini-cli/start", async (req, res) => {
+    const body = req.body || {};
+    try {
+      const started = startGeminiCliOAuth({
+        callbackUrl: body.callbackUrl || GEMINI_CLI_DEFAULT_REDIRECT,
+        selectAccount: body.selectAccount !== false,
+        ...(typeof body.clientId === "string" && body.clientId.trim()
+          ? { clientId: body.clientId.trim() }
+          : {}),
+        ...(typeof body.clientSecret === "string" && body.clientSecret.trim()
+          ? { clientSecret: body.clientSecret.trim() }
+          : {}),
+        requestHost: typeof req.headers?.host === "string" ? req.headers.host : ""
+      });
+
+      // Persist the PKCE record so a different serverless instance can finish the exchange.
+      try {
+        const rec = peekGeminiCliState(started.state);
+        if (rec) {
+          const enc = storage.encryptSecret(JSON.stringify(rec));
+          const nowMs = Date.now();
+          await storage.update((data) => {
+            const list = Array.isArray(data.pendingGeminiCliPkce) ? data.pendingGeminiCliPkce : [];
+            const pruned = list.filter(
+              (item) => item && item.expiresAt > nowMs && item.state !== started.state
+            );
+            pruned.push({ state: started.state, enc, expiresAt: rec.expiresAt });
+            data.pendingGeminiCliPkce = pruned.slice(-30);
+          });
+        }
+      } catch {
+        // Best-effort persistence; single-instance local dev works without it.
+      }
+
+      return res.json({ ok: true, ...started });
+    } catch (err) {
+      return res.status(Number(err?.status) || 400).json({
+        error: sanitizeSecrets(err?.message || "Failed to start Gemini CLI OAuth")
+      });
+    }
+  });
+
+  router.post("/providers/oauth/gemini-cli/exchange", async (req, res) => {
+    const body = req.body || {};
+    const existingGemini =
+      storage.getProviders().find((p) => p.preset === "gemini" || p.slug === "gemini") || null;
+    const dispatcher = existingGemini ? getProxyDispatcher(existingGemini, storage) : undefined;
+
+    let extracted;
+    try {
+      extracted = extractCodeAndState(body);
+    } catch (err) {
+      return res.status(Number(err?.status) || 400).json({
+        error: sanitizeSecrets(err?.message || "Invalid Gemini CLI callback URL")
+      });
+    }
+
+    // Restore a PKCE record persisted by another instance, then consume it (replay guard).
+    if (extracted.state) {
+      const targetState = extracted.state;
+      const inMemory = Boolean(peekGeminiCliState(targetState));
+      let restoredEnc = "";
+      const hasPersisted =
+        Array.isArray(storage.data?.pendingGeminiCliPkce) &&
+        storage.data.pendingGeminiCliPkce.some((item) => item && item.state === targetState);
+      if (hasPersisted) {
+        await storage.update((data) => {
+          const list = Array.isArray(data.pendingGeminiCliPkce) ? data.pendingGeminiCliPkce : [];
+          const idx = list.findIndex((item) => item && item.state === targetState);
+          if (idx >= 0) {
+            restoredEnc = list[idx].enc || "";
+            list.splice(idx, 1);
+            data.pendingGeminiCliPkce = list;
+          }
+        });
+      }
+      if (!inMemory && restoredEnc) {
+        try {
+          restoreGeminiCliState(targetState, JSON.parse(storage.decryptSecret(restoredEnc)));
+        } catch {
+          // Ignore malformed encrypted state
+        }
+      }
+    }
+
+    let exchanged;
+    try {
+      exchanged = await exchangeGeminiCliOAuth({
+        code: extracted.code,
+        state: extracted.state,
+        pastedUrl: body.pastedUrl,
+        callbackUrl: body.callbackUrl,
+        ...(dispatcher ? { dispatcher } : {})
+      });
+    } catch (err) {
+      return res.status(Number(err?.status) || 400).json({
+        error: sanitizeSecrets(err?.message || "Gemini CLI OAuth exchange failed")
+      });
+    }
+
+    const now = new Date().toISOString();
+    const oauthMeta = { ...exchanged.oauthMeta };
+    const oauthCredentialsStr = JSON.stringify(exchanged.oauthCredentials);
+    const label =
+      (typeof body.label === "string" && body.label.trim()) ||
+      oauthMeta.email ||
+      "Gemini CLI";
+
+    let savedKeyId = "";
+    const savedProvider = await storage.update((data) => {
+      const target = data.providers.find((p) => p.preset === "gemini" || p.slug === "gemini");
+      if (target) {
+        if (!Array.isArray(target.apiKeys)) target.apiKeys = [];
+        const existingKey = target.apiKeys.find(
+          (k) =>
+            k.authMethod === "gemini_cli" &&
+            oauthMeta.email &&
+            k.oauthMeta?.email === oauthMeta.email
+        );
+        if (existingKey) {
+          existingKey.label = label;
+          existingKey.key = "";
+          existingKey.authMethod = "gemini_cli";
+          existingKey.oauthCredentials = oauthCredentialsStr;
+          existingKey.oauthMeta = oauthMeta;
+          existingKey.enabled = true;
+          existingKey.cooldownUntil = null;
+          delete existingKey.lastError;
+          savedKeyId = existingKey.id;
+        } else {
+          const newKey = {
+            id: nanoid(),
+            label,
+            key: "",
+            authMethod: "gemini_cli",
+            oauthCredentials: oauthCredentialsStr,
+            oauthMeta,
+            enabled: true,
+            cooldownUntil: null
+          };
+          target.apiKeys.push(newKey);
+          savedKeyId = newKey.id;
+        }
+        target.updatedAt = now;
+        return target;
+      }
+
+      const geminiPreset = getPreset("gemini");
+      let slug = "gemini";
+      let suffix = 2;
+      while (data.providers.some((p) => p.slug === slug)) slug = `gemini-${suffix++}`;
+
+      const newKey = {
+        id: nanoid(),
+        label,
+        key: "",
+        authMethod: "gemini_cli",
+        oauthCredentials: oauthCredentialsStr,
+        oauthMeta,
+        enabled: true,
+        cooldownUntil: null
+      };
+      savedKeyId = newKey.id;
+
+      const created = {
+        id: nanoid(),
+        slug,
+        preset: "gemini",
+        name: geminiPreset?.name || "Google Gemini",
+        baseUrl: normalizeBaseUrl(
+          geminiPreset?.baseUrl || "https://generativelanguage.googleapis.com/v1beta/openai"
         ),
         formatType: geminiPreset?.formatType || "gemini-openai",
         apiKeys: [newKey],

@@ -1,6 +1,7 @@
 import { upstreamFetch } from "./proxy.js";
 import crypto from "node:crypto";
 import { getGoogleOAuthAccessToken } from "./googleOAuth.js";
+import { getGeminiCliAccessToken } from "./geminiCliOAuth.js";
 import { getGenericOAuthAccessToken } from "./oauthFlows.js";
 import {
   classifyHostForSSRF,
@@ -423,6 +424,17 @@ export async function resolveAuthContextForKey(keyEntry, options = {}) {
       secret: accessToken,
       extraHeaders: projectId ? { "x-goog-user-project": projectId } : {}
     };
+  }
+  // Gemini CLI / Cloud Code Assist credentials — Bearer only, project rides in the body envelope.
+  if (keyEntry.authMethod === "gemini_cli" && keyEntry.oauthCredentials) {
+    const { accessToken } = await getGeminiCliAccessToken(keyEntry.oauthCredentials, {
+      fetchImpl: options.googleOAuthFetchImpl || options.fetchImpl,
+      tokenUrlOverride: options.googleOAuthTokenUrl || options.tokenUrlOverride,
+      dispatcher: options.dispatcher,
+      nowFn: options.nowFn,
+      forceRefresh: options.forceRefresh
+    });
+    return { secret: accessToken, extraHeaders: {} };
   }
   if (keyEntry.authMethod === "oauth2" && keyEntry.oauthCredentials) {
     const { accessToken } = await getGenericOAuthAccessToken(keyEntry.oauthCredentials, {
