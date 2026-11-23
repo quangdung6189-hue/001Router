@@ -301,7 +301,100 @@ describe("Gemini CLI wire translation", () => {
     );
   });
 
-  it("12. generateContent endpoint constant points at Cloud Code Assist", () => {
+  it("13. tuple-style items and nested exclusiveMinimum are stripped (Gemini proto rejects both)", () => {
+    const body = {
+      messages: [{ role: "user", content: "hi" }],
+      tools: [
+        {
+          type: "function",
+          function: {
+            name: "write",
+            description: "Write a file",
+            parameters: {
+              $schema: "http://json-schema.org/draft-07/schema#",
+              type: "object",
+              properties: {
+                // The exact shape that failed live: tuple items whose members carry exclusiveMinimum
+                entries: {
+                  type: "array",
+                  items: [
+                    { type: "string", minLength: 1 },
+                    {
+                      type: "object",
+                      properties: {
+                        value: {
+                          type: "array",
+                          items: [
+                            { type: "number", exclusiveMinimum: 0 },
+                            { type: "number", exclusiveMaximum: 100 }
+                          ]
+                        }
+                      }
+                    }
+                  ]
+                },
+                nested: {
+                  type: "object",
+                  properties: {
+                    deep: { type: "integer", exclusiveMinimum: 1, exclusiveMaximum: 9 }
+                  },
+                  additionalProperties: false
+                }
+              }
+            }
+          }
+        }
+      ]
+    };
+
+    const env = buildCloudCodeRequest("gemini-2.5-pro", body, "p");
+    const schema = env.request.tools[0].functionDeclarations[0].parameters;
+
+    // No forbidden keyword may survive anywhere in the tree.
+    const serialized = JSON.stringify(schema);
+    for (const forbidden of [
+      "exclusiveMinimum",
+      "exclusiveMaximum",
+      "additionalProperties",
+      "$schema"
+    ]) {
+      assert.equal(serialized.includes(forbidden), false, `${forbidden} must be stripped`);
+    }
+
+    // Gemini only accepts `items` as an object, never a tuple array.
+    assert.equal(Array.isArray(schema.properties.entries.items), false);
+    assert.equal(typeof schema.properties.entries.items, "object");
+  });
+
+  it("14. null unions and const collapse into Gemini-safe equivalents", () => {
+    const body = {
+      messages: [{ role: "user", content: "hi" }],
+      tools: [
+        {
+          type: "function",
+          function: {
+            name: "pick",
+            parameters: {
+              type: "object",
+              properties: {
+                mode: { anyOf: [{ type: "string" }, { type: "null" }] },
+                fixed: { const: "always" }
+              }
+            }
+          }
+        }
+      ]
+    };
+
+    const env = buildCloudCodeRequest("gemini-2.5-pro", body, "p");
+    const props = env.request.tools[0].functionDeclarations[0].parameters.properties;
+    assert.equal(props.mode.type, "string");
+    assert.equal(props.mode.anyOf, undefined);
+    assert.deepEqual(props.fixed.enum, ["always"]);
+    assert.equal(props.fixed.const, undefined);
+  });
+
+  it("15. generateContent endpoint constant points at Cloud Code Assist", () => {
     assert.equal(
       GEMINI_CLI_GENERATE_URL,
       "https://cloudcode-pa.googleapis.com/v1internal:generateContent"

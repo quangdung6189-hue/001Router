@@ -56,35 +56,89 @@ function contentToParts(content) {
 
 /**
  * Strip JSON-Schema keywords Gemini's functionDeclarations reject.
+ *
+ * Gemini's proto schema is narrower than JSON Schema: it rejects `exclusiveMinimum` /
+ * `exclusiveMaximum` / `additionalProperties` / `$schema` / `$id` and has no `anyOf` branch for
+ * null unions. It also accepts `items` only as a single object (tuple-style `items: [...]` is
+ * rejected), so tuple arrays are collapsed into one merged item schema.
+ *
  * @param {any} schema
  * @returns {any}
  */
 function cleanSchema(schema) {
   if (!schema || typeof schema !== "object") return { type: "object", properties: {} };
-  const clone = JSON.parse(JSON.stringify(schema));
+
   const walk = (node) => {
-    if (!node || typeof node !== "object") return;
+    if (Array.isArray(node)) {
+      for (const child of node) walk(child);
+      return node;
+    }
+    if (!node || typeof node !== "object") return node;
+
     delete node.$schema;
     delete node.$id;
+    delete node.$defs;
+    delete node.definitions;
     delete node.additionalProperties;
     delete node.exclusiveMinimum;
     delete node.exclusiveMaximum;
+    delete node.patternProperties;
+    delete node.dependencies;
+    delete node.unevaluatedProperties;
+    delete node.propertyNames;
+    delete node.$ref;
+
     if (Array.isArray(node.required) && node.required.length === 0) delete node.required;
-    if (Array.isArray(node.anyOf)) {
-      node.anyOf = node.anyOf.filter((n) => n && n.type !== "null");
-      if (node.anyOf.length === 1) {
-        Object.assign(node, node.anyOf[0]);
-        delete node.anyOf;
+
+    // `const` has no Gemini equivalent — surface it as a single-value enum instead of dropping it.
+    if (node.const !== undefined) {
+      node.enum = [node.const];
+      delete node.const;
+    }
+
+    // Gemini cannot express null unions; keep the non-null branch only.
+    if (Array.isArray(node.anyOf) || Array.isArray(node.oneOf)) {
+      const key = Array.isArray(node.anyOf) ? "anyOf" : "oneOf";
+      const branches = node[key].filter((n) => n && n.type !== "null");
+      delete node.anyOf;
+      delete node.oneOf;
+      if (branches.length === 1) {
+        Object.assign(node, branches[0]);
+        walk(node);
+        return node;
+      }
+      if (branches.length > 1) node.anyOf = branches;
+    }
+
+    // Gemini rejects tuple arrays — collapse to the merged shape of the members.
+    if (Array.isArray(node.items)) {
+      const merged = { type: "object", properties: {} };
+      let mergedType = "";
+      for (const child of node.items) {
+        if (!child || typeof child !== "object") continue;
+        if (child.type && !mergedType) mergedType = child.type;
+        if (child.properties) Object.assign(merged.properties, child.properties);
+        if (Array.isArray(child.required)) merged.required = child.required;
+        if (child.items) merged.items = child.items;
+      }
+      node.items = mergedType && mergedType !== "object" ? { type: mergedType } : merged;
+    }
+
+    if (node.properties && typeof node.properties === "object") {
+      for (const key of Object.keys(node.properties)) {
+        node.properties[key] = walk(node.properties[key]);
       }
     }
-    if (node.properties && typeof node.properties === "object") {
-      for (const key of Object.keys(node.properties)) walk(node.properties[key]);
-    }
-    if (node.items) walk(node.items);
-    if (Array.isArray(node.anyOf)) node.anyOf.forEach(walk);
+    if (node.items) node.items = walk(node.items);
+    if (Array.isArray(node.anyOf)) node.anyOf = node.anyOf.map(walk);
+    if (Array.isArray(node.enum)) node.enum = node.enum.filter((v) => v !== null);
+
+    return node;
   };
-  walk(clone);
-  return clone;
+
+  const cleaned = walk(JSON.parse(JSON.stringify(schema)));
+  if (!cleaned || typeof cleaned !== "object") return { type: "object", properties: {} };
+  return cleaned;
 }
 
 /**
