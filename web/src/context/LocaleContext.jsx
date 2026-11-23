@@ -115,7 +115,7 @@ const DICT = {
     'login.submit': 'Đăng nhập',
     'login.submitting': 'Đang đăng nhập…',
     'login.requiredError': 'Vui lòng nhập mật khẩu dashboard.',
-    'login.footer': 'Chỉ sử dụng Official API Keys · Mã hóa AES-256-GCM tại đĩa',
+    'login.explore': 'Khám phá 001Router',
 
     // Overview / Endpoint
     'overview.createKey': 'Tạo Router Key',
@@ -501,7 +501,7 @@ const DICT = {
     'login.submit': 'Sign In',
     'login.submitting': 'Signing in…',
     'login.requiredError': 'Please enter your dashboard password.',
-    'login.footer': 'Official API keys only · AES-256-GCM encrypted at rest',
+    'login.explore': 'Explore 001Router',
 
     // Overview / Endpoint
     'overview.createKey': 'Create Router Key',

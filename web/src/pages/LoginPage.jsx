@@ -8,7 +8,6 @@ import {
   Globe,
   Lock,
   Moon,
-  ShieldCheck,
   Sun,
   Waypoints,
 } from 'lucide-react';
@@ -31,6 +30,9 @@ export function LoginPage() {
   const inputRef = useRef(null);
 
   const from = location.state?.from && location.state.from !== '/login' ? location.state.from : '/';
+  const isLocalHost =
+    typeof window !== 'undefined' &&
+    (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
 
   useEffect(() => {
     if (!loading && !authenticated) {
@@ -134,13 +136,15 @@ export function LoginPage() {
             >
               {t('login.passwordLabel')}
             </label>
-            <p id="password-hint" className="mt-1 text-xs text-[var(--text-muted)]">
-              {t('login.hint')}{' '}
-              <code className="rounded bg-[var(--bg-subtle)] px-1.5 py-0.5 text-[var(--text-primary)]">
-                1234
-              </code>
-              .
-            </p>
+            {isLocalHost ? (
+              <p id="password-hint" className="mt-1 text-xs text-[var(--text-muted)]">
+                {t('login.hint')}{' '}
+                <code className="rounded bg-[var(--bg-subtle)] px-1.5 py-0.5 text-[var(--text-primary)]">
+                  1234
+                </code>
+                .
+              </p>
+            ) : null}
             <div className="relative mt-2">
               <span className="pointer-events-none absolute inset-y-0 left-3 flex items-center text-[var(--text-muted)]">
                 <Lock className="h-4 w-4" aria-hidden="true" />
@@ -160,7 +164,7 @@ export function LoginPage() {
                 spellCheck={false}
                 enterKeyHint="go"
                 required
-                aria-describedby="password-hint"
+                aria-describedby={isLocalHost ? 'password-hint' : undefined}
                 placeholder={t('login.placeholder')}
                 className={`field-input w-full py-2.5 pr-11 pl-9 text-sm ${
                   touchedInvalid ? 'user-invalid-fallback' : ''
@@ -197,16 +201,12 @@ export function LoginPage() {
           </button>
         </form>
 
-        <div className="mt-6 flex flex-col gap-3 border-t border-[var(--border-subtle)] pt-4 text-xs text-[var(--text-muted)]">
-          <div className="flex items-center gap-2">
-            <ShieldCheck className="h-4 w-4 shrink-0 text-emerald-500" aria-hidden="true" />
-            <span>{t('login.footer')}</span>
-          </div>
+        <div className="mt-5 flex justify-center border-t border-[var(--border-subtle)] pt-4">
           <Link
             to="/landing"
-            className="inline-flex items-center justify-between rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-subtle)] px-3 py-2 font-medium text-[var(--text-primary)] transition-colors hover:border-[#E56A4A]/50 hover:text-[#E56A4A]"
+            className="inline-flex items-center gap-1.5 rounded-full border border-[var(--border-subtle)] bg-[var(--bg-subtle)]/70 px-3.5 py-1.5 text-xs font-medium text-[var(--text-secondary)] transition-colors hover:border-[#E56A4A]/50 hover:text-[#E56A4A]"
           >
-            <span>Explore 001Router Features, 47+ Providers &amp; 9 Service Kinds</span>
+            <span>{t('login.explore')}</span>
             <ArrowRight className="h-3.5 w-3.5 text-[#E56A4A]" aria-hidden="true" />
           </Link>
         </div>
