@@ -76,6 +76,27 @@ export function shouldCooldownKey(status) {
   return status === 429 || status === 401 || status === 402 || status === 403;
 }
 
+// 429 bodies that mean the whole ACCOUNT/KEY is unusable (billing, credits, inactive account),
+// as opposed to a per-model rate limit / capacity limit.
+const ACCOUNT_LEVEL_429_RE =
+  /quota|billing|insufficient|credit|balance|payment|account (is )?(not active|inactive|suspended|disabled)|top[- ]?up/i;
+
+/**
+ * Decide how wide an upstream failure's cooldown should be.
+ * - 401/402/403 and account-level 429 (billing, credits…): the whole key is unusable -> "key".
+ * - Any other 429 (RPM/TPM or per-model capacity): only this key+model pair -> "model",
+ *   so other models on the same key/account keep working.
+ * - Everything else: no cooldown.
+ * @param {number} status
+ * @param {string} [message]
+ * @returns {"key" | "model" | null}
+ */
+export function getCooldownScope(status, message = "") {
+  if (status === 401 || status === 402 || status === 403) return "key";
+  if (status === 429) return ACCOUNT_LEVEL_429_RE.test(String(message || "")) ? "key" : "model";
+  return null;
+}
+
 /**
  * Extract a human-readable error message from an upstream error payload.
  * @param {string} rawText
@@ -532,6 +553,8 @@ export class RouterService {
     this.liveEvents = options?.liveEvents || options?.appLocals?.liveEvents || null;
     /** @type {Map<string, number>} */
     this.rrCursors = new Map();
+    /** `${providerId}|${keyId}|${model}` -> cooldown-until epoch ms (per-model 429s, not persisted). */
+    this.modelCooldowns = new Map();
     /** @type {Map<string, { idx: number, count: number }>} */
     this.stickyCursors = new Map();
     /** @type {Map<string, number>} */
@@ -739,7 +762,23 @@ export class RouterService {
    * Local Ollama / LM Studio providers are permitted to operate without an API key.
    * @param {any} provider
    */
-  getOrderedActiveKeys(provider) {
+  _modelCooldownKey(providerId, keyId, model) {
+    return `${providerId}|${keyId}|${model}`;
+  }
+
+  isKeyModelCoolingDown(providerId, keyId, model, now = Date.now()) {
+    if (!model || !keyId) return false;
+    const k = this._modelCooldownKey(providerId, keyId, model);
+    const until = this.modelCooldowns.get(k);
+    if (!until) return false;
+    if (until <= now) {
+      this.modelCooldowns.delete(k);
+      return false;
+    }
+    return true;
+  }
+
+  getOrderedActiveKeys(provider, model = null) {
     const enabledKeys = (provider.apiKeys || []).filter((k) => k.enabled !== false);
     if (enabledKeys.length === 0) {
       if (isKeyOptionalProvider(provider)) {
@@ -779,7 +818,11 @@ export class RouterService {
     }
 
     const now = Date.now();
-    const active = rotated.filter((k) => !k.cooldownUntil || k.cooldownUntil <= now);
+    const active = rotated.filter(
+      (k) =>
+        (!k.cooldownUntil || k.cooldownUntil <= now) &&
+        !this.isKeyModelCoolingDown(provider.id, k.id, model, now)
+    );
     if (active.length === 0) {
       return { keys: [], allInCooldown: true };
     }
@@ -1074,10 +1117,10 @@ export class RouterService {
           continue;
         }
 
-        const keySelection = this.getOrderedActiveKeys(provider);
+        const keySelection = this.getOrderedActiveKeys(provider, target.upstreamModel);
         if (keySelection.keys.length === 0) {
           const msg = keySelection.allInCooldown
-            ? `All API keys for provider '${provider.slug}' are in cooldown`
+            ? `All API keys for provider '${provider.slug}' are in cooldown for model '${target.upstreamModel}' (rate-limited or account-level error; retry after ~60s or pick another model)`
             : `No active API keys configured for provider '${provider.slug}'`;
           attemptTrail.push({
             target: target.raw,
@@ -1199,10 +1242,11 @@ export class RouterService {
                 const errText = await upstreamRes.text().catch(() => "");
                 const secrets = this._allSecretKeys();
                 if (resolvedSecret) secrets.push(resolvedSecret);
-                const cleanMsg = sanitizeSecrets(
+                // Prefix with provenance: the text is the PROVIDER's own message, not 001Router's.
+                const cleanMsg = `upstream ${provider.slug} HTTP ${upstreamRes.status}: ${sanitizeSecrets(
                   extractUpstreamErrorMessage(errText, upstreamRes.status),
                   secrets
-                );
+                )}`;
                 const attemptLatency = Date.now() - attemptStart;
 
                 this.liveEvents?.markRequestEnd(provider.slug, {
@@ -1229,12 +1273,19 @@ export class RouterService {
                   error: cleanMsg
                 });
 
-                if (!keyEntry.isAnonymous && keyEntry.id && shouldCooldownKey(upstreamRes.status)) {
+                const cooldownScope = getCooldownScope(upstreamRes.status, cleanMsg);
+                if (!keyEntry.isAnonymous && keyEntry.id && cooldownScope === "key") {
                   await this.storage.markProviderKeyCooldown(
                     provider.id,
                     keyEntry.id,
                     Date.now() + COOLDOWN_MS,
-                    `HTTP ${upstreamRes.status}: ${cleanMsg.slice(0, 160)}`
+                    cleanMsg.slice(0, 200)
+                  );
+                } else if (!keyEntry.isAnonymous && keyEntry.id && cooldownScope === "model") {
+                  // Per-model rate/capacity limit: keep the key usable for every other model.
+                  this.modelCooldowns.set(
+                    this._modelCooldownKey(provider.id, keyEntry.id, target.upstreamModel),
+                    Date.now() + COOLDOWN_MS
                   );
                 }
 
@@ -1348,6 +1399,9 @@ export class RouterService {
 
                 if (!keyEntry.isAnonymous && keyEntry.id) {
                   await this.storage.clearProviderKeyCooldown(provider.id, keyEntry.id);
+                  this.modelCooldowns.delete(
+                    this._modelCooldownKey(provider.id, keyEntry.id, target.upstreamModel)
+                  );
                 }
 
                 const logId = nanoid();
@@ -1594,6 +1648,9 @@ export class RouterService {
                 });
                 if (!keyEntry.isAnonymous && keyEntry.id) {
                   await this.storage.clearProviderKeyCooldown(provider.id, keyEntry.id);
+                  this.modelCooldowns.delete(
+                    this._modelCooldownKey(provider.id, keyEntry.id, target.upstreamModel)
+                  );
                 }
               }
 
