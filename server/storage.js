@@ -22,6 +22,55 @@ const DEFAULT_DATA_DIR = process.env.VERCEL
   ? path.join(os.tmpdir(), "001router-data")
   : path.resolve(import.meta.dirname, "../data");
 
+function resolveDatabaseUrlFromEnv() {
+  const priorityKeys = [
+    "DATABASE_URL",
+    "POSTGRES_URL",
+    "STORAGE_POSTGRES_URL",
+    "SUPABASE_POSTGRES_URL",
+    "POSTGRES_PRISMA_URL",
+    "STORAGE_POSTGRES_PRISMA_URL",
+    "POSTGRES_URL_NON_POOLING",
+    "STORAGE_POSTGRES_URL_NON_POOLING"
+  ];
+  for (const key of priorityKeys) {
+    const val = process.env[key];
+    if (typeof val === "string" && val.trim()) {
+      return val.trim();
+    }
+  }
+  for (const [k, v] of Object.entries(process.env)) {
+    if (/_(POSTGRES_URL|DATABASE_URL)$/.test(k) && typeof v === "string" && v.trim()) {
+      return v.trim();
+    }
+  }
+  return "";
+}
+
+function buildPgPoolConfig(rawUrl) {
+  let cleanUrl = rawUrl;
+  let disableSsl = /sslmode=disable|localhost|127\.0\.0\.1/i.test(rawUrl);
+  try {
+    const parsed = new URL(rawUrl);
+    const mode = (parsed.searchParams.get("sslmode") || "").toLowerCase();
+    if (mode === "disable") {
+      disableSsl = true;
+    } else if (mode) {
+      // Strip sslmode so pg-connection-string doesn't force strict verify on Supabase Pooler certs
+      parsed.searchParams.delete("sslmode");
+      cleanUrl = parsed.toString();
+    }
+  } catch {
+    // Keep rawUrl if non-standard URI
+  }
+  return {
+    connectionString: cleanUrl,
+    max: 3,
+    idleTimeoutMillis: 10000,
+    ...(disableSsl ? {} : { ssl: { rejectUnauthorized: false } })
+  };
+}
+
 /**
  * Create a default initial database object on first boot.
  * @param {number} port
@@ -136,18 +185,9 @@ export class Storage {
       typeof options.databaseUrl === "string"
         ? options.databaseUrl.trim()
         : !options.dataDir
-          ? String(process.env.DATABASE_URL || process.env.POSTGRES_URL || "").trim()
+          ? resolveDatabaseUrlFromEnv()
           : "";
-    this.pgPool = this.databaseUrl
-      ? new Pool({
-          connectionString: this.databaseUrl,
-          max: 3,
-          idleTimeoutMillis: 10000,
-          ssl: /sslmode=disable|localhost|127\.0\.0\.1/i.test(this.databaseUrl)
-            ? undefined
-            : { rejectUnauthorized: false }
-        })
-      : null;
+    this.pgPool = this.databaseUrl ? new Pool(buildPgPoolConfig(this.databaseUrl)) : null;
     this.data = null;
     this.masterKey = null;
     this._isDefaultPassword = true;
