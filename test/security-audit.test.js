@@ -17,7 +17,8 @@ import {
   isLoopbackHost,
   parseHostHeaderName
 } from "../server/security/headers.js";
-import { getProxyDispatcher } from "../server/proxy.js";
+import { createGuardedAgent, getProxyDispatcher } from "../server/proxy.js";
+import { fetch as undiciFetch } from "undici";
 import { filterLs } from "../server/rtkFilters.js";
 import { compressText } from "../server/tokenSaver.js";
 
@@ -264,6 +265,10 @@ describe("Security audit regression suite (2026-11)", () => {
     // normal nested payloads are untouched
     const normal = { a: { b: [{ c: [1, 2, { d: "x" }] }] } };
     assert.deepEqual(stripPrototypePollution(normal), normal);
+    // non-JSON objects (e.g. dispatchers) survive untouched; polluting keys are still stripped
+    const inst = new (class Foo { dispatch() {} })();
+    assert.equal(stripPrototypePollution({ d: inst }).d, inst);
+    assert.deepEqual(JSON.parse(JSON.stringify(stripPrototypePollution(JSON.parse('{"__proto__":{"x":1},"a":1}')))), { a: 1 });
   });
 
   it("8. an unusable proxy pool fails CLOSED instead of silently connecting directly", async () => {
@@ -280,9 +285,9 @@ describe("Security audit regression suite (2026-11)", () => {
       () => fetch(`${mock.baseUrl}/v1/models`, { dispatcher: broken }),
       /fetch failed|Blocked/
     );
-    // no pool / disabled pool => direct (undefined) as before
-    assert.equal(getProxyDispatcher({ proxyPoolId: "nope" }, mk("http://1.2.3.4:8080")), undefined);
-    assert.equal(getProxyDispatcher({}, mk("http://1.2.3.4:8080")), undefined);
+    // no pool / unknown pool => direct, but through the SSRF-guarded agent (never undefined)
+    assert.ok(getProxyDispatcher({ proxyPoolId: "nope" }, mk("http://1.2.3.4:8080")));
+    assert.ok(getProxyDispatcher({}, mk("http://1.2.3.4:8080")));
   });
 
   it("9. encrypted export requires an 8+ character passphrase", async () => {
@@ -291,5 +296,79 @@ describe("Security audit regression suite (2026-11)", () => {
     const ok = await api("GET", "/api/export?secrets=encrypted&passphrase=correct-horse-battery");
     assert.equal(ok.status, 200);
     assert.equal(ok.json.encrypted, true);
+  });
+
+  it("10. guarded upstream agent blocks metadata/loopback by DNS name, IP literal and redirect", async () => {
+    const target = http.createServer((_q, r) => r.end("hello"));
+    await new Promise((r) => target.listen(0, "127.0.0.1", r));
+    const tport = target.address().port;
+    const redirector = http.createServer((_q, r) => {
+      r.writeHead(302, { location: "http://169.254.169.254/latest/meta-data/" });
+      r.end();
+    });
+    await new Promise((r) => redirector.listen(0, "127.0.0.1", r));
+    const rport = redirector.address().port;
+    const attempt = async (policy, url) => {
+      try {
+        const res = await undiciFetch(url, { dispatcher: createGuardedAgent(policy) });
+        return { ok: true, body: await res.text() };
+      } catch (err) {
+        return { ok: false, code: err.cause?.code || err.code };
+      }
+    };
+    try {
+      const open = { blockPrivate: false, blockLoopback: false };
+      const strict = { blockPrivate: true, blockLoopback: true };
+      assert.deepEqual(await attempt(open, `http://127.0.0.1:${tport}/`), { ok: true, body: "hello" });
+      assert.equal((await attempt(strict, `http://127.0.0.1:${tport}/`)).code, "ESSRFBLOCKED");
+      assert.equal((await attempt(strict, `http://localhost:${tport}/`)).code, "ESSRFBLOCKED"); // via DNS lookup
+      // metadata is blocked even with the most permissive policy: literals, mapped IPv6 and redirects
+      for (const url of ["http://169.254.169.254/", "http://[::ffff:169.254.169.254]/"]) {
+        assert.equal((await attempt(open, url)).code, "ESSRFBLOCKED", url);
+      }
+      // a redirect to metadata never gets followed (refused as cross-origin before any connection)
+      const viaRedirect = await attempt(open, `http://127.0.0.1:${rport}/`);
+      assert.equal(viaRedirect.ok, false);
+      assert.match(viaRedirect.code, /ESSRFREDIRECT|ESSRFBLOCKED/);
+    } finally {
+      target.close();
+      redirector.close();
+    }
+  });
+
+  it("11. upstream cross-origin redirects are refused (credentials never forwarded), same-origin still works", async () => {
+    const seen = [];
+    const other = http.createServer((q, r) => {
+      seen.push(q.headers["x-api-key"]);
+      r.end("OTHER");
+    });
+    await new Promise((r) => other.listen(0, "127.0.0.1", r));
+    const oport = other.address().port;
+    const main = http.createServer((q, r) => {
+      if (q.url === "/cross") {
+        r.writeHead(302, { location: `http://127.0.0.1:${oport}/` });
+        return r.end();
+      }
+      if (q.url === "/same") {
+        r.writeHead(302, { location: "/final" });
+        return r.end();
+      }
+      r.end(`ok ${q.url}`);
+    });
+    await new Promise((r) => main.listen(0, "127.0.0.1", r));
+    const mport = main.address().port;
+    const dispatcher = createGuardedAgent({ blockPrivate: false, blockLoopback: false });
+    try {
+      const same = await undiciFetch(`http://127.0.0.1:${mport}/same`, { dispatcher });
+      assert.equal(await same.text(), "ok /final");
+      await assert.rejects(
+        () => undiciFetch(`http://127.0.0.1:${mport}/cross`, { dispatcher, headers: { "x-api-key": "SECRET" } }),
+        (err) => (err.cause?.code || err.code) === "ESSRFREDIRECT"
+      );
+      assert.deepEqual(seen, [], "x-api-key must not reach the redirect target");
+    } finally {
+      main.close();
+      other.close();
+    }
   });
 });

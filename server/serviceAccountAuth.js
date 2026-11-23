@@ -1,3 +1,4 @@
+import { upstreamFetch } from "./proxy.js";
 import crypto from "node:crypto";
 import { getGoogleOAuthAccessToken } from "./googleOAuth.js";
 import { getGenericOAuthAccessToken } from "./oauthFlows.js";
@@ -224,7 +225,7 @@ export function buildVertexOpenAiBaseUrl(projectId, location = "us-central1") {
  */
 export async function getServiceAccountAccessToken(saJsonStringOrObj, options = {}) {
   const {
-    fetchImpl = globalThis.fetch,
+    fetchImpl = upstreamFetch,
     scope = DEFAULT_CLOUD_PLATFORM_SCOPE,
     tokenUriOverride,
     allowLoopbackTokenUri = false,

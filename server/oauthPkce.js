@@ -1,3 +1,4 @@
+import { upstreamFetch } from "./proxy.js";
 import crypto from "node:crypto";
 import { isLoopbackHost } from "./security/headers.js";
 import { classifyHostForSSRF, redactSecrets } from "./security/redact.js";
@@ -168,7 +169,7 @@ export async function exchangeOpenRouterPkce({
   code,
   state,
   exchangeUrl = DEFAULT_OPENROUTER_EXCHANGE_URL,
-  fetchImpl = globalThis.fetch,
+  fetchImpl = upstreamFetch,
   dispatcher,
   nowFn = Date.now
 } = {}) {

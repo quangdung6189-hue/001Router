@@ -13,7 +13,7 @@ import {
   normalizeBaseUrl
 } from "../presets.js";
 import { parseDirectTarget, resolveAuthContextForKey } from "../router.js";
-import { getProxyDispatcher } from "../proxy.js";
+import { getProxyDispatcher, upstreamFetch as fetch } from "../proxy.js";
 import { classifyHostForSSRF } from "../security/redact.js";
 
 const SEARCH_PRESETS = new Set([

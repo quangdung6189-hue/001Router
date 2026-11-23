@@ -166,6 +166,12 @@ function stripPrototypePollutionAt(input, depth) {
   if (Array.isArray(input)) {
     return input.map((item) => stripPrototypePollutionAt(item, depth + 1));
   }
+  // Only sanitise plain JSON-like objects. Class instances (undici dispatchers, Buffers, Dates ...) are
+  // never produced by a JSON parser; cloning them into `{}` would silently destroy them.
+  const proto = Object.getPrototypeOf(input);
+  if (proto !== Object.prototype && proto !== null) {
+    return input;
+  }
   const clean = {};
   for (const key of Object.keys(input)) {
     if (FORBIDDEN_PROTO_KEYS.has(key)) {
@@ -399,6 +405,41 @@ export function classifyHostForSSRF(rawHostname) {
 }
 
 /**
+ * Decide which address classes a provider's upstream may reach (cloud-metadata/link-local is ALWAYS blocked).
+ * - private LAN: blocked unless the provider is local/custom or `allowPrivateUpstreams === true`
+ * - loopback: blocked only when `allowPrivateUpstreams === false` explicitly (and provider is not local/custom)
+ * @param {{ preset?: string, category?: string, allowPrivateUpstreams?: boolean }} [options]
+ * @returns {{ blockPrivate: boolean, blockLoopback: boolean }}
+ */
+export function resolveUpstreamPolicy(options = {}) {
+  const preset = String(options.preset || "").toLowerCase();
+  const category = String(options.category || "").toLowerCase();
+  const isLocalOrCustom =
+    category === "local" ||
+    category === "custom" ||
+    LOCAL_OR_CUSTOM_PRESETS.has(preset) ||
+    preset.startsWith("custom");
+  return {
+    blockPrivate: !isLocalOrCustom && options.allowPrivateUpstreams !== true,
+    blockLoopback: !isLocalOrCustom && options.allowPrivateUpstreams === false
+  };
+}
+
+/**
+ * Check an already-resolved IP address (or hostname) against an upstream policy.
+ * @param {string} address
+ * @param {{ blockPrivate: boolean, blockLoopback: boolean }} policy
+ * @returns {string | null} a human readable reason when blocked, otherwise null
+ */
+export function checkAddressAgainstPolicy(address, policy) {
+  const c = classifyHostForSSRF(address);
+  if (c.isMetadataOrLinkLocal) return c.reason || "link-local or cloud metadata address";
+  if (c.isPrivateLan && policy.blockPrivate) return c.reason || "private network address";
+  if (c.isLoopback && policy.blockLoopback) return "loopback address";
+  return null;
+}
+
+/**
  * Validate a provider `baseUrl` against SSRF rules (Section 9.8 #9):
  * - Must be valid `http:` or `https:` URL
  * - Always block link-local / cloud metadata (`169.254.0.0/16`, `fd00:ec2::254`, `fe80::/10`, `0.0.0.0`, etc.)
@@ -434,30 +475,20 @@ export function validateProviderBaseUrl(urlStr, options = {}) {
     };
   }
 
-  const preset = String(options.preset || "").toLowerCase();
-  const category = String(options.category || "").toLowerCase();
-  const isLocalOrCustom =
-    category === "local" ||
-    category === "custom" ||
-    LOCAL_OR_CUSTOM_PRESETS.has(preset) ||
-    preset.startsWith("custom");
+  const policy = resolveUpstreamPolicy(options);
 
-  if (classification.isPrivateLan) {
-    if (!isLocalOrCustom && options.allowPrivateUpstreams !== true) {
-      return {
-        valid: false,
-        error: `SSRF guard: ${classification.reason || "private network upstream blocked"}`
-      };
-    }
+  if (classification.isPrivateLan && policy.blockPrivate) {
+    return {
+      valid: false,
+      error: `SSRF guard: ${classification.reason || "private network upstream blocked"}`
+    };
   }
 
-  if (classification.isLoopback) {
-    if (!isLocalOrCustom && options.allowPrivateUpstreams === false) {
-      return {
-        valid: false,
-        error: "SSRF guard: loopback upstream blocked by allowPrivateUpstreams=false"
-      };
-    }
+  if (classification.isLoopback && policy.blockLoopback) {
+    return {
+      valid: false,
+      error: "SSRF guard: loopback upstream blocked by allowPrivateUpstreams=false"
+    };
   }
 
   return { valid: true };

@@ -1,3 +1,4 @@
+import { upstreamFetch } from "./proxy.js";
 import crypto from "node:crypto";
 import { isLoopbackHost } from "./security/headers.js";
 import {
@@ -413,7 +414,7 @@ export async function inspectGoogleAccountAndPlan(accessToken, options = {}) {
 
   const {
     projectId = "",
-    fetchImpl = globalThis.fetch,
+    fetchImpl = upstreamFetch,
     userinfoUrl = DEFAULT_GOOGLE_USERINFO_URL,
     modelsUrl = DEFAULT_GOOGLE_MODELS_URL,
     billingBaseUrl = DEFAULT_GOOGLE_BILLING_BASE_URL,
@@ -599,7 +600,7 @@ export async function exchangeGoogleOAuthPkce({
   code,
   state,
   tokenUrl = DEFAULT_GOOGLE_TOKEN_URL,
-  fetchImpl = globalThis.fetch,
+  fetchImpl = upstreamFetch,
   userinfoUrl = DEFAULT_GOOGLE_USERINFO_URL,
   modelsUrl = DEFAULT_GOOGLE_MODELS_URL,
   billingBaseUrl = DEFAULT_GOOGLE_BILLING_BASE_URL,
@@ -774,7 +775,7 @@ export async function exchangeGoogleOAuthPkce({
  */
 export async function getGoogleOAuthAccessToken(oauthCredsStringOrObj, options = {}) {
   const {
-    fetchImpl = globalThis.fetch,
+    fetchImpl = upstreamFetch,
     tokenUrlOverride,
     allowLoopbackTokenUri = false,
     dispatcher,

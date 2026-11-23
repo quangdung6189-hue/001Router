@@ -1,3 +1,4 @@
+import { upstreamFetch } from "./proxy.js";
 import crypto from "node:crypto";
 import { isLoopbackHost } from "./security/headers.js";
 import {
@@ -346,7 +347,7 @@ export function startGenericOAuthPkce(provider, params = {}) {
 export async function exchangeGenericOAuthPkce(provider, params = {}) {
   const cleanParams = stripPrototypePollution(params);
   const nowFn = typeof cleanParams.nowFn === "function" ? cleanParams.nowFn : Date.now;
-  const fetchImpl = cleanParams.fetchImpl || globalThis.fetch;
+  const fetchImpl = cleanParams.fetchImpl || upstreamFetch;
   const dispatcher = cleanParams.dispatcher;
   const allowLoopback = Boolean(cleanParams.allowLoopback);
 
@@ -533,7 +534,7 @@ export async function exchangeGenericOAuthPkce(provider, params = {}) {
 export async function startDeviceCodeFlow(provider, params = {}) {
   const cleanParams = stripPrototypePollution(params);
   const normalizedProvider = String(provider || "").trim().toLowerCase();
-  const fetchImpl = cleanParams.fetchImpl || globalThis.fetch;
+  const fetchImpl = cleanParams.fetchImpl || upstreamFetch;
   const dispatcher = cleanParams.dispatcher;
   const nowFn = typeof cleanParams.nowFn === "function" ? cleanParams.nowFn : Date.now;
   const allowLoopback = Boolean(cleanParams.allowLoopback);
@@ -763,7 +764,7 @@ export async function startDeviceCodeFlow(provider, params = {}) {
 export async function pollDeviceCodeFlow(provider, params = {}) {
   const cleanParams = stripPrototypePollution(params);
   const normalizedProvider = String(provider || "").trim().toLowerCase();
-  const fetchImpl = cleanParams.fetchImpl || globalThis.fetch;
+  const fetchImpl = cleanParams.fetchImpl || upstreamFetch;
   const dispatcher = cleanParams.dispatcher;
   const nowFn = typeof cleanParams.nowFn === "function" ? cleanParams.nowFn : Date.now;
   const allowLoopback = Boolean(cleanParams.allowLoopback);
@@ -1024,7 +1025,7 @@ export async function pollDeviceCodeFlow(provider, params = {}) {
  */
 export async function getGenericOAuthAccessToken(oauthCredsStringOrObj, options = {}) {
   const {
-    fetchImpl = globalThis.fetch,
+    fetchImpl = upstreamFetch,
     tokenUrlOverride,
     allowLoopback = false,
     dispatcher,

@@ -52,7 +52,7 @@ import {
   validateProviderBaseUrl
 } from "../security/redact.js";
 import { getSecurityStatus, runSecurityScan } from "../security/scan.js";
-import { getProxyDispatcher } from "../proxy.js";
+import { getProxyDispatcher, upstreamFetch as fetch } from "../proxy.js";
 import { buildAlternateAuthHeaders, buildUpstreamHeaders } from "../router.js";
 import {
   hasBaseUrlTemplatePlaceholder,
