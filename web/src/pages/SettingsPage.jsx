@@ -229,10 +229,10 @@ export function SettingsPage() {
       setPasswordFeedback({ type: 'error', message: 'Enter your current password.' });
       return;
     }
-    if (newPassword.length < 4) {
+    if (newPassword.length < 8) {
       setPasswordFeedback({
         type: 'error',
-        message: 'New password must be at least 4 characters.',
+        message: 'New password must be at least 8 characters (and not a common password like 1234).',
       });
       return;
     }
@@ -271,8 +271,8 @@ export function SettingsPage() {
 
   const handleExportDownload = async (e) => {
     e?.preventDefault();
-    if (exportMode === 'encrypted' && exportPassphrase.length < 4) {
-      toast.error('Enter a passphrase (at least 4 characters) for encrypted export.');
+    if (exportMode === 'encrypted' && exportPassphrase.length < 8) {
+      toast.error('Enter a passphrase (at least 8 characters) for encrypted export.');
       return;
     }
     if (exportMode === 'plain' && !exportConfirmPwd) {
@@ -891,7 +891,7 @@ export function SettingsPage() {
                 name="newPassword"
                 type={showPasswords ? 'text' : 'password'}
                 autoComplete="new-password"
-                minLength={4}
+                minLength={8}
                 required
                 value={newPassword}
                 onChange={(e) => setNewPassword(e.target.value)}
@@ -911,7 +911,7 @@ export function SettingsPage() {
                 name="confirmPassword"
                 type={showPasswords ? 'text' : 'password'}
                 autoComplete="new-password"
-                minLength={4}
+                minLength={8}
                 required
                 value={confirmPassword}
                 onChange={(e) => setConfirmPassword(e.target.value)}
@@ -1020,7 +1020,7 @@ export function SettingsPage() {
                     id="export-passphrase"
                     type="password"
                     required
-                    minLength={4}
+                    minLength={8}
                     value={exportPassphrase}
                     onChange={(e) => setExportPassphrase(e.target.value)}
                     placeholder="Enter passphrase to encrypt bundle…"

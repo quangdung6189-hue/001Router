@@ -1,6 +1,10 @@
 import express from "express";
 import { nanoid } from "nanoid";
-import { createRouterAuthMiddleware, sanitizeSecrets } from "../auth.js";
+import {
+  createRouterAuthMiddleware,
+  isRouterKeyModelAllowed,
+  sanitizeSecrets
+} from "../auth.js";
 import {
   buildUpstreamUrl,
   getPreset,
@@ -49,6 +53,45 @@ function sendV1Error(res, status, message, type = "api_error") {
       type: mappedType
     }
   });
+}
+
+/**
+ * Enforce per-key access restrictions (`routerKey.access`) on media/search/fetch endpoints.
+ * Fail-closed: a restricted key may only use a target whose canonical id (`<providerSlug>/<model>`,
+ * `<providerSlug>/search`, `<providerSlug>/fetch`) or whose combo name is on its allow-list.
+ * Sends a 403 `permission_error` and returns false when denied.
+ * @param {import("express").Response} res
+ * @param {any} routerKey
+ * @param {Array<string | null | undefined>} candidates
+ * @returns {boolean} true when the request may proceed
+ */
+function enforceRouterKeyAccess(res, routerKey, candidates) {
+  if (!routerKey || routerKey.access?.restricted !== true) return true;
+  if (candidates.some((c) => typeof c === "string" && c && isRouterKeyModelAllowed(routerKey, c))) {
+    return true;
+  }
+  const label = candidates.find((c) => typeof c === "string" && c) || "";
+  if (!res.headersSent && !res.writableEnded) {
+    res.status(403).json({
+      error: {
+        message: `Router key '${routerKey.name}' is not permitted to access '${label}'`,
+        type: "permission_error"
+      }
+    });
+  }
+  return false;
+}
+
+/**
+ * Return `model` when it names an enabled combo (so a key may be allow-listed on the combo name).
+ * @param {import("../storage.js").Storage} storage
+ * @param {unknown} model
+ */
+function comboNameOrNull(storage, model) {
+  const m = typeof model === "string" ? model.trim() : "";
+  if (!m) return null;
+  const hit = storage.getCombos().some((c) => c.enabled !== false && (c.name === m || c.id === m));
+  return hit ? m : null;
 }
 
 /**
@@ -384,6 +427,14 @@ export function createMediaRouter(storage, routerService) {
     }
 
     const { provider, upstreamModel } = resolved;
+    if (
+      !enforceRouterKeyAccess(res, routerKey, [
+        `${provider.slug}/${upstreamModel}`,
+        comboNameOrNull(storage, body.model)
+      ])
+    ) {
+      return;
+    }
     const keySelection = routerService.getOrderedActiveKeys(provider);
     if (keySelection.keys.length === 0) {
       return sendV1Error(
@@ -488,6 +539,14 @@ export function createMediaRouter(storage, routerService) {
     }
 
     const { provider, upstreamModel } = resolved;
+    if (
+      !enforceRouterKeyAccess(res, routerKey, [
+        `${provider.slug}/${upstreamModel}`,
+        comboNameOrNull(storage, body.model)
+      ])
+    ) {
+      return;
+    }
     const keySelection = routerService.getOrderedActiveKeys(provider);
     if (keySelection.keys.length === 0) {
       return sendV1Error(
@@ -644,6 +703,14 @@ export function createMediaRouter(storage, routerService) {
     }
 
     const { provider, upstreamModel } = resolved;
+    if (
+      !enforceRouterKeyAccess(res, routerKey, [
+        `${provider.slug}/${upstreamModel}`,
+        comboNameOrNull(storage, extractedModel)
+      ])
+    ) {
+      return;
+    }
     const keySelection = routerService.getOrderedActiveKeys(provider);
     if (keySelection.keys.length === 0) {
       return sendV1Error(
@@ -787,6 +854,9 @@ export function createMediaRouter(storage, routerService) {
           ? `Search provider '${body.provider}' not found or disabled`
           : "No enabled search provider configured"
       );
+    }
+    if (!enforceRouterKeyAccess(res, routerKey, [`${provider.slug}/search`])) {
+      return;
     }
 
     const keySelection = routerService.getOrderedActiveKeys(provider);
@@ -1018,6 +1088,9 @@ export function createMediaRouter(storage, routerService) {
           : "No enabled web fetch provider configured"
       );
     }
+    if (!enforceRouterKeyAccess(res, routerKey, [`${provider.slug}/fetch`])) {
+      return;
+    }
 
     const keySelection = routerService.getOrderedActiveKeys(provider);
     if (keySelection.keys.length === 0) {
@@ -1221,6 +1294,14 @@ export function createMediaRouter(storage, routerService) {
     }
 
     const { provider, upstreamModel } = resolved;
+    if (
+      !enforceRouterKeyAccess(res, routerKey, [
+        `${provider.slug}/${upstreamModel}`,
+        comboNameOrNull(storage, body.model)
+      ])
+    ) {
+      return;
+    }
     const keySelection = routerService.getOrderedActiveKeys(provider);
     if (keySelection.keys.length === 0) {
       return sendV1Error(

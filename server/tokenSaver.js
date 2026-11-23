@@ -191,7 +191,12 @@ export function compressText(text, maxChars = DEFAULT_MAX_CHARS) {
 
   // Step 1: Normalize line endings and strip trailing spaces/tabs per line
   const rawLines = working.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
-  const trimmedLines = rawLines.map((line) => line.replace(/[ \t]+$/g, ""));
+  // Linear-time trailing trim (the regex form `/[ \t]+$/` is O(n^2) on a long run of blanks → ReDoS).
+  const trimmedLines = rawLines.map((line) => {
+    let end = line.length;
+    while (end > 0 && (line.charCodeAt(end - 1) === 32 || line.charCodeAt(end - 1) === 9)) end--;
+    return end === line.length ? line : line.slice(0, end);
+  });
 
   // Step 2: Collapse >2 consecutive blank lines down to 2 blank lines
   const collapsedLines = [];

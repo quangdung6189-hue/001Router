@@ -146,18 +146,32 @@ export function containsUnredactedSecret(text) {
  * @returns {T}
  */
 export function stripPrototypePollution(input) {
+  return stripPrototypePollutionAt(input, 0);
+}
+
+/** Maximum JSON nesting accepted from clients (legit chat/tool schemas stay far below this). */
+export const MAX_JSON_DEPTH = 200;
+
+function stripPrototypePollutionAt(input, depth) {
   if (input === null || typeof input !== "object") {
     return input;
   }
+  if (depth > MAX_JSON_DEPTH) {
+    // Reject pathological nesting with a client error instead of blowing the call stack (HTTP 500)
+    const err = new Error("JSON nesting too deep");
+    err.status = 400;
+    err.type = "entity.parse.failed";
+    throw err;
+  }
   if (Array.isArray(input)) {
-    return input.map((item) => stripPrototypePollution(item));
+    return input.map((item) => stripPrototypePollutionAt(item, depth + 1));
   }
   const clean = {};
   for (const key of Object.keys(input)) {
     if (FORBIDDEN_PROTO_KEYS.has(key)) {
       continue;
     }
-    clean[key] = stripPrototypePollution(input[key]);
+    clean[key] = stripPrototypePollutionAt(input[key], depth + 1);
   }
   return clean;
 }
@@ -213,7 +227,86 @@ function parseIPv4Octets(host) {
 }
 
 /**
+ * Parse an IPv6 literal (with optional embedded dotted-IPv4 tail) into 16 bytes, or null.
+ * @param {string} host
+ * @returns {number[] | null}
+ */
+function parseIPv6Bytes(host) {
+  const bare = String(host || "").split("%")[0];
+  if (!net.isIPv6(bare)) return null;
+  let h = bare;
+  const tail = h.match(/^(.*:)(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (tail) {
+    const o = tail.slice(2).map(Number);
+    h = `${tail[1]}${((o[0] << 8) | o[1]).toString(16)}:${((o[2] << 8) | o[3]).toString(16)}`;
+  }
+  let groups;
+  if (h.includes("::")) {
+    const [headStr, restStr] = h.split("::");
+    const left = headStr ? headStr.split(":") : [];
+    const right = restStr ? restStr.split(":") : [];
+    const fill = 8 - left.length - right.length;
+    if (fill < 0) return null;
+    groups = [...left, ...Array(fill).fill("0"), ...right];
+  } else {
+    groups = h.split(":");
+  }
+  if (groups.length !== 8) return null;
+  const bytes = [];
+  for (const g of groups) {
+    const v = Number.parseInt(g, 16);
+    if (!Number.isInteger(v) || v < 0 || v > 0xffff) return null;
+    bytes.push((v >> 8) & 255, v & 255);
+  }
+  return bytes;
+}
+
+/**
+ * Classify four IPv4 octets for SSRF purposes.
+ * @param {number[]} octets
+ * @param {string} label  original host text used in messages
+ */
+function classifyIPv4Octets(octets, label) {
+  const [a, b] = octets;
+  // 0.0.0.0/8, 169.254.0.0/16 (link-local & cloud metadata), 100.100.100.200 (Alibaba metadata)
+  if (
+    a === 0 ||
+    (a === 169 && b === 254) ||
+    (a === 100 && b === 100 && octets[2] === 100 && octets[3] === 200)
+  ) {
+    return {
+      isMetadataOrLinkLocal: true,
+      isPrivateLan: false,
+      isLoopback: false,
+      reason: `Blocked link-local or cloud metadata address '${label}'`
+    };
+  }
+  // 127.0.0.0/8 loopback
+  if (a === 127) {
+    return { isMetadataOrLinkLocal: false, isPrivateLan: false, isLoopback: true };
+  }
+  // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10 (CGNAT)
+  if (
+    a === 10 ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) ||
+    (a === 100 && b >= 64 && b <= 127)
+  ) {
+    return {
+      isMetadataOrLinkLocal: false,
+      isPrivateLan: true,
+      isLoopback: false,
+      reason: `Private network address '${label}' is not allowed for cloud provider`
+    };
+  }
+  return { isMetadataOrLinkLocal: false, isPrivateLan: false, isLoopback: false };
+}
+
+/**
  * Classify a hostname for SSRF protection.
+ * Handles IPv4 (dotted / integer / hex), IPv6 literals including IPv4-mapped (`::ffff:a.b.c.d`),
+ * IPv4-compatible, NAT64 (`64:ff9b::/96`) and 6to4 (`2002::/16`) forms, and trailing-dot FQDNs.
+ * NOTE: this is a static check; it cannot see where a DNS name resolves.
  * @param {string} rawHostname
  * @returns {{ isMetadataOrLinkLocal: boolean, isPrivateLan: boolean, isLoopback: boolean, reason?: string }}
  */
@@ -221,7 +314,8 @@ export function classifyHostForSSRF(rawHostname) {
   const host = String(rawHostname || "")
     .trim()
     .toLowerCase()
-    .replace(/^\[|\]$/g, "");
+    .replace(/^\[|\]$/g, "")
+    .replace(/\.+$/, "");
 
   if (!host) {
     return { isMetadataOrLinkLocal: true, isPrivateLan: false, isLoopback: false, reason: "Empty host" };
@@ -236,88 +330,72 @@ export function classifyHostForSSRF(rawHostname) {
     };
   }
 
-  // IPv6 checks
-  const ipv6Norm = host.replace(/^::ffff:/, "");
-  if (
-    host === "fd00:ec2::254" ||
-    host.startsWith("fd00:ec2:") ||
-    host.startsWith("fe80:") ||
-    host.startsWith("fe90:") ||
-    host.startsWith("fea0:") ||
-    host.startsWith("feb0:") ||
-    host === "::"
-  ) {
-    return {
-      isMetadataOrLinkLocal: true,
-      isPrivateLan: false,
-      isLoopback: false,
-      reason: `Blocked link-local or cloud metadata IPv6 address '${host}'`
-    };
+  if (host === "localhost" || host.endsWith(".localhost")) {
+    return { isMetadataOrLinkLocal: false, isPrivateLan: false, isLoopback: true };
   }
 
-  if (host === "::1" || host === "localhost" || host.endsWith(".localhost")) {
-    return {
-      isMetadataOrLinkLocal: false,
-      isPrivateLan: false,
-      isLoopback: true
-    };
-  }
-
-  if (host.startsWith("fc") || host.startsWith("fd")) {
-    if (net.isIPv6(host)) {
-      return {
-        isMetadataOrLinkLocal: false,
-        isPrivateLan: true,
-        isLoopback: false,
-        reason: `Private IPv6 ULA address '${host}'`
-      };
-    }
-  }
-
-  const octets = parseIPv4Octets(ipv6Norm);
-  if (octets) {
-    const [a, b] = octets;
-    // 0.0.0.0/8 or 169.254.0.0/16 (link-local & cloud metadata) or 100.100.100.200 (Alibaba metadata)
-    if (
-      a === 0 ||
-      (a === 169 && b === 254) ||
-      (a === 100 && b === 100 && octets[2] === 100 && octets[3] === 200)
-    ) {
+  const v6 = parseIPv6Bytes(host);
+  if (v6) {
+    const first12Zero = v6.slice(0, 12).every((x) => x === 0);
+    if (first12Zero && v6.slice(12, 15).every((x) => x === 0) && v6[15] === 0) {
       return {
         isMetadataOrLinkLocal: true,
         isPrivateLan: false,
         isLoopback: false,
-        reason: `Blocked link-local or cloud metadata address '${rawHostname}'`
+        reason: `Blocked unspecified IPv6 address '${rawHostname}'`
       };
     }
-    // 127.0.0.0/8 loopback
-    if (a === 127) {
+    if (first12Zero && v6.slice(12, 15).every((x) => x === 0) && v6[15] === 1) {
+      return { isMetadataOrLinkLocal: false, isPrivateLan: false, isLoopback: true };
+    }
+    // Embedded IPv4: ::ffff:a.b.c.d, ::a.b.c.d, 64:ff9b::a.b.c.d, 2002:aabb:ccdd::
+    const mapped =
+      v6.slice(0, 10).every((x) => x === 0) && v6[10] === 0xff && v6[11] === 0xff;
+    const nat64 =
+      v6[0] === 0x00 && v6[1] === 0x64 && v6[2] === 0xff && v6[3] === 0x9b &&
+      v6.slice(4, 12).every((x) => x === 0);
+    if (mapped || nat64 || first12Zero) {
+      return classifyIPv4Octets(v6.slice(12, 16), rawHostname);
+    }
+    if (v6[0] === 0x20 && v6[1] === 0x02) {
+      return classifyIPv4Octets(v6.slice(2, 6), rawHostname);
+    }
+    // fd00:ec2::/32 (AWS IMDS over IPv6)
+    if (v6[0] === 0xfd && v6[1] === 0x00 && v6[2] === 0x0e && v6[3] === 0xc2) {
       return {
-        isMetadataOrLinkLocal: false,
+        isMetadataOrLinkLocal: true,
         isPrivateLan: false,
-        isLoopback: true
+        isLoopback: false,
+        reason: `Blocked link-local or cloud metadata IPv6 address '${host}'`
       };
     }
-    // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
-    if (
-      a === 10 ||
-      (a === 172 && b >= 16 && b <= 31) ||
-      (a === 192 && b === 168)
-    ) {
+    // fe80::/10 link-local
+    if (v6[0] === 0xfe && (v6[1] & 0xc0) === 0x80) {
+      return {
+        isMetadataOrLinkLocal: true,
+        isPrivateLan: false,
+        isLoopback: false,
+        reason: `Blocked link-local or cloud metadata IPv6 address '${host}'`
+      };
+    }
+    // fec0::/10 site-local and fc00::/7 unique-local
+    if ((v6[0] === 0xfe && (v6[1] & 0xc0) === 0xc0) || (v6[0] & 0xfe) === 0xfc) {
       return {
         isMetadataOrLinkLocal: false,
         isPrivateLan: true,
         isLoopback: false,
-        reason: `Private network address '${rawHostname}' is not allowed for cloud provider`
+        reason: `Private IPv6 address '${host}'`
       };
     }
+    return { isMetadataOrLinkLocal: false, isPrivateLan: false, isLoopback: false };
   }
 
-  return {
-    isMetadataOrLinkLocal: false,
-    isPrivateLan: false,
-    isLoopback: false
-  };
+  const octets = parseIPv4Octets(host);
+  if (octets) {
+    return classifyIPv4Octets(octets, rawHostname);
+  }
+
+  return { isMetadataOrLinkLocal: false, isPrivateLan: false, isLoopback: false };
 }
 
 /**

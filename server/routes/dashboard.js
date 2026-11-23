@@ -84,6 +84,24 @@ const VALID_COMBO_STRATEGIES = new Set(["fallback", "round-robin"]);
 const TEST_ALL_CONCURRENCY = 5;
 const REDACTED_MARKER = "***redacted***";
 const MAX_IMPORT_BYTES = 5 * 1024 * 1024;
+const MIN_PASSWORD_LENGTH = 8;
+const MAX_PASSWORD_LENGTH = 72;
+const COMMON_PASSWORDS = new Set([
+  "1234", "12345", "123456", "1234567", "12345678", "123456789", "1234567890", "00000000",
+  "11111111", "password", "password1", "password123", "passw0rd", "qwerty", "qwerty123",
+  "qwertyui", "abc12345", "admin", "admin123", "administrator", "letmein", "welcome",
+  "iloveyou", "changeme", "001router", "router001", "12341234"
+]);
+
+/**
+ * Reject trivially guessable dashboard passwords (including the shipped default `1234`).
+ * @param {string} pw
+ */
+function isTooCommonPassword(pw) {
+  const lower = String(pw || "").toLowerCase();
+  if (COMMON_PASSWORDS.has(lower)) return true;
+  return /^(.)\1+$/.test(lower); // same character repeated
+}
 
 /**
  * Convert an internal router key entry into its public representation without plaintext key or hash.
@@ -3985,10 +4003,21 @@ export function createDashboardRouter(storage, liveEvents = null) {
     if (!valid) {
       return res.status(401).json({ error: "Current password is incorrect" });
     }
-    if (newPassword.length < 4) {
-      return res
-        .status(400)
-        .json({ error: "New password must be at least 4 characters" });
+    if (newPassword.length < MIN_PASSWORD_LENGTH) {
+      return res.status(400).json({
+        error: `New password must be at least ${MIN_PASSWORD_LENGTH} characters`
+      });
+    }
+    if (newPassword.length > MAX_PASSWORD_LENGTH) {
+      // bcrypt only hashes the first 72 bytes; refuse silently-truncated secrets
+      return res.status(400).json({
+        error: `New password must be at most ${MAX_PASSWORD_LENGTH} characters`
+      });
+    }
+    if (isTooCommonPassword(newPassword) || newPassword === currentPassword) {
+      return res.status(400).json({
+        error: "New password is too common or identical to the current password"
+      });
     }
 
     const nextHash = await bcrypt.hash(newPassword, 10);
@@ -4259,9 +4288,9 @@ export function createDashboardRouter(storage, liveEvents = null) {
         (typeof req.headers["x-export-passphrase"] === "string" &&
           req.headers["x-export-passphrase"]) ||
         "";
-      if (!passphrase || passphrase.length < 4) {
+      if (!passphrase || passphrase.length < 8) {
         return res.status(400).json({
-          error: "A passphrase (at least 4 characters) is required for encrypted export"
+          error: "A passphrase (at least 8 characters) is required for encrypted export"
         });
       }
     }

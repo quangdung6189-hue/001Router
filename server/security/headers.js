@@ -1,3 +1,5 @@
+import net from "node:net";
+
 export const CSP_HEADER_VALUE =
   "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
 
@@ -19,12 +21,67 @@ export function isLoopbackHost(host) {
     .trim()
     .toLowerCase()
     .replace(/^\[|\]$/g, "");
-  return (
-    h === "127.0.0.1" ||
-    h === "localhost" ||
-    h === "::1" ||
-    h.startsWith("127.")
+  // `127.` prefix is only loopback for a real IPv4 literal; `127.0.0.1.evil.com` is a public DNS name.
+  return h === "localhost" || h === "::1" || (net.isIPv4(h) && h.startsWith("127."));
+}
+
+/**
+ * Extract the lowercase hostname (no port, no IPv6 brackets) from a raw `Host` header value.
+ * @param {unknown} rawHost
+ * @returns {string}
+ */
+export function parseHostHeaderName(rawHost) {
+  const v = String(rawHost || "").trim().toLowerCase();
+  if (!v) return "";
+  if (v.startsWith("[")) {
+    const end = v.indexOf("]");
+    return end > 0 ? v.slice(1, end) : "";
+  }
+  const colon = v.lastIndexOf(":");
+  return (colon > -1 ? v.slice(0, colon) : v).replace(/\.+$/, "");
+}
+
+/**
+ * Parse a comma-separated list of extra allowed Host names (e.g. `ROUTER001_ALLOWED_HOSTS`).
+ * @param {string | undefined} raw
+ * @returns {string[]}
+ */
+export function parseAllowedHosts(raw) {
+  return String(raw || "")
+    .split(",")
+    .map((h) => parseHostHeaderName(h.trim()))
+    .filter(Boolean);
+}
+
+/**
+ * DNS-rebinding guard. When the server is bound to a loopback address, only accept requests whose
+ * `Host` header is itself a loopback name (`localhost`, `127.x.x.x`, `::1`) or is explicitly listed in
+ * `allowedHosts` / `ROUTER001_ALLOWED_HOSTS`. This stops a malicious web page that rebinds its DNS name to
+ * 127.0.0.1 from talking to the dashboard/API as if it were same-origin.
+ * Not enforced for non-loopback binds or managed platforms (Vercel/Render/Railway), where a public Host is expected.
+ * @param {{ bindHost?: string, allowedHosts?: string[] }} [options]
+ */
+export function createHostGuardMiddleware(options = {}) {
+  const managed = Boolean(
+    process.env.VERCEL || process.env.RENDER || process.env.RAILWAY_ENVIRONMENT
   );
+  const enforced = !managed && isLoopbackHost(options.bindHost || "127.0.0.1");
+  const extra = new Set(
+    [...(options.allowedHosts || []), ...parseAllowedHosts(process.env.ROUTER001_ALLOWED_HOSTS)].map(
+      (h) => parseHostHeaderName(h)
+    )
+  );
+  return (req, res, next) => {
+    if (!enforced) return next();
+    const name = parseHostHeaderName(req.headers?.host);
+    if (name && (isLoopbackHost(name) || extra.has(name))) return next();
+    const message =
+      "Host header not allowed. Access 001Router via localhost/127.0.0.1, or add this host to ROUTER001_ALLOWED_HOSTS.";
+    if (req.path === "/v1" || req.path.startsWith("/v1/") || req.path.startsWith("/v1beta/")) {
+      return res.status(403).json({ error: { message, type: "invalid_request_error" } });
+    }
+    return res.status(403).json({ error: message });
+  };
 }
 
 /**

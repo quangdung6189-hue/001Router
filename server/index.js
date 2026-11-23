@@ -16,6 +16,7 @@ import { startDailyCatalogScheduler } from "./catalog/updater.js";
 import {
   createCorsMiddleware,
   createCsrfMiddleware,
+  createHostGuardMiddleware,
   createSecurityHeadersMiddleware,
   isLoopbackHost
 } from "./security/headers.js";
@@ -163,6 +164,8 @@ export async function createApp(options = {}) {
 
   // Mandatory security headers & locked-down CORS middleware (Section 9.8 #4, #7)
   app.use(createSecurityHeadersMiddleware());
+  // DNS-rebinding guard: loopback-bound servers only answer to loopback / explicitly allowed Host names
+  app.use(createHostGuardMiddleware({ bindHost }));
   app.use(createCorsMiddleware());
 
   // Body size caps: /api 6 MB, /v1 25 MB (Section 9.8 #9)

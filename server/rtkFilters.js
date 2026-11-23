@@ -398,7 +398,9 @@ export function filterTree(input) {
 filterTree.filterName = "tree";
 
 // --- 8. ls ---
-const LS_DATE_RE = /\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\s+(\d{4}|\d{2}:\d{2})\s+/;
+// Leading whitespace is matched with a lookbehind (not a consuming `\s+`) so an unanchored scan over a long
+// whitespace-only line stays linear instead of O(n^2) (ReDoS).
+const LS_DATE_RE = /(?<=\s)(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\s+(\d{4}|\d{2}:\d{2})\s+/;
 function humanSize(bytes) {
   if (bytes >= 1_048_576) return `${(bytes / 1_048_576).toFixed(1)}M`;
   if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)}K`;

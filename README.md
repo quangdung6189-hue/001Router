@@ -46,7 +46,8 @@ Các lệnh hữu ích khác:
 ## Đăng nhập Dashboard lần đầu
 
 1. Truy cập: **`http://localhost:20128`**
-2. Mật khẩu mặc định lần đầu: **`1234`**
+2. Mật khẩu mặc định lần đầu: **`1234`** — hãy đổi ngay. Mật khẩu mới phải dài **8–72 ký tự** và không được là mật khẩu phổ biến (`1234`, `12345678`, `password`…).
+   - Khi server bind vào loopback (mặc định `127.0.0.1`), chỉ chấp nhận `Host` là `localhost` / `127.x.x.x` / `::1` (chống DNS-rebinding). Nếu truy cập qua reverse proxy / tên miền riêng, khai báo: `ROUTER001_ALLOWED_HOSTS=router.example.com,other.host` (phân cách bằng dấu phẩy).
 3. Sau khi đăng nhập, vào mục **Settings** để đổi mật khẩu mới. Mật khẩu được băm an toàn bằng `bcryptjs` và lưu trong `app/data/db.json`.
 4. Trên trang chủ (**Endpoint & Keys**), bạn sẽ thấy sẵn một **Router API Key** mặc định dạng `sk-001r-...` để sử dụng ngay (có thể tạo thêm hoặc thu hồi bất cứ lúc nào).
 

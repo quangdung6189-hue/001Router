@@ -192,22 +192,47 @@ export function getProxyDispatcher(provider, storage) {
   const pool = getProxyPoolById(storage, poolId);
   if (!pool || pool.enabled === false) return undefined;
 
+  // An enabled proxy pool is a hard requirement: if it cannot be used, FAIL CLOSED instead of
+  // silently sending the request directly (which would leak the server's real IP / bypass the proxy).
   const plainUrl = getPlainProxyUrl(pool, storage);
-  if (!plainUrl) return undefined;
+  if (!plainUrl) return getFailClosedDispatcher("Proxy pool URL is unavailable");
 
   const parsed = parseProxyUrl(plainUrl);
-  if (!parsed.ok) return undefined;
+  if (!parsed.ok) return getFailClosedDispatcher(parsed.error || "Invalid proxy pool URL");
 
-  let agent = dispatcherCache.get(plainUrl);
+  // undici's ProxyAgent understands `socks5:` but rejects `socks5h:`; both resolve DNS via the proxy.
+  const effectiveUrl = plainUrl.replace(/^socks5h:/i, "socks5:");
+
+  let agent = dispatcherCache.get(effectiveUrl);
   if (!agent) {
     try {
-      agent = new ProxyAgent(plainUrl);
-      dispatcherCache.set(plainUrl, agent);
+      agent = new ProxyAgent(effectiveUrl);
+      dispatcherCache.set(effectiveUrl, agent);
     } catch {
-      return undefined;
+      return getFailClosedDispatcher("Proxy pool could not be initialised");
     }
   }
   return agent;
+}
+
+/** @type {Agent | null} */
+let failClosedAgent = null;
+
+/**
+ * A dispatcher that refuses every connection. Used when a configured proxy is unusable so traffic
+ * never silently bypasses it.
+ * @param {string} reason
+ */
+function getFailClosedDispatcher(reason) {
+  if (!failClosedAgent) {
+    failClosedAgent = new Agent({
+      connect: (_opts, callback) => {
+        callback(new Error(`Blocked: ${failClosedAgent?.reason || reason}`), null);
+      }
+    });
+  }
+  failClosedAgent.reason = reason;
+  return failClosedAgent;
 }
 
 /**
