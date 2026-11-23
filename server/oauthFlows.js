@@ -176,35 +176,81 @@ export function validateOAuthCallbackUrl(callbackUrl, requestHost = "") {
   return parsed.toString();
 }
 
+/** Longest pasted callback text accepted (real callbacks are a few hundred bytes). */
+export const MAX_PASTED_CALLBACK_LENGTH = 4096;
+
+const OAUTH_ERROR_HINTS = {
+  access_denied: "Sign-in was cancelled or denied (access_denied). Start again and approve the consent screen.",
+  access_blocked:
+    "Google blocked this app (access_blocked). Add your account as a test user on the OAuth consent screen, or publish the app.",
+  invalid_scope: "Google rejected the requested scope (invalid_scope).",
+  redirect_uri_mismatch:
+    "Google rejected the redirect URI (redirect_uri_mismatch). Add the exact redirect URI shown in the dialog to your OAuth client.",
+  admin_policy_enforced: "Your Google Workspace admin policy blocks this sign-in (admin_policy_enforced)."
+};
+
 /**
- * Extract `code` and `state` from either direct values or a pasted full OAuth redirect URL.
- * @param {{ code?: string, state?: string, callbackUrl?: string, pastedUrl?: string }} input
+ * Extract the OAuth `code` and `state` from explicit fields and/or a pasted callback.
+ * Accepts the full callback URL (even for a loopback address that refused the connection), a URL whose
+ * parameters are in the `#fragment`, or just the bare query (`code=...&state=...` / `?code=...`).
+ * The pasted text is never echoed back in error messages (it contains the one-time authorization code).
+ * @param {{ code?: string, state?: string, pastedUrl?: string, callbackUrl?: string }} [input]
+ * @returns {{ code: string, state: string }}
  */
 export function extractCodeAndState(input = {}) {
   let code = typeof input.code === "string" ? input.code.trim() : "";
   let state = typeof input.state === "string" ? input.state.trim() : "";
-  const rawUrl =
-    typeof input.pastedUrl === "string" && input.pastedUrl.trim()
-      ? input.pastedUrl.trim()
-      : typeof input.callbackUrl === "string" && input.callbackUrl.includes("?")
-        ? input.callbackUrl.trim()
-        : "";
+  const hasPasted = typeof input.pastedUrl === "string" && input.pastedUrl.trim();
+  const rawUrl = hasPasted
+    ? input.pastedUrl.trim()
+    : typeof input.callbackUrl === "string" && /[?&](code|error)=/.test(input.callbackUrl)
+      ? input.callbackUrl.trim()
+      : "";
 
   if (rawUrl) {
+    if (rawUrl.length > MAX_PASTED_CALLBACK_LENGTH) {
+      throw createHttpError(400, "Pasted callback text is too long. Paste only the address from the browser bar.");
+    }
+    let params = null;
     try {
       const u = new URL(rawUrl);
-      const qCode = u.searchParams.get("code");
-      const qState = u.searchParams.get("state");
-      const qErr = u.searchParams.get("error_description") || u.searchParams.get("error");
-      if (qErr && !qCode) {
-        throw createHttpError(400, `OAuth provider returned error: ${qErr}`);
+      const fromQuery = u.searchParams;
+      params = fromQuery.has("code") || fromQuery.has("error")
+        ? fromQuery
+        : new URLSearchParams(u.hash.replace(/^#/, ""));
+    } catch {
+      // Not a URL: accept a bare query string such as "?code=...&state=..." or "code=...&state=..."
+      const candidate = rawUrl.replace(/^[?#]/, "");
+      if (/^[A-Za-z0-9_.~%+-]+=/.test(candidate)) {
+        params = new URLSearchParams(candidate);
       }
-      if (!code && qCode) code = qCode.trim();
-      if (!state && qState) state = qState.trim();
-    } catch (err) {
-      if (err?.status) throw err;
-      throw createHttpError(400, "Invalid pasted OAuth callback URL");
     }
+    if (!params) {
+      throw createHttpError(
+        400,
+        "Could not read the pasted callback. Paste the full address from the browser address bar (it contains ?code=...&state=...)."
+      );
+    }
+
+    const qCode = (params.get("code") || "").trim();
+    const qState = (params.get("state") || "").trim();
+    const qErr = (params.get("error") || "").trim();
+    if (qErr && !qCode) {
+      const known = OAUTH_ERROR_HINTS[qErr.toLowerCase()];
+      const desc = (params.get("error_description") || "").trim().slice(0, 200);
+      throw createHttpError(400, known || `OAuth provider returned an error: ${qErr}${desc ? ` (${desc})` : ""}`);
+    }
+    if (!qCode) {
+      throw createHttpError(
+        400,
+        "The pasted address has no authorization 'code'. Finish approving access first, then copy the full address from the browser bar."
+      );
+    }
+    if ((code && code !== qCode) || (state && qState && state !== qState)) {
+      throw createHttpError(400, "The pasted callback does not match the code/state that were provided.");
+    }
+    if (!code) code = qCode;
+    if (!state) state = qState;
   }
 
   return { code, state };

@@ -216,6 +216,235 @@ function GoogleMark({ className = 'h-4 w-4' }) {
   );
 }
 
+const DEFAULT_GOOGLE_MANUAL_REDIRECT = 'http://127.0.0.1:1455/oauth2callback';
+
+/**
+ * Manual Google sign-in: opens Google in a new tab with a loopback redirect URI that nothing is listening on,
+ * then lets the user paste the full address from the browser bar (?code=...&state=...) to finish the exchange.
+ * Works with the user's OWN Google Cloud OAuth client (Desktop app), also when the dashboard is hosted remotely.
+ */
+function GoogleManualSignIn({ onStart, onComplete }) {
+  const [redirectUri, setRedirectUri] = useState(DEFAULT_GOOGLE_MANUAL_REDIRECT);
+  const [authUrl, setAuthUrl] = useState('');
+  const [startedAt, setStartedAt] = useState(0);
+  const [pasted, setPasted] = useState('');
+  const [busy, setBusy] = useState('');
+  const [feedback, setFeedback] = useState(null);
+
+  const redirectError = useMemo(() => {
+    try {
+      const u = new URL(redirectUri.trim());
+      if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+        return 'Redirect URI phải bắt đầu bằng http:// hoặc https://';
+      }
+      if (!['127.0.0.1', 'localhost', '[::1]'].includes(u.hostname) && u.hostname !== window.location.hostname) {
+        return 'Redirect URI nên dùng 127.0.0.1 hoặc localhost (hoặc đúng domain dashboard).';
+      }
+      return '';
+    } catch {
+      return 'Redirect URI không hợp lệ.';
+    }
+  }, [redirectUri]);
+
+  const handleOpen = async () => {
+    if (redirectError) return;
+    setFeedback(null);
+    setBusy('start');
+    try {
+      const url = await onStart(redirectUri.trim());
+      setAuthUrl(url);
+      setStartedAt(Date.now());
+      setPasted('');
+      const w = window.open(url, '_blank', 'noopener,noreferrer');
+      setFeedback({
+        type: 'info',
+        message: w
+          ? 'Đã mở tab đăng nhập Google. Chọn tài khoản → Allow, sau đó quay lại đây dán địa chỉ.'
+          : 'Trình duyệt chặn tab mới — bấm liên kết "Mở trang đăng nhập Google" bên dưới.',
+      });
+    } catch (err) {
+      setFeedback({ type: 'error', message: err?.message || 'Không thể bắt đầu đăng nhập Google.' });
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const handleComplete = async () => {
+    const value = pasted.trim();
+    if (!value) {
+      setFeedback({ type: 'error', message: 'Hãy dán địa chỉ (URL) từ thanh địa chỉ trình duyệt sau khi bấm Allow.' });
+      return;
+    }
+    setFeedback(null);
+    setBusy('complete');
+    try {
+      await onComplete(value);
+      setPasted('');
+      setAuthUrl('');
+      setStartedAt(0);
+      setFeedback({ type: 'success', message: 'Kết nối Google thành công.' });
+    } catch (err) {
+      setFeedback({ type: 'error', message: err?.message || 'Không thể hoàn tất kết nối Google.' });
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const minutesLeft = startedAt ? Math.max(0, 10 - Math.floor((Date.now() - startedAt) / 60000)) : 0;
+  const feedbackClass =
+    feedback?.type === 'error'
+      ? 'border-red-500/40 bg-red-500/10 text-red-400'
+      : feedback?.type === 'success'
+        ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-500'
+        : 'border-blue-500/30 bg-blue-500/10 text-blue-400';
+
+  return (
+    <details className="group rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-card)]">
+      <summary className="flex cursor-pointer list-none flex-wrap items-center justify-between gap-2 px-4 py-3 text-xs font-semibold text-[var(--text-primary)]">
+        <span className="inline-flex items-center gap-2">
+          <GoogleMark className="h-4 w-4" />
+          Đăng nhập thủ công — dán URL callback
+        </span>
+        <span className="text-[11px] font-normal text-[var(--text-muted)]">
+          Dùng khi dashboard không chạy trên localhost hoặc tab Google không tự quay lại
+        </span>
+      </summary>
+
+      <div className="space-y-3 border-t border-[var(--border-subtle)] px-4 py-3 text-[11px] leading-relaxed text-[var(--text-secondary)]">
+        <ol className="list-decimal space-y-1.5 pl-4">
+          <li>
+            Trong{' '}
+            <a
+              href={GCP_OAUTH_CREDENTIALS_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="font-semibold text-blue-500 hover:underline"
+            >
+              Google Cloud Console → Credentials
+            </a>{' '}
+            tạo <strong>OAuth client ID</strong> loại <strong>Desktop app</strong> (client Desktop chấp nhận mọi cổng
+            loopback). Nếu dùng loại <em>Web application</em>, thêm đúng Redirect URI bên dưới vào danh sách
+            Authorized redirect URIs. Nhập Client ID/Secret ở form bên dưới (hoặc tải <code>client_secret.json</code>).
+          </li>
+          <li>
+            Redirect URI (phải khớp từng ký tự, kể cả đường dẫn):
+            <div className="mt-1 flex flex-wrap items-center gap-2">
+              <input
+                type="text"
+                value={redirectUri}
+                onChange={(e) => setRedirectUri(e.target.value)}
+                spellCheck={false}
+                aria-label="Redirect URI"
+                className="field-input min-w-0 flex-1 px-2.5 py-1.5 font-mono text-xs"
+              />
+              <CopyButton value={redirectUri} size="xs" toastMessage={`Copied ${redirectUri}`} />
+            </div>
+            {redirectError ? <p className="mt-1 text-red-400">{redirectError}</p> : null}
+          </li>
+          <li>
+            <button
+              type="button"
+              onClick={handleOpen}
+              disabled={busy !== '' || Boolean(redirectError)}
+              className="r-btn-primary inline-flex items-center gap-1.5 px-3 py-1.5 text-xs"
+            >
+              {busy === 'start' ? (
+                <RefreshCw className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" aria-hidden="true" />
+              ) : (
+                <ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />
+              )}
+              <span>Mở đăng nhập Google</span>
+            </button>
+            {authUrl ? (
+              <a
+                href={authUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="ml-3 font-semibold text-blue-500 hover:underline"
+              >
+                Mở trang đăng nhập Google (nếu tab không tự mở)
+              </a>
+            ) : null}
+          </li>
+          <li>
+            Chọn tài khoản → <strong>Allow</strong>. Trình duyệt sẽ chuyển tới <code>{redirectUri || '127.0.0.1…'}</code>{' '}
+            và báo <em>“Không thể truy cập trang này / ERR_CONNECTION_REFUSED”</em> — <strong>đó là bình thường</strong>.
+            Hãy <strong>copy toàn bộ địa chỉ trên thanh địa chỉ</strong> (phải có <code>?code=…&amp;state=…</code>).
+          </li>
+          <li>Dán vào ô dưới đây rồi bấm “Hoàn tất kết nối”.</li>
+        </ol>
+
+        <textarea
+          value={pasted}
+          onChange={(e) => setPasted(e.target.value)}
+          rows={3}
+          spellCheck={false}
+          autoComplete="off"
+          placeholder={`${redirectUri || DEFAULT_GOOGLE_MANUAL_REDIRECT}?state=...&code=4/0A...&scope=...`}
+          aria-label="Callback URL đã copy từ thanh địa chỉ"
+          className="field-input w-full px-2.5 py-2 font-mono text-xs"
+        />
+
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <button
+            type="button"
+            onClick={handleComplete}
+            disabled={busy !== '' || !pasted.trim()}
+            className="r-btn-secondary inline-flex items-center gap-1.5 px-3 py-1.5 text-xs"
+          >
+            {busy === 'complete' ? (
+              <RefreshCw className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" aria-hidden="true" />
+            ) : (
+              <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />
+            )}
+            <span>Hoàn tất kết nối</span>
+          </button>
+          {startedAt ? (
+            <span className="text-[11px] text-[var(--text-muted)]">
+              Phiên đăng nhập hết hạn sau ~10 phút (còn khoảng {minutesLeft} phút).
+            </span>
+          ) : null}
+        </div>
+
+        {feedback ? (
+          <p role={feedback.type === 'error' ? 'alert' : 'status'} className={`rounded-lg border px-3 py-2 ${feedbackClass}`}>
+            {feedback.message}
+          </p>
+        ) : null}
+
+        <div className="space-y-1 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-subtle)] p-2.5">
+          <div className="font-semibold text-[var(--text-primary)]">Gặp lỗi?</div>
+          <ul className="list-disc space-y-0.5 pl-4">
+            <li>
+              <code>redirect_uri_mismatch</code> — Redirect URI trong Cloud Console khác với ô ở bước 2 (kể cả{' '}
+              <code>/oauth2callback</code> và cổng). Client <em>Desktop</em> không cần khai báo.
+            </li>
+            <li>
+              <code>invalid_grant</code> — code đã dùng rồi / quá ~10 phút / copy thiếu. Bấm “Mở đăng nhập Google”
+              lại và dán ngay.
+            </li>
+            <li>
+              <code>access_denied</code> / “app is blocked” — thêm tài khoản của bạn vào <em>Test users</em> ở OAuth
+              consent screen (khi app đang ở chế độ Testing).
+            </li>
+            <li>
+              <code>invalid_client</code> — Client ID hoặc Client Secret sai.
+            </li>
+            <li>Cổng đã bị phần mềm khác chiếm: đổi cổng trong ô Redirect URI (ví dụ 8085) rồi bấm mở lại.</li>
+          </ul>
+          <p className="flex items-start gap-1.5 text-amber-500">
+            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+            <span>
+              URL chứa mã dùng một lần — không chia sẻ cho ai và chỉ dán ở đây. Sau khi kết nối xong có thể xoá khỏi
+              lịch sử trình duyệt.
+            </span>
+          </p>
+        </div>
+      </div>
+    </details>
+  );
+}
+
 function getKeyAuthKind(keyEntry) {
   if (!keyEntry || typeof keyEntry !== 'object') return 'api';
   const rawType = String(
@@ -1381,6 +1610,84 @@ export function ProvidersPage() {
     [activePresetMeta, form?.baseUrl]
   );
   const portalHost = useMemo(() => getHostLabel(portalUrl), [portalUrl]);
+  // Shared by the automatic redirect-back flow and the manual "paste callback URL" flow
+  const finishGoogleExchange = async (res) => {
+    if (!isMountedRef.current) return;
+    const loaded = await loadProviders();
+    if (!isMountedRef.current) return;
+
+    const geminiProv =
+      res?.provider ||
+      loaded?.providers?.find((p) => p.preset === 'gemini' || p.slug === 'gemini') ||
+      null;
+    const geminiPreset =
+      loaded?.presets?.find((p) => p.preset === 'gemini') ||
+      FALLBACK_PRESETS.find((p) => p.preset === 'gemini') ||
+      null;
+
+    const googleKeys = (geminiProv?.apiKeys || []).filter(
+      (k) => getKeyAuthKind(k) === 'google_oauth'
+    );
+    const latestGoogleKey = googleKeys[googleKeys.length - 1] || null;
+    const resMeta = res?.oauthMeta || res?.account || res?.plan || null;
+    const meta = getGoogleOAuthMeta(latestGoogleKey, {
+      ...(resMeta || {}),
+      ...(res?.email ? { email: res.email } : {}),
+      ...(res?.name ? { name: res.name } : {}),
+      ...(res?.projectId ? { projectId: res.projectId } : {}),
+      ...(res?.tier ? { tier: res.tier } : {}),
+      ...(res?.tierLabel ? { tierLabel: res.tierLabel } : {}),
+      ...(typeof res?.modelsCount === 'number' ? { modelsCount: res.modelsCount } : {}),
+    });
+
+    const effectiveModelsCount =
+      meta.modelsCount !== null
+        ? meta.modelsCount
+        : geminiProv?.models?.length ?? null;
+
+    setGoogleOAuthBanner({
+      ...meta,
+      modelsCount: effectiveModelsCount,
+      providerId: geminiProv?.id || null,
+    });
+
+    if (geminiProv) {
+      resetConnectionModeDrafts();
+      setActivePresetMeta(geminiPreset);
+      setModalTab('connection');
+      setConnectionMode('web');
+      setModelSearch('');
+      setModelTestResults({});
+      setForm(providerToForm(geminiProv));
+      setSlugManuallyEdited(true);
+      setNewModelInput('');
+      const summaryParts = [
+        meta.email || t('providers.web.googleCallbackSuccess'),
+        meta.tierLabel,
+        effectiveModelsCount !== null ? `${effectiveModelsCount} models` : '',
+      ].filter(Boolean);
+      setModalFeedback({
+        type: 'success',
+        message: `${t('providers.web.googleCallbackSuccess')} · ${summaryParts.join(' · ')}`,
+      });
+      setModalOpen(true);
+    }
+
+    const toastSummary = [
+      meta.email,
+      meta.tierLabel,
+      effectiveModelsCount !== null ? `${effectiveModelsCount} models` : '',
+    ]
+      .filter(Boolean)
+      .join(' · ');
+    toast.success(
+      res?.message ||
+        (toastSummary
+          ? `${t('providers.web.googleCallbackSuccess')} (${toastSummary})`
+          : t('providers.web.googleCallbackSuccess'))
+    );
+  };
+
   const googleRedirectUri = useMemo(
     () => (typeof window !== 'undefined' ? `${window.location.origin}/providers` : 'http://localhost:20128/providers'),
     []
@@ -1582,80 +1889,7 @@ export function ProvidersPage() {
       providersApi
         .exchangeGoogleOAuth(code, state)
         .then(async (res) => {
-          if (!isMountedRef.current) return;
-          const loaded = await loadProviders();
-          if (!isMountedRef.current) return;
-
-          const geminiProv =
-            res?.provider ||
-            loaded?.providers?.find((p) => p.preset === 'gemini' || p.slug === 'gemini') ||
-            null;
-          const geminiPreset =
-            loaded?.presets?.find((p) => p.preset === 'gemini') ||
-            FALLBACK_PRESETS.find((p) => p.preset === 'gemini') ||
-            null;
-
-          const googleKeys = (geminiProv?.apiKeys || []).filter(
-            (k) => getKeyAuthKind(k) === 'google_oauth'
-          );
-          const latestGoogleKey = googleKeys[googleKeys.length - 1] || null;
-          const resMeta = res?.oauthMeta || res?.account || res?.plan || null;
-          const meta = getGoogleOAuthMeta(latestGoogleKey, {
-            ...(resMeta || {}),
-            ...(res?.email ? { email: res.email } : {}),
-            ...(res?.name ? { name: res.name } : {}),
-            ...(res?.projectId ? { projectId: res.projectId } : {}),
-            ...(res?.tier ? { tier: res.tier } : {}),
-            ...(res?.tierLabel ? { tierLabel: res.tierLabel } : {}),
-            ...(typeof res?.modelsCount === 'number' ? { modelsCount: res.modelsCount } : {}),
-          });
-
-          const effectiveModelsCount =
-            meta.modelsCount !== null
-              ? meta.modelsCount
-              : geminiProv?.models?.length ?? null;
-
-          setGoogleOAuthBanner({
-            ...meta,
-            modelsCount: effectiveModelsCount,
-            providerId: geminiProv?.id || null,
-          });
-
-          if (geminiProv) {
-            resetConnectionModeDrafts();
-            setActivePresetMeta(geminiPreset);
-            setModalTab('connection');
-            setConnectionMode('web');
-            setModelSearch('');
-            setModelTestResults({});
-            setForm(providerToForm(geminiProv));
-            setSlugManuallyEdited(true);
-            setNewModelInput('');
-            const summaryParts = [
-              meta.email || t('providers.web.googleCallbackSuccess'),
-              meta.tierLabel,
-              effectiveModelsCount !== null ? `${effectiveModelsCount} models` : '',
-            ].filter(Boolean);
-            setModalFeedback({
-              type: 'success',
-              message: `${t('providers.web.googleCallbackSuccess')} · ${summaryParts.join(' · ')}`,
-            });
-            setModalOpen(true);
-          }
-
-          const toastSummary = [
-            meta.email,
-            meta.tierLabel,
-            effectiveModelsCount !== null ? `${effectiveModelsCount} models` : '',
-          ]
-            .filter(Boolean)
-            .join(' · ');
-          toast.success(
-            res?.message ||
-              (toastSummary
-                ? `${t('providers.web.googleCallbackSuccess')} (${toastSummary})`
-                : t('providers.web.googleCallbackSuccess'))
-          );
+          await finishGoogleExchange(res);
         })
         .catch((err) => {
           if (!isMountedRef.current) return;
@@ -2081,6 +2315,42 @@ export function ProvidersPage() {
       loadGoogleClientStatus();
     }
   }, [modalOpen, form?.preset, loadGoogleClientStatus]);
+
+  // Manual Google sign-in (loopback redirect + pasted callback URL) using the user's own OAuth client
+  const startGoogleManualSignIn = async (redirectUri) => {
+    const id = googleClientId.trim();
+    const secret = googleClientSecret.trim();
+    const project = googleProjectId.trim();
+    let payload;
+    if (id && secret) {
+      payload = {
+        clientId: id,
+        clientSecret: secret,
+        ...(project ? { projectId: project } : {}),
+        ...(googleClientSecretJson ? { clientSecretJson: googleClientSecretJson } : {}),
+        selectAccount: true,
+        saveClient: true,
+        callbackUrl: redirectUri,
+      };
+    } else if (googleClientStatus.configured) {
+      payload = { useSavedClient: true, selectAccount: true, callbackUrl: redirectUri };
+    } else {
+      throw new Error('Nhập Client ID và Client Secret (hoặc tải client_secret.json) ở form bên dưới trước.');
+    }
+    const res = await providersApi.startGoogleOAuth(payload);
+    const url = res?.authUrl || res?.url || res?.authorizeUrl || '';
+    if (!url) throw new Error('Server did not return a Google OAuth 2.0 authorization URL.');
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+      throw new Error('Invalid OAuth redirect URL protocol.');
+    }
+    return url;
+  };
+
+  const completeGoogleManualSignIn = async (pastedUrl) => {
+    const res = await providersApi.exchangeGoogleOAuth({ pastedUrl });
+    await finishGoogleExchange(res);
+  };
 
   const handleOneClickGoogleSignIn = async () => {
     setModalFeedback(null);
@@ -4979,6 +5249,11 @@ export function ProvidersPage() {
                           <p className="text-xs leading-relaxed text-[var(--text-secondary)]">
                             {t('providers.web.googleDesc')}
                           </p>
+
+                          <GoogleManualSignIn
+                            onStart={startGoogleManualSignIn}
+                            onComplete={completeGoogleManualSignIn}
+                          />
 
                           {/* 1-Click Account Chooser Banner (shown immediately once OAuth Client is saved or configured via .env) */}
                           {googleClientStatus.configured ? (

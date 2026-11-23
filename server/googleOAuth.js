@@ -581,6 +581,34 @@ export async function inspectGoogleAccountAndPlan(accessToken, options = {}) {
 }
 
 /**
+ * Turn Google's token-endpoint error codes into actionable guidance (no secrets are included).
+ * @param {string} errCode
+ * @param {string} detail
+ * @param {string} redirectUri exact redirect_uri that was sent to Google
+ * @returns {string} empty when there is no specific advice
+ */
+function describeGoogleTokenError(errCode, detail, redirectUri) {
+  const code = String(errCode || "").toLowerCase();
+  const text = `${code} ${detail || ""}`.toLowerCase();
+  if (code === "invalid_grant" || text.includes("invalid_grant")) {
+    return "Google rejected the authorization code (invalid_grant): it was already used, has expired (codes live ~10 minutes), or was copied incompletely. Click 'Open Google sign-in' again and paste the new address right after approving.";
+  }
+  if (text.includes("redirect_uri_mismatch")) {
+    return `Google rejected the redirect URI (redirect_uri_mismatch). In Google Cloud Console add exactly this Authorized redirect URI to your OAuth client: ${redirectUri} (for a Desktop client any http://127.0.0.1 or http://localhost port is accepted).`;
+  }
+  if (code === "invalid_client" || text.includes("invalid_client")) {
+    return "Google rejected the OAuth client (invalid_client): the Client ID or Client Secret is wrong, or the client was deleted. Re-check them in Google Cloud Console > Credentials.";
+  }
+  if (code === "unauthorized_client" || text.includes("unauthorized_client")) {
+    return "This OAuth client type is not allowed to use this flow (unauthorized_client). Create the client as 'Desktop app' (or 'Web application' with the redirect URI above).";
+  }
+  if (text.includes("access_blocked") || text.includes("access_denied")) {
+    return "Google blocked or denied access. While the consent screen is in Testing mode, add your Google account under 'Test users', or publish the app.";
+  }
+  return "";
+}
+
+/**
  * Exchange an authorization `code` + one-time `state` from the Google OAuth 2.0 PKCE flow
  * for OAuth tokens at Google's official token endpoint, cache the access token in memory,
  * and run `inspectGoogleAccountAndPlan` to populate account & billing tier metadata.
@@ -631,10 +659,16 @@ export async function exchangeGoogleOAuthPkce({
   }
 
   if (!record) {
-    throw createHttpError(400, "Invalid or already-used Google OAuth PKCE state");
+    throw createHttpError(
+      400,
+      "This Google sign-in session was not found, was already used, or has expired (valid for 10 minutes). Click 'Open Google sign-in' again and paste the new address."
+    );
   }
   if (record.expiresAt <= now) {
-    throw createHttpError(400, "Google OAuth PKCE state has expired");
+    throw createHttpError(
+      400,
+      "This Google sign-in session expired (valid for 10 minutes). Start again and paste the address immediately after approving."
+    );
   }
 
   const parsedTokenUrl = validateGoogleEndpointUrl(tokenUrl, "tokenUrl", {
@@ -662,10 +696,13 @@ export async function exchangeGoogleOAuthPkce({
       ...(dispatcher ? { dispatcher } : {})
     });
   } catch (err) {
+    // The code never reached Google, so it is still unused: keep the PKCE record so the user can retry
+    // (HTTP-level failures below stay consumed because Google may already have burned the code).
+    if (record.expiresAt > nowFn()) googlePkceStates.set(trimmedState, record);
     throw createHttpError(
       502,
       redactSecrets(
-        `Google OAuth token exchange network error: ${err?.message || "fetch failed"}`,
+        `Could not reach Google to finish sign-in (${err?.message || "network error"}). Check your connection/proxy and paste the same address again.`,
         [record.clientSecret, record.codeVerifier, trimmedCode]
       )
     );
@@ -673,9 +710,11 @@ export async function exchangeGoogleOAuthPkce({
 
   const rawText = await tokenRes.text().catch(() => "");
   if (!tokenRes.ok) {
+    let errCode = "";
     let errDetail = rawText.slice(0, 240);
     try {
       const parsedErr = JSON.parse(rawText);
+      errCode = typeof parsedErr?.error === "string" ? parsedErr.error : "";
       errDetail =
         parsedErr?.error_description ||
         parsedErr?.error?.message ||
@@ -689,9 +728,10 @@ export async function exchangeGoogleOAuthPkce({
       record.codeVerifier,
       trimmedCode
     ]);
+    const hint = describeGoogleTokenError(errCode, cleanMsg, record.redirectUri);
     throw createHttpError(
       tokenRes.status >= 400 && tokenRes.status < 500 ? 400 : 502,
-      `Google OAuth token exchange failed (HTTP ${tokenRes.status}): ${cleanMsg}`
+      hint || `Google OAuth token exchange failed (HTTP ${tokenRes.status}): ${cleanMsg}`
     );
   }
 
