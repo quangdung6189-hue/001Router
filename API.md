@@ -4,7 +4,7 @@
 - Dashboard UI: `http://localhost:20128/` (served statically from `app/web/dist`)
 - Unified AI API Base: `http://localhost:20128/v1`
 - Default dashboard password: `1234` (stored as bcrypt hash in `app/data/db.json`; changeable in Settings)
-- Provider auth: **Official API keys only** (no OAuth, no subscription hijacking, no client spoofing/impersonation).
+- Provider auth: **Official API keys and documented OAuth flows by default.** Experimental exception: the Gemini CLI and Antigravity sign-ins (`/api/providers/oauth/gemini-cli/*`, `/api/providers/oauth/antigravity/*`) reuse those apps' public OAuth clients and identify as them to Google. They are opt-in, not supported by Google for third-party tools, and may get the Google account restricted.
 
 ---
 

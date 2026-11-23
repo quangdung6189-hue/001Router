@@ -1,7 +1,7 @@
 {
   "name": "001router",
   "version": "1.0.0",
-  "description": "Local AI router & gateway compatible with OpenAI and Anthropic APIs (official API keys only)",
+  "description": "Local AI router & gateway compatible with OpenAI and Anthropic APIs (official API keys by default; experimental Gemini CLI / Antigravity sign-in)",
   "type": "module",
   "scripts": {
     "dev": "node --watch server/index.js",

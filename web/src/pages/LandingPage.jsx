@@ -210,8 +210,8 @@ const ADVANCED_FEATURES = [
     icon: Cpu,
   },
   {
-    title: '100% ToS-Safe Official BYOK',
-    desc: 'Strictly uses official developer API keys and local LLMs — no session hijacking, no OAuth spoofing, zero ban risk.',
+    title: 'Official BYOK by Default',
+    desc: 'Uses official developer API keys and local LLMs by default — no session hijacking. Experimental Gemini CLI / Antigravity sign-ins are opt-in and carry Google account risk.',
     icon: ShieldCheck,
   },
 ];
@@ -234,7 +234,7 @@ export function LandingPage() {
             <div>
               <span className="text-base font-bold tracking-tight">001Router</span>
               <span className="ml-2 hidden rounded bg-[#E56A4A]/15 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-[#E56A4A] sm:inline">
-                v1.2 ToS-Safe Edition
+                v1.2 BYOK Edition
               </span>
             </div>
           </Link>
@@ -300,7 +300,7 @@ export function LandingPage() {
         <section className="mx-auto max-w-4xl text-center">
           <div className="inline-flex items-center gap-2 rounded-full border border-[#E56A4A]/35 bg-[#E56A4A]/10 px-3.5 py-1 text-xs font-semibold text-[#E56A4A]">
             <Sparkles className="h-3.5 w-3.5" aria-hidden="true" />
-            Smart AI Router · OpenAI &amp; Anthropic Compatible · 100% ToS-Safe Official BYOK
+            Smart AI Router · OpenAI &amp; Anthropic Compatible · Official BYOK by Default
           </div>
 
           <h1 className="mt-6 text-4xl font-extrabold tracking-tight sm:text-5xl lg:text-6xl">
@@ -842,7 +842,7 @@ $ curl -sS ${v1Endpoint}/chat/completions \\
           <div className="flex flex-wrap items-center gap-4">
             <span className="inline-flex items-center gap-1 text-emerald-400">
               <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />
-              Official API Keys Only (ToS-Safe BYOK)
+              Official API Keys by default (BYOK)
             </span>
             <Link to="/" className="font-semibold text-[#E56A4A] hover:underline">
               Dashboard →

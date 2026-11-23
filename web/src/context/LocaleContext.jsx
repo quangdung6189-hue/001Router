@@ -64,8 +64,8 @@ const DICT = {
     'nav.proxyPools': 'Proxy Pools',
     'nav.settings': 'Cài đặt',
     'nav.landing': 'Trang giới thiệu (/landing)',
-    'nav.statusTitle': 'Official API Keys Only • ToS Safe',
-    'nav.statusDesc': 'Chỉ dùng API key chính chủ & LLM cục bộ — bảo vệ tài khoản an toàn, mã hóa AES-256-GCM.',
+    'nav.statusTitle': 'Mặc định: API key chính chủ',
+    'nav.statusDesc': 'Mặc định chỉ dùng API key chính chủ & LLM cục bộ, mã hóa AES-256-GCM. Provider thử nghiệm (Gemini CLI, Antigravity) dùng client bên thứ ba — có rủi ro với tài khoản Google.',
     'nav.online': 'Trực tuyến',
     'nav.offline': 'Ngoại tuyến',
     'nav.checking': 'Đang kiểm tra',
@@ -142,7 +142,7 @@ const DICT = {
 
     // Providers
     'providers.section.freeTier': 'Free Forever / Free-Tier Official APIs',
-    'providers.section.freeTierDesc': 'API chính chủ có gói miễn phí rộng rãi cho lập trình viên (chính thống, không cần cookie/OAuth).',
+    'providers.section.freeTierDesc': 'API chính chủ có gói miễn phí rộng rãi cho lập trình viên (không cần cookie). Riêng Antigravity là provider thử nghiệm dùng client bên thứ ba — có rủi ro với tài khoản.',
     'providers.section.cheap': 'Cheap & Coding Plans (Official API Key)',
     'providers.section.cheapDesc': 'Các nhà cung cấp API giá siêu rẻ ($0.20–$0.60/1M tokens) tối ưu cho lập trình & dự phòng Tier 2.',
     'providers.section.apikey': 'Flagship & Cloud API Key Providers',
@@ -314,8 +314,8 @@ const DICT = {
     'tokenSaver.saved': 'Tiết kiệm',
 
     // CLI Tools
-    'cli.tosBannerTitle': 'An toàn ToS 100% — Chính sách BYOK (Official API Keys Only)',
-    'cli.tosBannerDesc': '001Router kết nối trực tiếp tới endpoint chính thức bằng API key của riêng bạn hoặc LLM cục bộ (Ollama/LM Studio). Không đánh cắp phiên đăng nhập, không giả mạo client, không rủi ro khóa tài khoản.',
+    'cli.tosBannerTitle': 'BYOK — mặc định dùng API key chính chủ',
+    'cli.tosBannerDesc': '001Router kết nối trực tiếp tới endpoint chính thức bằng API key của riêng bạn hoặc LLM cục bộ (Ollama/LM Studio). Không đánh cắp phiên đăng nhập. Ngoại lệ thử nghiệm: đăng nhập Gemini CLI / Antigravity dùng client của chính các app đó, có thể khiến Google hạn chế tài khoản — chỉ bật nếu bạn chấp nhận rủi ro.',
     'cli.origin': 'Gateway Origin',
     'cli.routerKey': 'Router API Key',
     'cli.modelOrCombo': 'Model / Combo',
@@ -450,8 +450,8 @@ const DICT = {
     'nav.proxyPools': 'Proxy Pools',
     'nav.settings': 'Settings',
     'nav.landing': 'Landing Page (/landing)',
-    'nav.statusTitle': 'Official API Keys Only • ToS Safe',
-    'nav.statusDesc': 'Official developer API keys & local LLMs only — AES-256-GCM encrypted at rest.',
+    'nav.statusTitle': 'Official API keys by default',
+    'nav.statusDesc': 'Official developer API keys & local LLMs by default — AES-256-GCM encrypted at rest. Experimental providers (Gemini CLI, Antigravity) use third-party clients and carry Google account risk.',
     'nav.online': 'Online',
     'nav.offline': 'Offline',
     'nav.checking': 'Checking',
@@ -528,7 +528,7 @@ const DICT = {
 
     // Providers
     'providers.section.freeTier': 'Free Forever / Free-Tier Official APIs',
-    'providers.section.freeTierDesc': 'Official developer APIs offering generous free tiers — zero OAuth, zero cookies, 100% ToS-safe.',
+    'providers.section.freeTierDesc': 'Official developer APIs offering generous free tiers — zero cookies. Antigravity is the exception: an experimental provider using a third-party client, with Google account risk.',
     'providers.section.cheap': 'Cheap & Coding Plans (Official API Key)',
     'providers.section.cheapDesc': 'Ultra-low-cost official coding APIs ($0.20–$0.60/1M tokens) ideal for Tier 2 automatic fallback.',
     'providers.section.apikey': 'Flagship & Cloud API Key Providers',
@@ -700,8 +700,8 @@ const DICT = {
     'tokenSaver.saved': 'Saved',
 
     // CLI Tools
-    'cli.tosBannerTitle': '100% ToS-Safe BYOK (Official API Keys Only)',
-    'cli.tosBannerDesc': '001Router connects directly to official developer endpoints using your own API keys or local LLMs (Ollama/LM Studio). Zero session hijacking, zero client spoofing, zero account ban risk.',
+    'cli.tosBannerTitle': 'BYOK — official API keys by default',
+    'cli.tosBannerDesc': '001Router connects directly to official developer endpoints using your own API keys or local LLMs (Ollama/LM Studio). Zero session hijacking. Experimental exception: the Gemini CLI / Antigravity sign-ins reuse the OAuth clients of those apps and may get the Google account restricted — opt in only if you accept that risk.',
     'cli.origin': 'Gateway Origin',
     'cli.routerKey': 'Router API Key',
     'cli.modelOrCombo': 'Model / Combo',
