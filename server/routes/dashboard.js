@@ -83,8 +83,13 @@ import {
 } from "../oauthFlows.js";
 import {
   GEMINI_CLI_DEFAULT_REDIRECT,
+  GEMINI_CLI_LOAD_CODE_ASSIST_URL,
+  GEMINI_CLI_ONBOARD_USER_URL,
+  GEMINI_CLI_QUOTA_URL,
+  buildGeminiCliDiscoveryHeaders,
   exchangeGeminiCliOAuth,
   fetchGeminiCliQuota,
+  geminiCliClientMetadata,
   getGeminiCliAccessToken,
   loadGeminiCliProject,
   peekGeminiCliState,
@@ -2123,6 +2128,128 @@ export function createDashboardRouter(storage, liveEvents = null) {
       keyId: savedKeyId,
       oauthMeta,
       provider: toPublicProvider(savedProvider)
+    });
+  });
+
+  // --- Gemini CLI diagnostics: shows exactly what Google answers during project discovery ---
+  router.post("/providers/oauth/gemini-cli/diagnose", async (req, res) => {
+    const body = req.body || {};
+    const provider = storage.getProviders().find((p) => p.preset === "gemini" || p.slug === "gemini");
+    const keyEntry = (provider?.apiKeys || []).find(
+      (k) => k.enabled !== false && k.authMethod === "gemini_cli" && k.oauthCredentials
+    );
+    if (!keyEntry) {
+      return res.status(404).json({
+        error: "No Gemini CLI connection found. Sign in with 'Đăng nhập Gemini CLI' first."
+      });
+    }
+
+    const dispatcher = getProxyDispatcher(provider, storage);
+    const steps = [];
+    let accessToken = "";
+
+    try {
+      const tokenRes = await getGeminiCliAccessToken(keyEntry.oauthCredentials, {
+        ...(dispatcher ? { dispatcher } : {}),
+        forceRefresh: body.forceRefresh === true
+      });
+      accessToken = tokenRes.accessToken;
+      steps.push({
+        step: "refreshToken",
+        ok: true,
+        projectIdInCreds: tokenRes.projectId || ""
+      });
+    } catch (err) {
+      return res.status(400).json({
+        error: sanitizeSecrets(err?.message || "Token refresh failed"),
+        steps: [{ step: "refreshToken", ok: false, error: err?.message || "" }]
+      });
+    }
+
+    // 1. Raw loadCodeAssist — include the full JSON body so the exact shape is visible.
+    let loadData = null;
+    try {
+      const loadRes = await upstreamFetch(GEMINI_CLI_LOAD_CODE_ASSIST_URL, {
+        method: "POST",
+        headers: buildGeminiCliDiscoveryHeaders(accessToken),
+        body: JSON.stringify({ metadata: geminiCliClientMetadata(), mode: 1 }),
+        ...(dispatcher ? { dispatcher } : {})
+      });
+      const text = await loadRes.text().catch(() => "");
+      try {
+        loadData = JSON.parse(text);
+      } catch {
+        loadData = { _raw: text.slice(0, 800) };
+      }
+      steps.push({
+        step: "loadCodeAssist",
+        ok: loadRes.ok,
+        status: loadRes.status,
+        response: loadData
+      });
+    } catch (err) {
+      steps.push({ step: "loadCodeAssist", ok: false, error: err?.message || "" });
+    }
+
+    // 2. Raw onboardUser — one attempt, full body, so a rejection reason is visible.
+    try {
+      const onboardRes = await upstreamFetch(GEMINI_CLI_ONBOARD_USER_URL, {
+        method: "POST",
+        headers: buildGeminiCliDiscoveryHeaders(accessToken),
+        body: JSON.stringify({
+          tierId: body.tierId || "legacy-tier",
+          metadata: geminiCliClientMetadata()
+        }),
+        ...(dispatcher ? { dispatcher } : {})
+      });
+      const text = await onboardRes.text().catch(() => "");
+      let parsed = null;
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        parsed = { _raw: text.slice(0, 800) };
+      }
+      steps.push({
+        step: "onboardUser",
+        ok: onboardRes.ok,
+        status: onboardRes.status,
+        response: parsed
+      });
+    } catch (err) {
+      steps.push({ step: "onboardUser", ok: false, error: err?.message || "" });
+    }
+
+    // 3. Raw retrieveUserQuota — tells us whether the account has any entitlement at all.
+    try {
+      const quotaRes = await upstreamFetch(GEMINI_CLI_QUOTA_URL, {
+        method: "POST",
+        headers: buildGeminiCliDiscoveryHeaders(accessToken),
+        body: JSON.stringify({}),
+        ...(dispatcher ? { dispatcher } : {})
+      });
+      const text = await quotaRes.text().catch(() => "");
+      let parsed = null;
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        parsed = { _raw: text.slice(0, 800) };
+      }
+      steps.push({
+        step: "retrieveUserQuota",
+        ok: quotaRes.ok,
+        status: quotaRes.status,
+        response: parsed
+      });
+    } catch (err) {
+      steps.push({ step: "retrieveUserQuota", ok: false, error: err?.message || "" });
+    }
+
+    return res.json({
+      ok: true,
+      email: keyEntry.oauthMeta?.email || "",
+      savedProjectId: keyEntry.oauthMeta?.projectId || "",
+      savedTier: keyEntry.oauthMeta?.tier || "",
+      steps
     });
   });
 

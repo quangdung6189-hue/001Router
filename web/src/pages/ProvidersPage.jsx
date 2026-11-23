@@ -2195,6 +2195,8 @@ export function ProvidersPage() {
     await finishGoogleExchange(res);
   };
 
+  const diagnoseGeminiCli = async () => providersApi.diagnoseGeminiCli({ forceRefresh: true });
+
   const handleOneClickGoogleSignIn = async () => {
     setModalFeedback(null);
     setStartingGoogleOAuth(true);
@@ -4906,6 +4908,7 @@ export function ProvidersPage() {
                         <GeminiCliSignIn
                           onStart={startGeminiCliSignIn}
                           onComplete={completeGeminiCliSignIn}
+                          onDiagnose={diagnoseGeminiCli}
                         />
 
                         {/* Primary Official Google OAuth 2.0 + PKCE Card */}

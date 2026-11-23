@@ -12,12 +12,13 @@ const DEFAULT_CLI_REDIRECT = 'http://127.0.0.1:1455/oauth2callback';
  * This is the path that resolves the account plan/quota without any GCP project or
  * Cloud Billing, because the upstream is `cloudcode-pa.googleapis.com`.
  */
-export function GeminiCliSignIn({ onStart, onComplete }) {
+export function GeminiCliSignIn({ onStart, onComplete, onDiagnose }) {
   const [redirectUri, setRedirectUri] = useState(DEFAULT_CLI_REDIRECT);
   const [authUrl, setAuthUrl] = useState('');
   const [pasted, setPasted] = useState('');
   const [busy, setBusy] = useState('');
   const [feedback, setFeedback] = useState(null);
+  const [diagnostics, setDiagnostics] = useState(null);
 
   const redirectError = useMemo(() => {
     try {
@@ -83,6 +84,20 @@ export function GeminiCliSignIn({ onStart, onComplete }) {
         type: 'error',
         message: err?.message || 'Không thể hoàn tất kết nối Gemini CLI.',
       });
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const handleDiagnose = async () => {
+    if (!onDiagnose) return;
+    setBusy('diagnose');
+    setDiagnostics(null);
+    try {
+      const result = await onDiagnose();
+      setDiagnostics(result);
+    } catch (err) {
+      setDiagnostics({ error: err?.message || 'Chẩn đoán thất bại' });
     } finally {
       setBusy('');
     }
@@ -208,6 +223,45 @@ export function GeminiCliSignIn({ onStart, onComplete }) {
         >
           {feedback.message}
         </p>
+      ) : null}
+
+      {onDiagnose ? (
+        <details className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-subtle)] p-2.5">
+          <summary className="cursor-pointer text-[11px] font-semibold text-[var(--text-secondary)]">
+            Chẩn đoán kết nối (xem Google trả về gì)
+          </summary>
+          <div className="mt-2 space-y-2">
+            <button
+              type="button"
+              onClick={handleDiagnose}
+              disabled={busy !== ''}
+              className="r-btn-secondary inline-flex items-center gap-1.5 px-2.5 py-1.5 text-[11px]"
+            >
+              {busy === 'diagnose' ? (
+                <RefreshCw
+                  className="h-3 w-3 animate-spin motion-reduce:animate-none"
+                  aria-hidden="true"
+                />
+              ) : (
+                <Terminal className="h-3 w-3" aria-hidden="true" />
+              )}
+              <span>Chạy chẩn đoán</span>
+            </button>
+            {diagnostics ? (
+              <>
+                <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-all rounded border border-[var(--border-subtle)] bg-[var(--bg-card)] p-2 font-mono text-[10px] leading-relaxed text-[var(--text-secondary)]">
+                  {JSON.stringify(diagnostics, null, 2)}
+                </pre>
+                <CopyButton
+                  value={JSON.stringify(diagnostics, null, 2)}
+                  label="Copy JSON"
+                  size="xs"
+                  toastMessage="Đã copy kết quả chẩn đoán"
+                />
+              </>
+            ) : null}
+          </div>
+        </details>
       ) : null}
     </div>
   );

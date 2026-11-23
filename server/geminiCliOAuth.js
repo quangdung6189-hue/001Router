@@ -417,7 +417,12 @@ function pickOnboardTierId(data) {
  * @returns {Promise<string>}
  */
 export async function onboardGeminiCliUser(accessToken, tierId = "legacy-tier", options = {}) {
-  const { fetchImpl = upstreamFetch, dispatcher, retryDelayMs = 3000 } = options;
+  const {
+    fetchImpl = upstreamFetch,
+    dispatcher,
+    retryDelayMs = 3000,
+    maxAttempts = 5
+  } = options;
   const token = String(accessToken || "").trim();
   if (!token) throw httpError(400, "Missing access token for onboardUser");
 
@@ -426,9 +431,10 @@ export async function onboardGeminiCliUser(accessToken, tierId = "legacy-tier", 
     metadata: geminiCliClientMetadata()
   });
 
-  // Google provisions asynchronously; the CLI polls. Two attempts is what the reference client
-  // uses, and a failure here is non-fatal (chat reports the real upstream error afterwards).
-  for (let attempt = 1; attempt <= 2; attempt++) {
+  // Google provisions asynchronously: the first calls usually answer `done: false` and only a
+  // later poll carries the project. The reference CLI keeps polling, so give it room to finish
+  // instead of returning "" after two tries.
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     let res;
     try {
       res = await fetchImpl(GEMINI_CLI_ONBOARD_USER_URL, {
@@ -438,12 +444,14 @@ export async function onboardGeminiCliUser(accessToken, tierId = "legacy-tier", 
         ...(dispatcher ? { dispatcher } : {})
       });
     } catch {
+      if (attempt === maxAttempts) break;
+      await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
       continue;
     }
 
     const text = await res.text().catch(() => "");
     if (!res.ok) {
-      if (attempt === 2) {
+      if (attempt === maxAttempts) {
         throw httpError(
           res.status >= 400 && res.status < 500 ? 400 : 502,
           redactSecrets(
@@ -452,6 +460,7 @@ export async function onboardGeminiCliUser(accessToken, tierId = "legacy-tier", 
           )
         );
       }
+      await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
       continue;
     }
 
@@ -459,15 +468,15 @@ export async function onboardGeminiCliUser(accessToken, tierId = "legacy-tier", 
     try {
       data = JSON.parse(text);
     } catch {
-      continue;
+      // non-JSON answer: keep polling
     }
 
-    if (data?.done === true) {
+    if (data) {
       const projectId = extractCloudCodeProjectId(data);
       if (projectId) return projectId;
     }
 
-    if (attempt < 2) {
+    if (attempt < maxAttempts) {
       await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
     }
   }

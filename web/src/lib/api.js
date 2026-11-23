@@ -158,6 +158,11 @@ export const providersApi = {
       method: 'POST',
     }),
   geminiCliStatus: () => apiFetch('/api/providers/oauth/gemini-cli/status'),
+  diagnoseGeminiCli: (payload = {}) =>
+    apiFetch('/api/providers/oauth/gemini-cli/diagnose', {
+      method: 'POST',
+      body: payload,
+    }),
   startGeminiCliOAuth: (payload = {}) =>
     apiFetch('/api/providers/oauth/gemini-cli/start', {
       method: 'POST',
