@@ -394,16 +394,19 @@ describe("Gemini CLI wire translation", () => {
     assert.equal(props.fixed.const, undefined);
   });
 
-  it("16. the Cloud Code envelope carries a numeric sessionId (UUID/absent triggers 403 #3501)", () => {
+  it("16. the Cloud Code envelope carries a digit-string sessionId (number -> 400 TYPE_STRING, UUID -> 403 #3501)", () => {
     const env = buildCloudCodeRequest(
       "gemini-2.5-pro",
       { messages: [{ role: "user", content: "hi" }] },
       "proj-1"
     );
-    assert.equal(typeof env.request.sessionId, "number");
-    assert.ok(Number.isInteger(env.request.sessionId));
-    assert.ok(env.request.sessionId > 0);
-    assert.ok(env.request.sessionId <= Number.MAX_SAFE_INTEGER);
+    // The proto field is TYPE_STRING: a JSON number is rejected by Google with HTTP 400.
+    assert.equal(typeof env.request.sessionId, "string");
+    assert.match(env.request.sessionId, /^-\d{1,19}$/);
+    assert.ok(BigInt(env.request.sessionId) < 0n);
+    assert.ok(BigInt(env.request.sessionId) >= -(2n ** 63n));
+    // It must survive JSON serialization as a string, not a number.
+    assert.match(JSON.stringify(env), /"sessionId":"-\d+"/);
 
     // Deterministic per project+model, so repeat turns stay on one logical session.
     const again = buildCloudCodeRequest(

@@ -242,16 +242,18 @@ export function openAIToGeminiContents(body) {
 }
 
 /**
- * Cloud Code Assist expects a numeric `sessionId` — a UUID or missing value makes the request
- * look like a non-CLI client and Google answers 403 "You do not have a valid license of this
- * product" (#3501). Derive a stable 64-bit-ish number from the project/model pair.
+ * Cloud Code Assist expects `request.session_id` to be a *string of digits* — the proto field is
+ * TYPE_STRING, so a JSON number is rejected with HTTP 400 "Invalid value at
+ * 'request.session_id' (TYPE_STRING)", and a UUID or missing value makes the request look like a
+ * non-CLI client (403 #3501). Match the official clients: a negative 63-bit decimal derived
+ * deterministically from the project/model pair, e.g. "-4611686018427387904".
  * @param {string} seed
- * @returns {number}
+ * @returns {string}
  */
-function toNumericSessionId(seed) {
+export function toNumericSessionId(seed) {
   const digest = crypto.createHash("sha256").update(String(seed || "gemini-cli")).digest();
-  // Keep it inside Number.MAX_SAFE_INTEGER while staying deterministic per seed.
-  return digest.readUIntBE(0, 6);
+  const n = digest.readBigUInt64BE(0) & 0x7fffffffffffffffn;
+  return `-${n.toString()}`;
 }
 
 /**

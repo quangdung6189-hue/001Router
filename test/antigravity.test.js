@@ -178,7 +178,9 @@ describe("Antigravity flavor — chat envelope", () => {
     assert.equal(env.model, "claude-sonnet-5-5-high(high)");
     assert.equal(env.project, "ag-project-1");
     assert.equal("requestType" in env, false, "requestType triggers a detail-free 429");
-    assert.equal(typeof env.request.sessionId, "number");
+    // Google: "Invalid value at 'request.session_id' (TYPE_STRING)" when this is a number.
+    assert.equal(typeof env.request.sessionId, "string");
+    assert.match(env.request.sessionId, /^-\d+$/);
     assert.ok(env.request.generationConfig.maxOutputTokens <= ANTIGRAVITY_MAX_OUTPUT_TOKENS);
   });
 
@@ -346,6 +348,7 @@ describe("Antigravity routes + /v1 chat", () => {
       assert.equal(call.body.project, "ag-project-1");
       assert.match(call.body.requestId, AGENT_REQUEST_ID);
       assert.equal("requestType" in call.body, false);
+      assert.equal(typeof call.body.request.sessionId, "string", "session_id is TYPE_STRING");
     } finally {
       delete app.locals.cloudCodeFetchImpl;
     }
