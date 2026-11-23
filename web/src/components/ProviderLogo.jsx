@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { memo, useState } from 'react';
 
 // Complete mapping of preset / slug / tool ID -> filename in /providers/
 export const PRESET_LOGO_MAP = {
@@ -180,7 +180,7 @@ const SIZE_MAP = {
   xl: { box: 48, pad: 7, font: 14, radius: 'rounded-xl', imgRadius: 'rounded-[8px]' },
 };
 
-export function ProviderLogo({
+function ProviderLogoBase({
   preset,
   slug,
   logo,
@@ -217,16 +217,22 @@ export function ProviderLogo({
 
   const errored = !effectiveUrl || failedUrl === effectiveUrl || failedLogoCache.has(effectiveUrl);
 
+  const isHex = Boolean(color && color.startsWith('#') && color.length === 7);
+
   if (errored) {
+    const base = color || '#E56A4A';
     return (
       <span
         style={{
           width: `${dims.box}px`,
           height: `${dims.box}px`,
-          backgroundColor: color || '#E56A4A',
           fontSize: `${dims.font}px`,
+          backgroundColor: base,
+          // Soft top-left highlight so the monogram tile feels like the real logo tiles.
+          backgroundImage:
+            'linear-gradient(145deg, rgba(255,255,255,0.22) 0%, rgba(255,255,255,0) 55%, rgba(0,0,0,0.18) 100%)',
         }}
-        className={`inline-flex shrink-0 items-center justify-center font-bold tracking-tight text-white shadow-xs select-none ${dims.radius} ${className}`.trim()}
+        className={`inline-flex shrink-0 items-center justify-center border border-white/10 font-bold tracking-tight text-white shadow-xs select-none ${dims.radius} ${className}`.trim()}
         aria-hidden="true"
       >
         {fallbackChars}
@@ -234,8 +240,11 @@ export function ProviderLogo({
     );
   }
 
-  const tintBg =
-    color && color.startsWith('#') && color.length === 7 ? `${color}1f` : 'rgba(255,255,255,0.06)';
+  // Neutral light backdrop keeps transparent / dark / full-bleed logos readable and uniform
+  // on dark cards; a faint brand tint is blended on top when the preset exposes a colour.
+  const tintBg = isHex
+    ? `linear-gradient(145deg, ${color}38, ${color}14)`
+    : 'linear-gradient(145deg, rgba(255,255,255,0.10), rgba(255,255,255,0.04))';
   const imgSize = Math.max(12, dims.box - dims.pad * 2);
 
   return (
@@ -244,9 +253,9 @@ export function ProviderLogo({
         width: `${dims.box}px`,
         height: `${dims.box}px`,
         padding: `${dims.pad}px`,
-        backgroundColor: tintBg,
+        backgroundImage: tintBg,
       }}
-      className={`inline-flex shrink-0 items-center justify-center overflow-hidden border border-white/10 ${dims.radius} ${className}`.trim()}
+      className={`inline-flex shrink-0 items-center justify-center overflow-hidden border border-[var(--border-strong)] bg-[var(--bg-subtle)] shadow-xs ${dims.radius} ${className}`.trim()}
     >
       <img
         src={effectiveUrl}
@@ -264,5 +273,8 @@ export function ProviderLogo({
     </span>
   );
 }
+
+// Memoised: the providers grid re-renders every second while a key is cooling down.
+export const ProviderLogo = memo(ProviderLogoBase);
 
 export default ProviderLogo;

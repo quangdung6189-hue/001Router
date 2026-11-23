@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import {
   AlertTriangle,
@@ -720,7 +720,21 @@ export function SidebarLayout() {
             key={location.pathname}
             className="page-enter mx-auto w-full max-w-[1400px] px-4 py-6 sm:px-6 lg:px-8"
           >
-            <Outlet context={{ headerSearch, setHeaderSearch }} />
+            {/* Pages are lazy-loaded; keep the sidebar/header mounted while a chunk loads. */}
+            <Suspense
+              fallback={
+                <div
+                  className="flex min-h-[40vh] items-center justify-center"
+                  role="status"
+                  aria-live="polite"
+                >
+                  <span className="h-6 w-6 animate-spin rounded-full border-2 border-[var(--border-strong)] border-t-[#E56A4A] motion-reduce:animate-none" />
+                  <span className="sr-only">{t('common.loading')}</span>
+                </div>
+              }
+            >
+              <Outlet context={{ headerSearch, setHeaderSearch }} />
+            </Suspense>
           </div>
         </main>
       </div>

@@ -3,6 +3,7 @@ import { Link, useOutletContext } from 'react-router-dom';
 import {
   Activity,
   AlertTriangle,
+  ArrowRight,
   BadgeCheck,
   Brain,
   CheckCircle2,
@@ -47,6 +48,14 @@ import { LucianSlidingTabs } from '../components/lucian/LucianSlidingTabs';
 import { Switch } from '../components/Switch';
 import { CopyButton } from '../components/CopyButton';
 import { ProviderLogo } from '../components/ProviderLogo';
+import { ProviderCard } from '../components/providers/ProviderCard';
+import { GoogleMark } from '../components/providers/GoogleMark';
+import {
+  getGoogleOAuthMeta,
+  getGoogleTierDotClass,
+  getGoogleTierPillClass,
+  getKeyAuthKind,
+} from '../components/providers/providerAuth';
 
 const FORMAT_LABELS = {
   openai: 'OpenAI Chat',
@@ -187,34 +196,6 @@ const VERTEX_REGIONS = [
 
 const GCP_SERVICE_ACCOUNTS_URL = 'https://console.cloud.google.com/iam-admin/serviceaccounts';
 const GCP_OAUTH_CREDENTIALS_URL = 'https://console.cloud.google.com/apis/credentials';
-
-function GoogleMark({ className = 'h-4 w-4' }) {
-  return (
-    <svg
-      viewBox="0 0 24 24"
-      className={className}
-      aria-hidden="true"
-      focusable="false"
-    >
-      <path
-        fill="#4285F4"
-        d="M23.49 12.27c0-.79-.07-1.55-.2-2.27H12v4.3h6.44a5.5 5.5 0 0 1-2.39 3.61v3h3.87c2.26-2.08 3.57-5.15 3.57-8.64Z"
-      />
-      <path
-        fill="#34A853"
-        d="M12 24c3.24 0 5.95-1.07 7.93-2.91l-3.87-3c-1.07.72-2.44 1.15-4.06 1.15-3.12 0-5.77-2.11-6.71-4.95H1.29v3.1A12 12 0 0 0 12 24Z"
-      />
-      <path
-        fill="#FBBC05"
-        d="M5.29 14.29A7.2 7.2 0 0 1 4.91 12c0-.79.14-1.56.38-2.29V6.61H1.29A12 12 0 0 0 0 12c0 1.94.46 3.77 1.29 5.39l4-3.1Z"
-      />
-      <path
-        fill="#EA4335"
-        d="M12 4.76c1.76 0 3.34.61 4.58 1.8l3.44-3.44C17.95 1.19 15.24 0 12 0A12 12 0 0 0 1.29 6.61l4 3.1c.94-2.84 3.59-4.95 6.71-4.95Z"
-      />
-    </svg>
-  );
-}
 
 const DEFAULT_GOOGLE_MANUAL_REDIRECT = 'http://127.0.0.1:1455/oauth2callback';
 
@@ -443,169 +424,6 @@ function GoogleManualSignIn({ onStart, onComplete }) {
       </div>
     </details>
   );
-}
-
-function getKeyAuthKind(keyEntry) {
-  if (!keyEntry || typeof keyEntry !== 'object') return 'api';
-  const rawType = String(
-    keyEntry.authMethod ||
-      keyEntry.authType ||
-      keyEntry.authMode ||
-      keyEntry.type ||
-      keyEntry.source ||
-      ''
-  ).toLowerCase();
-  if (
-    rawType.includes('service_account') ||
-    rawType.includes('service-account') ||
-    rawType === 'vertex_sa' ||
-    Boolean(
-      keyEntry.serviceAccountMeta?.clientEmail ||
-        keyEntry.clientEmail ||
-        keyEntry.serviceAccount?.clientEmail ||
-        keyEntry.meta?.clientEmail
-    )
-  ) {
-    return 'service_account';
-  }
-  if (
-    rawType === 'device_code' ||
-    keyEntry.oauthMeta?.flow === 'device_code' ||
-    keyEntry.oauthMeta?.provider === 'kilocode'
-  ) {
-    return 'device_code';
-  }
-  if (
-    rawType === 'google_oauth' ||
-    rawType === 'google-oauth' ||
-    rawType.includes('google_oauth') ||
-    String(keyEntry.oauthProvider || '').toLowerCase() === 'google' ||
-    keyEntry.oauthMeta?.provider === 'google' ||
-    (!rawType.includes('oauth2') &&
-      !rawType.includes('device') &&
-      Boolean(keyEntry.oauthMeta?.tierLabel || keyEntry.oauthMeta?.tier))
-  ) {
-    return 'google_oauth';
-  }
-  if (rawType === 'oauth2') {
-    return 'oauth2';
-  }
-  if (
-    rawType.includes('oauth') ||
-    rawType.includes('pkce') ||
-    Boolean(keyEntry.oauthProvider) ||
-    /oauth\s*pkce/i.test(String(keyEntry.label || ''))
-  ) {
-    return 'oauth_pkce';
-  }
-  return 'api';
-}
-
-function getGoogleOAuthMeta(keyEntry, overrideMeta = null) {
-  const baseMeta =
-    (keyEntry && typeof keyEntry === 'object' && (keyEntry.oauthMeta || keyEntry.meta)) || {};
-  const extra = overrideMeta && typeof overrideMeta === 'object' ? overrideMeta : {};
-  const meta = { ...baseMeta, ...extra };
-
-  const email = String(meta.email || keyEntry?.email || '').trim();
-  const name = String(meta.name || keyEntry?.accountName || '').trim();
-  const projectId = String(meta.projectId || meta.project_id || keyEntry?.projectId || '').trim();
-  const tier = String(meta.tier || meta.planTier || '').toLowerCase();
-  const rawTierLabel = String(meta.tierLabel || meta.planLabel || '').trim();
-
-  const billingActive =
-    meta.billingActive === true ||
-    meta.billingEnabled === true ||
-    tier.includes('pay') ||
-    tier.includes('paid') ||
-    tier.includes('billing') ||
-    /pay-as-you-go|billing\s*active/i.test(rawTierLabel);
-
-  const isFreeTier =
-    !billingActive &&
-    (tier.includes('free') || /free\s*tier/i.test(rawTierLabel));
-
-  const tierLabel =
-    rawTierLabel ||
-    (billingActive
-      ? 'Pay-as-you-go (Cloud Billing Active)'
-      : isFreeTier
-        ? 'Gemini API Free Tier'
-        : 'Gemini API · Google Account Connected');
-
-  const shortTierLabel = billingActive
-    ? 'Pay-as-you-go'
-    : isFreeTier
-      ? 'Free Tier'
-      : 'Connected';
-
-  const modelsCount =
-    typeof meta.modelsCount === 'number' && Number.isFinite(meta.modelsCount)
-      ? meta.modelsCount
-      : Array.isArray(meta.models)
-        ? meta.models.length
-        : null;
-
-  const topModels = Array.isArray(meta.topModels)
-    ? meta.topModels.filter((m) => typeof m === 'string' && m.trim())
-    : [];
-
-  const quotaSummary =
-    meta.quotaSummary && typeof meta.quotaSummary === 'object'
-      ? meta.quotaSummary
-      : billingActive
-        ? {
-            label: 'Pay-as-you-go (Tier 1+)',
-            rpmEstimate: '150–1,000+ RPM',
-            rpdEstimate: '10,000+ RPD',
-            note: 'Cloud Billing đã bật — hạn mức theo Google Cloud Quotas.',
-          }
-        : isFreeTier
-          ? {
-              label: 'Gemini API Free Tier',
-              rpmEstimate: '5–15 RPM',
-              rpdEstimate: '25–1,500 RPD',
-              note: 'Gói miễn phí (Flash ~15 RPM / 1,500 RPD; Pro ~2–5 RPM).',
-            }
-          : {
-              label: 'Google Account (Standard)',
-              rpmEstimate: 'Theo hạn mức GCP Project',
-              rpdEstimate: 'Xem Cloud Console Quotas',
-              note: 'Bật Cloud Billing API trên GCP Project để đọc trạng thái thanh toán.',
-            };
-
-  const checkedAt = meta.checkedAt || meta.refreshedAt || meta.updatedAt || null;
-
-  return {
-    email,
-    name,
-    projectId,
-    tier,
-    billingActive,
-    isFreeTier,
-    tierLabel,
-    shortTierLabel,
-    modelsCount,
-    topModels,
-    quotaSummary,
-    checkedAt,
-  };
-}
-
-function getGoogleTierPillClass(meta) {
-  if (meta?.billingActive) {
-    return 'border-indigo-500/35 bg-indigo-500/15 text-indigo-500';
-  }
-  if (meta?.isFreeTier) {
-    return 'border-emerald-500/35 bg-emerald-500/15 text-emerald-500';
-  }
-  return 'border-blue-500/35 bg-blue-500/15 text-blue-500';
-}
-
-function getGoogleTierDotClass(meta) {
-  if (meta?.billingActive) return 'bg-emerald-500';
-  if (meta?.isFreeTier) return 'bg-emerald-500';
-  return 'bg-blue-500';
 }
 
 function stripJsonCommentsAndTrailingCommas(str) {
@@ -3238,203 +3056,35 @@ export function ProvidersPage() {
 
   const totalConnected = providers.length;
 
+  // Stable callbacks for the memoised <ProviderCard/> (the real handlers close over fresh state).
+  const cardHandlersRef = useRef({});
+  useEffect(() => {
+    cardHandlersRef.current = { open: openPresetModal, toggle: handleCardToggleEnabled };
+  });
+  const handleCardOpen = useCallback((preset, prov) => cardHandlersRef.current.open?.(preset, prov), []);
+  const handleCardToggle = useCallback((prov, next) => cardHandlersRef.current.toggle?.(prov, next), []);
+
   const renderProviderCard = (presetObj, configuredProv, keyId) => {
-    const isConnected = Boolean(configuredProv);
-    const isEnabled = configuredProv ? configuredProv.enabled !== false : true;
-    const keys = configuredProv?.apiKeys || [];
-    const activeKeyCount = keys.filter((k) => k.enabled !== false).length;
-    const hasServiceAccount = keys.some((k) => getKeyAuthKind(k) === 'service_account');
-    const hasOAuthPkce = keys.some((k) => getKeyAuthKind(k) === 'oauth_pkce');
-    const hasOAuth2 = keys.some((k) => getKeyAuthKind(k) === 'oauth2');
-    const hasDeviceCode = keys.some((k) => getKeyAuthKind(k) === 'device_code');
-    const googleOAuthKey = keys.find((k) => getKeyAuthKind(k) === 'google_oauth') || null;
-    const googleOAuthMeta = googleOAuthKey ? getGoogleOAuthMeta(googleOAuthKey) : null;
-    const coolingKeys = keys.filter((k) => k.cooldownUntil && k.cooldownUntil > nowMs);
-    const maxCooldownSec = coolingKeys.length
-      ? Math.max(...coolingKeys.map((k) => Math.ceil((k.cooldownUntil - nowMs) / 1000)))
-      : 0;
-    const testResult = configuredProv ? cardTestResults[configuredProv.id] : null;
     const catalogCount =
       catalogByPreset[presetObj.preset]?.length ||
       presetObj.modelCatalog?.length ||
       configuredProv?.models?.length ||
       presetObj.models?.length ||
       0;
+    // Only tiles with a cooldown key need the ticking clock; 0 keeps the rest memo-stable.
+    const hasCooldownKey = (configuredProv?.apiKeys || []).some((k) => k.cooldownUntil);
 
     return (
-      <div
+      <ProviderCard
         key={keyId}
-        role="button"
-        tabIndex={0}
-        onClick={() => openPresetModal(presetObj, configuredProv)}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' || e.key === ' ') {
-            e.preventDefault();
-            openPresetModal(presetObj, configuredProv);
-          }
-        }}
-        className={`group relative flex cursor-pointer items-center justify-between gap-3 rounded-xl border px-3.5 py-3 transition-[border-color,background-color,opacity] focus-visible:outline-2 focus-visible:outline-[#E56A4A] ${
-          isConnected
-            ? 'border-[var(--border-strong)] bg-[var(--bg-card)] hover:border-[#E56A4A]/70'
-            : 'border-[var(--border-subtle)] bg-[var(--bg-card)]/90 hover:border-[var(--border-strong)] hover:bg-[var(--bg-card)]'
-        } ${isConnected && !isEnabled ? 'opacity-60' : ''}`}
-      >
-        <div className="flex min-w-0 items-center gap-3">
-          {/* Real Provider Logo with automatic monogram fallback (exact 9router.png match) */}
-          <ProviderLogo
-            preset={presetObj.preset}
-            logo={presetObj.logo}
-            logoExt={presetObj.logoExt}
-            name={configuredProv?.name || presetObj.name}
-            color={presetObj.color}
-            monogram={presetObj.monogram}
-            size="lg"
-          />
-
-          <div className="min-w-0">
-            <div className="flex items-center gap-1.5">
-              <span className="truncate text-[13.5px] font-semibold text-[var(--text-primary)]">
-                {configuredProv?.name || presetObj.name}
-              </span>
-              {presetObj.badge && !isConnected ? (
-                <span className="hidden shrink-0 rounded-full bg-white/[0.06] px-1.5 py-0.5 text-[9.5px] font-medium text-[var(--text-secondary)] xl:inline">
-                  {presetObj.badge}
-                </span>
-              ) : null}
-            </div>
-
-            <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[11.5px]">
-              {isConnected ? (
-                !isEnabled ? (
-                  <span className="inline-flex items-center gap-1 rounded-full bg-white/10 px-2 py-0.5 text-[10.5px] font-medium text-[var(--text-muted)]">
-                    Disabled
-                  </span>
-                ) : coolingKeys.length > 0 ? (
-                  <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/15 px-2 py-0.5 text-[10.5px] font-semibold text-amber-400">
-                    <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />
-                    429 ({maxCooldownSec}s)
-                  </span>
-                ) : (
-                  <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10.5px] font-semibold text-emerald-400">
-                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-                    {presetObj.keyOptional && activeKeyCount === 0
-                      ? `1 ${t('common.connected')}`
-                      : `${Math.max(1, activeKeyCount)} ${t('common.connected')}`}
-                  </span>
-                )
-              ) : (
-                <span className="text-[var(--text-muted)]">{t('common.noConnections')}</span>
-              )}
-
-              {catalogCount > 0 ? (
-                <span className="rounded bg-[var(--bg-subtle)] px-1.5 py-0.2 font-mono text-[10px] text-[var(--text-secondary)]">
-                  {catalogCount}m
-                </span>
-              ) : null}
-
-              {isConnected && hasServiceAccount ? (
-                <span className="inline-flex items-center gap-1 rounded-full border border-sky-500/35 bg-sky-500/12 px-1.5 py-0.2 text-[9.5px] font-semibold text-sky-500">
-                  <FileJson2 className="h-2.5 w-2.5" aria-hidden="true" />
-                  {t('providers.badge.serviceAccount')}
-                </span>
-              ) : null}
-
-              {isConnected && hasOAuthPkce ? (
-                <span className="inline-flex items-center gap-1 rounded-full border border-indigo-500/35 bg-indigo-500/12 px-1.5 py-0.2 text-[9.5px] font-semibold text-indigo-500">
-                  <ShieldCheck className="h-2.5 w-2.5" aria-hidden="true" />
-                  {t('providers.badge.oauthPkce')}
-                </span>
-              ) : null}
-
-              {isConnected && hasOAuth2 ? (
-                <span className="inline-flex items-center gap-1 rounded-full border border-violet-500/35 bg-violet-500/12 px-1.5 py-0.2 text-[9.5px] font-semibold text-violet-400">
-                  <ShieldCheck className="h-2.5 w-2.5" aria-hidden="true" />
-                  {t('providers.badge.oauth2')}
-                </span>
-              ) : null}
-
-              {isConnected && hasDeviceCode ? (
-                <span className="inline-flex items-center gap-1 rounded-full border border-orange-500/35 bg-orange-500/12 px-1.5 py-0.2 text-[9.5px] font-semibold text-orange-400">
-                  <KeyRound className="h-2.5 w-2.5" aria-hidden="true" />
-                  {t('providers.badge.deviceCode')}
-                </span>
-              ) : null}
-
-              {isConnected && googleOAuthMeta ? (
-                <>
-                  <span
-                    title={
-                      googleOAuthMeta.email
-                        ? `${googleOAuthMeta.email} · ${googleOAuthMeta.tierLabel}`
-                        : googleOAuthMeta.tierLabel
-                    }
-                    className="inline-flex items-center gap-1 rounded-full border border-blue-500/35 bg-blue-500/12 px-1.5 py-0.2 text-[9.5px] font-semibold text-blue-500"
-                  >
-                    <GoogleMark className="h-2.5 w-2.5 shrink-0" />
-                    {t('providers.badge.googleOAuth')}
-                  </span>
-                  <span
-                    title={
-                      googleOAuthMeta.email
-                        ? `${googleOAuthMeta.email} — ${googleOAuthMeta.tierLabel}`
-                        : googleOAuthMeta.tierLabel
-                    }
-                    className={`inline-flex items-center gap-1 rounded-full border px-1.5 py-0.2 text-[9.5px] font-semibold ${getGoogleTierPillClass(
-                      googleOAuthMeta
-                    )}`}
-                  >
-                    <span
-                      className={`h-1.5 w-1.5 rounded-full ${getGoogleTierDotClass(googleOAuthMeta)}`}
-                      aria-hidden="true"
-                    />
-                    {googleOAuthMeta.billingActive
-                      ? t('providers.badge.payAsYouGo')
-                      : googleOAuthMeta.isFreeTier
-                        ? t('providers.badge.freeTier')
-                        : t('providers.badge.googleConnected')}
-                  </span>
-                </>
-              ) : null}
-
-              {testResult ? (
-                <span
-                  className={`rounded px-1.5 py-0.2 font-mono text-[10px] ${
-                    testResult.ok
-                      ? 'bg-emerald-500/15 text-emerald-400'
-                      : 'bg-red-500/15 text-red-400'
-                  }`}
-                >
-                  {testResult.ok ? `${testResult.latencyMs}ms` : `ERR ${testResult.status || ''}`}
-                </span>
-              ) : null}
-            </div>
-          </div>
-        </div>
-
-        {/* Right Quick Toggle Switch + Detail Page Link on Connected Cards (exact 9router.png match) */}
-        {isConnected ? (
-          <div
-            className="flex shrink-0 items-center gap-2"
-            onClick={(e) => e.stopPropagation()}
-            onKeyDown={(e) => e.stopPropagation()}
-          >
-            <Link
-              to={`/providers/${encodeURIComponent(configuredProv.id)}`}
-              title="Manage keys, cooldowns, aliases & models"
-              aria-label={`Manage ${configuredProv.name} details`}
-              className="rounded-md border border-[var(--border-subtle)] bg-[var(--bg-subtle)] px-2 py-1 text-[10.5px] font-semibold text-[var(--text-secondary)] transition-colors hover:border-[#E56A4A] hover:text-[#E56A4A]"
-            >
-              Details →
-            </Link>
-            <Switch
-              size="sm"
-              checked={isEnabled}
-              onChange={(val) => handleCardToggleEnabled(configuredProv, val)}
-              aria-label={`Toggle ${configuredProv.name}`}
-            />
-          </div>
-        ) : null}
-      </div>
+        presetObj={presetObj}
+        configuredProv={configuredProv}
+        catalogCount={catalogCount}
+        testResult={configuredProv ? cardTestResults[configuredProv.id] : null}
+        nowMs={hasCooldownKey ? nowMs : 0}
+        onOpen={handleCardOpen}
+        onToggleEnabled={handleCardToggle}
+      />
     );
   };
 

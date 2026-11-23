@@ -1,3 +1,4 @@
+import { lazy, Suspense } from 'react';
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 import { ThemeProvider } from './context/ThemeContext';
 import { LocaleProvider } from './context/LocaleContext';
@@ -5,26 +6,38 @@ import { AuthProvider } from './context/AuthContext';
 import { ToastProvider } from './context/ToastContext';
 import { AuthGate } from './components/AuthGate';
 import { SidebarLayout } from './components/SidebarLayout';
-import { LoginPage } from './pages/LoginPage';
-import { LandingPage } from './pages/LandingPage';
-import { OverviewPage } from './pages/OverviewPage';
-import { ProvidersPage } from './pages/ProvidersPage';
-import { ProviderDetailPage } from './pages/ProviderDetailPage';
-import { MediaProvidersPage } from './pages/MediaProvidersPage';
-import { MediaProviderDetailPage } from './pages/MediaProviderDetailPage';
-import { ModelsPage } from './pages/ModelsPage';
-import { CombosPage } from './pages/CombosPage';
-import { UsagePage } from './pages/UsagePage';
-import { QuotaPage } from './pages/QuotaPage';
-import { TokenSaverPage } from './pages/TokenSaverPage';
-import { CliToolsPage } from './pages/CliToolsPage';
-import { PlaygroundPage } from './pages/PlaygroundPage';
-import { SkillsPage } from './pages/SkillsPage';
-import { ConsoleLogPage } from './pages/ConsoleLogPage';
-import { TranslatorPage } from './pages/TranslatorPage';
-import { ProxyPoolsPage } from './pages/ProxyPoolsPage';
-import { SettingsPage } from './pages/SettingsPage';
-import { PricingPage } from './pages/PricingPage';
+
+// Route-level code splitting: each page ships as its own chunk and is fetched on first visit,
+// so the initial bundle no longer carries all 21 pages (ProvidersPage alone is ~6.7k lines).
+const LoginPage = lazy(() => import('./pages/LoginPage').then((m) => ({ default: m.LoginPage })));
+const LandingPage = lazy(() => import('./pages/LandingPage').then((m) => ({ default: m.LandingPage })));
+const OverviewPage = lazy(() => import('./pages/OverviewPage').then((m) => ({ default: m.OverviewPage })));
+const ProvidersPage = lazy(() => import('./pages/ProvidersPage').then((m) => ({ default: m.ProvidersPage })));
+const ProviderDetailPage = lazy(() => import('./pages/ProviderDetailPage').then((m) => ({ default: m.ProviderDetailPage })));
+const MediaProvidersPage = lazy(() => import('./pages/MediaProvidersPage').then((m) => ({ default: m.MediaProvidersPage })));
+const MediaProviderDetailPage = lazy(() => import('./pages/MediaProviderDetailPage').then((m) => ({ default: m.MediaProviderDetailPage })));
+const ModelsPage = lazy(() => import('./pages/ModelsPage').then((m) => ({ default: m.ModelsPage })));
+const CombosPage = lazy(() => import('./pages/CombosPage').then((m) => ({ default: m.CombosPage })));
+const UsagePage = lazy(() => import('./pages/UsagePage').then((m) => ({ default: m.UsagePage })));
+const QuotaPage = lazy(() => import('./pages/QuotaPage').then((m) => ({ default: m.QuotaPage })));
+const TokenSaverPage = lazy(() => import('./pages/TokenSaverPage').then((m) => ({ default: m.TokenSaverPage })));
+const CliToolsPage = lazy(() => import('./pages/CliToolsPage').then((m) => ({ default: m.CliToolsPage })));
+const PlaygroundPage = lazy(() => import('./pages/PlaygroundPage').then((m) => ({ default: m.PlaygroundPage })));
+const SkillsPage = lazy(() => import('./pages/SkillsPage').then((m) => ({ default: m.SkillsPage })));
+const ConsoleLogPage = lazy(() => import('./pages/ConsoleLogPage').then((m) => ({ default: m.ConsoleLogPage })));
+const TranslatorPage = lazy(() => import('./pages/TranslatorPage').then((m) => ({ default: m.TranslatorPage })));
+const ProxyPoolsPage = lazy(() => import('./pages/ProxyPoolsPage').then((m) => ({ default: m.ProxyPoolsPage })));
+const SettingsPage = lazy(() => import('./pages/SettingsPage').then((m) => ({ default: m.SettingsPage })));
+const PricingPage = lazy(() => import('./pages/PricingPage').then((m) => ({ default: m.PricingPage })));
+
+function PageFallback() {
+  return (
+    <div className="flex min-h-[40vh] items-center justify-center" role="status" aria-live="polite">
+      <span className="h-6 w-6 animate-spin rounded-full border-2 border-[var(--border-strong)] border-t-[#E56A4A] motion-reduce:animate-none" />
+      <span className="sr-only">Loading…</span>
+    </div>
+  );
+}
 
 export default function App() {
   return (
@@ -34,8 +47,8 @@ export default function App() {
           <ToastProvider>
             <AuthProvider>
               <Routes>
-                <Route path="/landing" element={<LandingPage />} />
-                <Route path="/login" element={<LoginPage />} />
+                <Route path="/landing" element={<Suspense fallback={<PageFallback />}><LandingPage /></Suspense>} />
+                <Route path="/login" element={<Suspense fallback={<PageFallback />}><LoginPage /></Suspense>} />
                 <Route element={<AuthGate />}>
                   <Route element={<SidebarLayout />}>
                     <Route path="/" element={<OverviewPage />} />
