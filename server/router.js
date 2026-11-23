@@ -1350,12 +1350,26 @@ export class RouterService {
                   await this.storage.clearProviderKeyCooldown(provider.id, keyEntry.id);
                 }
 
+                const logId = nanoid();
+                const loggedAt = new Date().toISOString();
+                const fallbackHops = Math.max(0, attemptTrail.length - 1);
+
                 this.liveEvents?.markRequestEnd(provider.slug, {
+                  id: logId,
+                  timestamp: loggedAt,
                   model: `${target.providerSlug}/${target.upstreamModel}`,
+                  requestedModel,
+                  resolvedModel: `${target.providerSlug}/${target.upstreamModel}`,
+                  endpoint,
+                  keyName: routerKey?.name || "Anonymous",
                   status: 200,
                   promptTokens,
                   completionTokens,
+                  cachedTokens,
                   cost: estCost,
+                  savedChars,
+                  fallbackHops,
+                  stream: false,
                   latencyMs: totalLatency
                 });
                 markedActive = false;
@@ -1367,8 +1381,8 @@ export class RouterService {
 
                 await this.storage.recordRequestLog(
                   {
-                    id: nanoid(),
-                    timestamp: new Date().toISOString(),
+                    id: logId,
+                    timestamp: loggedAt,
                     keyId: routerKey?.id || null,
                     keyName: routerKey?.name || "Anonymous",
                     requestedModel,
@@ -1387,7 +1401,7 @@ export class RouterService {
                     ...(ponytailApplied ? { ponytail: true } : {}),
                     ...(headroomApplied ? { headroom: true } : {}),
                     ...(adapterUsed ? { adapterUsed } : {}),
-                    fallbackHops: Math.max(0, attemptTrail.length - 1),
+                    fallbackHops,
                     attemptTrail
                   },
                   routerKey?.id || null
@@ -1584,12 +1598,26 @@ export class RouterService {
               }
 
               const totalLatency = Date.now() - startedAt;
+              const streamLogId = nanoid();
+              const streamLoggedAt = new Date().toISOString();
+              const streamFallbackHops = Math.max(0, attemptTrail.length - 1);
+
               this.liveEvents?.markRequestEnd(provider.slug, {
+                id: streamLogId,
+                timestamp: streamLoggedAt,
                 model: `${target.providerSlug}/${target.upstreamModel}`,
+                requestedModel,
+                resolvedModel: `${target.providerSlug}/${target.upstreamModel}`,
+                endpoint,
+                keyName: routerKey?.name || "Anonymous",
                 status: finalStatus,
                 promptTokens,
                 completionTokens,
+                cachedTokens,
                 cost: estCost,
+                savedChars,
+                fallbackHops: streamFallbackHops,
+                stream: true,
                 latencyMs: totalLatency,
                 ...(finalStatus !== 200 ? { error: lastErrorMessage } : {})
               });
@@ -1602,8 +1630,8 @@ export class RouterService {
 
               await this.storage.recordRequestLog(
                 {
-                  id: nanoid(),
-                  timestamp: new Date().toISOString(),
+                  id: streamLogId,
+                  timestamp: streamLoggedAt,
                   keyId: routerKey?.id || null,
                   keyName: routerKey?.name || "Anonymous",
                   requestedModel,
@@ -1622,7 +1650,7 @@ export class RouterService {
                   ...(ponytailApplied ? { ponytail: true } : {}),
                   ...(headroomApplied ? { headroom: true } : {}),
                   ...(adapterUsed ? { adapterUsed } : {}),
-                  fallbackHops: Math.max(0, attemptTrail.length - 1),
+                  fallbackHops: streamFallbackHops,
                   attemptTrail,
                   ...(finalStatus !== 200 ? { error: lastErrorMessage } : {})
                 },

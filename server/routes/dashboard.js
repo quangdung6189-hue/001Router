@@ -3172,13 +3172,237 @@ export function createDashboardRouter(storage, liveEvents = null) {
     return res.json({ ok: true });
   });
 
-  // --- Usage & Logs (Enhanced 9Router Parity: 6 periods, cost breakdown, byKey, byEndpoint, live SSE) ---
+  // --- Usage & Logs (Enhanced 9Router Parity: 6 periods, cost breakdown, byKey, byEndpoint, live SSE + persisted Supabase/DB sync) ---
+
+  const mapPersistedLogToRecent = (log) => {
+    const httpCode = Number(log.status) || 200;
+    const ok = httpCode >= 200 && httpCode < 400;
+    return {
+      id: log.id || `${log.timestamp || ""}-${log.providerSlug || "router"}-${log.latencyMs || 0}`,
+      timestamp: log.timestamp || new Date().toISOString(),
+      provider: log.providerSlug || "router",
+      model: log.resolvedModel || log.requestedModel || log.providerSlug || "unknown",
+      requestedModel: log.requestedModel || "",
+      resolvedModel: log.resolvedModel || "",
+      endpoint: log.endpoint || "/v1/chat/completions",
+      keyName: log.keyName || "Anonymous",
+      status: ok ? "ok" : "error",
+      httpStatus: httpCode,
+      promptTokens: Number(log.promptTokens) || 0,
+      completionTokens: Number(log.completionTokens) || 0,
+      cachedTokens: Number(log.cachedTokens) || 0,
+      cost: Number(log.estimatedCost) || 0,
+      savedChars: Number(log.savedChars) || 0,
+      latencyMs: Number(log.latencyMs) || 0,
+      fallbackHops: Number(log.fallbackHops) || 0,
+      stream: Boolean(log.stream),
+      ...(log.error ? { error: log.error } : {}),
+      ...(Array.isArray(log.attemptTrail) ? { attemptTrail: log.attemptTrail } : {})
+    };
+  };
+
+  const buildMergedRecentRequests = (limit = 100) => {
+    const maxItems = Math.max(1, Math.min(Number(limit) || 100, 200));
+    const liveSnap = liveEvents
+      ? liveEvents.getUsageSnapshot(maxItems)
+      : { activeRequests: {}, recentRequests: [], errorProvider: null };
+    const persisted = storage.getLogs().slice(0, maxItems).map(mapPersistedLogToRecent);
+
+    const byId = new Map();
+    for (const item of persisted) {
+      byId.set(item.id, item);
+    }
+    for (const item of liveSnap.recentRequests || []) {
+      const existing = byId.get(item.id);
+      if (existing) {
+        // Prefer richer persisted record while keeping any fresher live metadata
+        byId.set(item.id, {
+          ...item,
+          ...existing,
+          promptTokens: existing.promptTokens || item.promptTokens || 0,
+          completionTokens: existing.completionTokens || item.completionTokens || 0,
+          cachedTokens: existing.cachedTokens || item.cachedTokens || 0,
+          cost: existing.cost || item.cost || 0,
+          savedChars: existing.savedChars || item.savedChars || 0
+        });
+      } else {
+        // Avoid duplicating if an older live item has a random ID matching a persisted log
+        const itemTs = Date.parse(item.timestamp || "");
+        const dup = persisted.some(
+          (p) =>
+            p.provider === item.provider &&
+            p.model === item.model &&
+            p.httpStatus === (item.httpStatus || 200) &&
+            Math.abs((Date.parse(p.timestamp || "") || 0) - (itemTs || 0)) <= 2000 &&
+            Math.abs((p.latencyMs || 0) - (item.latencyMs || 0)) <= 50
+        );
+        if (!dup) {
+          byId.set(item.id, item);
+        }
+      }
+    }
+
+    const merged = [...byId.values()]
+      .sort((a, b) => String(b.timestamp || "").localeCompare(String(a.timestamp || "")))
+      .slice(0, maxItems);
+
+    return {
+      activeRequests: liveSnap.activeRequests || {},
+      recentRequests: merged,
+      errorProvider: liveSnap.errorProvider || null,
+      totalLogged: storage.getLogs().length,
+      timestamp: new Date().toISOString()
+    };
+  };
+
+  const buildUsageSeries = (filteredLogs, range, nowMs) => {
+    const pad2 = (n) => String(n).padStart(2, "0");
+    const emptyBucket = (key, label, fullLabel) => ({
+      key,
+      date: key,
+      label,
+      fullLabel,
+      requests: 0,
+      tokens: 0,
+      promptTokens: 0,
+      completionTokens: 0,
+      cachedTokens: 0,
+      cost: 0,
+      errors: 0,
+      savedChars: 0
+    });
+
+    const addLog = (bucket, log) => {
+      const isOk = log.status >= 200 && log.status < 400;
+      const pTok = Number(log.promptTokens) || 0;
+      const cTok = Number(log.completionTokens) || 0;
+      const caTok = Number(log.cachedTokens) || 0;
+      const cost = Number(log.estimatedCost) || 0;
+      const saved = Number(log.savedChars) || 0;
+      bucket.requests += 1;
+      bucket.tokens += pTok + cTok;
+      bucket.promptTokens += pTok;
+      bucket.completionTokens += cTok;
+      bucket.cachedTokens += caTok;
+      bucket.cost = Number((bucket.cost + cost).toFixed(6));
+      if (!isOk) bucket.errors += 1;
+      bucket.savedChars += saved;
+    };
+
+    if (range === "today") {
+      // 12 two-hour buckets across today (UTC day matching todayPrefix)
+      const dayStr = new Date(nowMs).toISOString().slice(0, 10);
+      const buckets = Array.from({ length: 12 }, (_, idx) => {
+        const h0 = idx * 2;
+        const h1 = h0 + 2;
+        return emptyBucket(
+          `${dayStr}T${pad2(h0)}`,
+          `${pad2(h0)}h`,
+          `${dayStr} · ${pad2(h0)}:00–${pad2(h1)}:00`
+        );
+      });
+      for (const log of filteredLogs) {
+        const ts = Date.parse(log.timestamp);
+        if (!Number.isFinite(ts)) continue;
+        const hr = new Date(ts).getUTCHours();
+        const idx = Math.max(0, Math.min(11, Math.floor(hr / 2)));
+        addLog(buckets[idx], log);
+      }
+      return buckets;
+    }
+
+    if (range === "24h") {
+      // 12 rolling two-hour buckets ending at current hour
+      const bucketMs = 2 * 60 * 60 * 1000;
+      const endBucket = Math.floor(nowMs / bucketMs) * bucketMs + bucketMs;
+      const startBucket = endBucket - 12 * bucketMs;
+      const buckets = Array.from({ length: 12 }, (_, idx) => {
+        const t0 = startBucket + idx * bucketMs;
+        const d0 = new Date(t0);
+        const h0 = pad2(d0.getUTCHours());
+        const d1 = new Date(t0 + bucketMs);
+        const h1 = pad2(d1.getUTCHours());
+        const dayPart = d0.toISOString().slice(5, 10);
+        return emptyBucket(
+          d0.toISOString().slice(0, 13),
+          `${h0}h`,
+          `${dayPart} · ${h0}:00–${h1}:00`
+        );
+      });
+      for (const log of filteredLogs) {
+        const ts = Date.parse(log.timestamp);
+        if (!Number.isFinite(ts)) continue;
+        const idx = Math.floor((ts - startBucket) / bucketMs);
+        if (idx >= 0 && idx < 12) addLog(buckets[idx], log);
+      }
+      return buckets;
+    }
+
+    if (range === "7d") {
+      const dayMs = 24 * 60 * 60 * 1000;
+      const buckets = [];
+      const byDate = new Map();
+      for (let i = 6; i >= 0; i--) {
+        const d = new Date(nowMs - i * dayMs);
+        const iso = d.toISOString().slice(0, 10);
+        const b = emptyBucket(iso, iso.slice(5), iso);
+        buckets.push(b);
+        byDate.set(iso, b);
+      }
+      for (const log of filteredLogs) {
+        const iso = typeof log.timestamp === "string" ? log.timestamp.slice(0, 10) : "";
+        const b = byDate.get(iso);
+        if (b) addLog(b, log);
+      }
+      return buckets;
+    }
+
+    // 30d / 60d / all -> 10 to 12 clean chronological buckets so bars & scrub line stay balanced
+    const totalDays = range === "30d" ? 30 : range === "60d" ? 60 : 0;
+    const dayMs = 24 * 60 * 60 * 1000;
+    let spanStart = nowMs - 11 * dayMs;
+    if (totalDays > 0) {
+      spanStart = nowMs - (totalDays - 1) * dayMs;
+    } else if (filteredLogs.length > 0) {
+      const parsedTs = filteredLogs.map((l) => Date.parse(l.timestamp)).filter(Number.isFinite);
+      if (parsedTs.length > 0) {
+        spanStart = Math.min(...parsedTs);
+      }
+    }
+    const slotCount = range === "30d" ? 10 : 12;
+    const totalSpan = Math.max(dayMs * slotCount, nowMs - spanStart + dayMs);
+    const stepMs = totalSpan / slotCount;
+    const buckets = Array.from({ length: slotCount }, (_, idx) => {
+      const t0 = spanStart + idx * stepMs;
+      const t1 = t0 + stepMs - 1;
+      const s0 = new Date(t0).toISOString().slice(5, 10);
+      const s1 = new Date(Math.min(t1, nowMs)).toISOString().slice(5, 10);
+      return emptyBucket(
+        new Date(t0).toISOString().slice(0, 10) + `#${idx}`,
+        s0,
+        s0 === s1 ? s0 : `${s0} → ${s1}`
+      );
+    });
+    for (const log of filteredLogs) {
+      const ts = Date.parse(log.timestamp);
+      if (!Number.isFinite(ts)) continue;
+      const idx = Math.max(0, Math.min(slotCount - 1, Math.floor((ts - spanStart) / stepMs)));
+      addLog(buckets[idx], log);
+    }
+    return buckets;
+  };
+
+  router.get("/usage/live", (req, res) => {
+    const rawLimit = Number(req.query.limit);
+    const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 200) : 100;
+    return res.json(buildMergedRecentRequests(limit));
+  });
 
   router.get("/usage/stream", (req, res) => {
     if (!liveEvents) {
       return res.status(503).json({ error: "Live events hub unavailable" });
     }
-    return liveEvents.attachUsageStream(req, res);
+    return liveEvents.attachUsageStream(req, res, buildMergedRecentRequests(100));
   });
 
   router.get("/usage", (req, res) => {
@@ -3351,7 +3575,8 @@ export function createDashboardRouter(storage, liveEvents = null) {
     }
 
     const totalRequests = logs.length;
-    const liveSnap = liveEvents ? liveEvents.getUsageSnapshot() : { activeRequests: {}, recentRequests: [], errorProvider: null };
+    const mergedLive = buildMergedRecentRequests(100);
+    const series = buildUsageSeries(logs, range, now);
     return res.json({
       range,
       summary: {
@@ -3366,14 +3591,15 @@ export function createDashboardRouter(storage, liveEvents = null) {
         savedChars,
         avgLatencyMs: totalRequests > 0 ? Math.round(latencySum / totalRequests) : 0
       },
+      series,
       byDay: [...byDayMap.values()].sort((a, b) => a.date.localeCompare(b.date)),
       byProvider: [...byProviderMap.values()].sort((a, b) => b.requests - a.requests),
       byModel: [...byModelMap.values()].sort((a, b) => b.requests - a.requests),
       byKey: [...byKeyMap.values()].sort((a, b) => b.requests - a.requests),
       byEndpoint: [...byEndpointMap.values()].sort((a, b) => b.requests - a.requests),
-      activeRequests: liveSnap.activeRequests,
-      recentRequests: liveSnap.recentRequests,
-      errorProvider: liveSnap.errorProvider
+      activeRequests: mergedLive.activeRequests,
+      recentRequests: mergedLive.recentRequests,
+      errorProvider: mergedLive.errorProvider
     });
   });
 
@@ -3581,6 +3807,7 @@ export function createDashboardRouter(storage, liveEvents = null) {
 
   router.delete("/logs", async (_req, res) => {
     await storage.clearLogs();
+    liveEvents?.clearRecentRequests();
     return res.json({ ok: true });
   });
 

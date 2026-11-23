@@ -1,11 +1,10 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   Activity,
   AlertCircle,
   ArrowDownLeft,
   ArrowUpRight,
-  BarChart3,
   Database,
   DollarSign,
   Eye,
@@ -30,6 +29,8 @@ import { ProviderLogo } from '../components/ProviderLogo';
 import { ProviderTopology } from '../components/ProviderTopology';
 import { LucianSlidingTabs } from '../components/lucian/LucianSlidingTabs';
 import { LucianGlowGrid, LucianGlowCard } from '../components/lucian/LucianGlowGrid';
+import { LucianActivityBarChart } from '../components/lucian/LucianActivityBarChart';
+import { LucianTrendScrubChart } from '../components/lucian/LucianTrendScrubChart';
 
 const MAIN_TABS = [
   { id: 'overview', label: 'Overview' },
@@ -67,12 +68,59 @@ function formatCost(val) {
   return `$${n.toFixed(2)}`;
 }
 
+const MAX_LIVE_RECENT_UI = 100;
+
+/**
+ * Merge incoming recent requests into existing history WITHOUT ever wiping
+ * or dropping previously seen requests (e.g. when a serverless SSE reconnect
+ * emits an empty snapshot). Enriches existing items with fuller token/cost metadata.
+ */
+function mergeRecentRequests(existing = [], incoming = []) {
+  if (!Array.isArray(incoming) || incoming.length === 0) {
+    return existing;
+  }
+  const byId = new Map();
+  for (const item of existing) {
+    if (!item) continue;
+    const key = item.id || `${item.timestamp}-${item.provider}-${item.model}-${item.latencyMs}`;
+    byId.set(key, item);
+  }
+  for (const item of incoming) {
+    if (!item) continue;
+    const key = item.id || `${item.timestamp}-${item.provider}-${item.model}-${item.latencyMs}`;
+    const prev = byId.get(key);
+    if (prev) {
+      byId.set(key, {
+        ...prev,
+        ...item,
+        promptTokens: Math.max(Number(prev.promptTokens) || 0, Number(item.promptTokens) || 0),
+        completionTokens: Math.max(
+          Number(prev.completionTokens) || 0,
+          Number(item.completionTokens) || 0
+        ),
+        cachedTokens: Math.max(Number(prev.cachedTokens) || 0, Number(item.cachedTokens) || 0),
+        cost: Math.max(Number(prev.cost) || 0, Number(item.cost) || 0),
+        savedChars: Math.max(Number(prev.savedChars) || 0, Number(item.savedChars) || 0),
+        fallbackHops: Math.max(Number(prev.fallbackHops) || 0, Number(item.fallbackHops) || 0),
+        error: item.error || prev.error,
+        attemptTrail: item.attemptTrail || prev.attemptTrail,
+      });
+    } else {
+      byId.set(key, item);
+    }
+  }
+  return [...byId.values()]
+    .sort((a, b) => String(b.timestamp || '').localeCompare(String(a.timestamp || '')))
+    .slice(0, MAX_LIVE_RECENT_UI);
+}
+
 export function UsagePage() {
   const toast = useToast();
   const { t } = useLocale();
   const [activeTab, setActiveTab] = useState('overview');
-  const [range, setRange] = useState('7d');
+  const [range, setRange] = useState('today');
   const [chartMetric, setChartMetric] = useState('requests');
+  const [chartView, setChartView] = useState('bars'); // bars (#095) | line (#096)
   const [tableView, setTableView] = useState('model');
   const [tableMode, setTableMode] = useState('tokens'); // tokens | costs
 
@@ -80,8 +128,14 @@ export function UsagePage() {
   const [providers, setProviders] = useState([]);
   const [activeRequests, setActiveRequests] = useState({});
   const [recentRequests, setRecentRequests] = useState([]);
+  const [recentPulseSlugs, setRecentPulseSlugs] = useState({});
+  const [newArrivalIds, setNewArrivalIds] = useState(() => new Set());
   const [errorProvider, setErrorProvider] = useState(null);
   const [sseLive, setSseLive] = useState(false);
+
+  const seenReqIdsRef = useRef(new Set());
+  const hydratedRecentRef = useRef(false);
+  const pulseTimersRef = useRef([]);
 
   // Request Details tab filters
   const [logs, setLogs] = useState([]);
@@ -102,31 +156,100 @@ export function UsagePage() {
     return () => clearTimeout(timer);
   }, [modelInput]);
 
+  useEffect(() => {
+    return () => {
+      for (const tid of pulseTimersRef.current) clearTimeout(tid);
+      pulseTimersRef.current = [];
+    };
+  }, []);
+
   const [loadingUsage, setLoadingUsage] = useState(true);
   const [loadingLogs, setLoadingLogs] = useState(true);
-  const [hoveredDay, setHoveredDay] = useState(null);
   const [selectedLog, setSelectedLog] = useState(null);
   const [clearOpen, setClearOpen] = useState(false);
   const [clearing, setClearing] = useState(false);
 
-  const loadUsage = useCallback(async () => {
-    setLoadingUsage(true);
-    try {
-      const [usageRes, provRes] = await Promise.all([
-        usageApi.get(range),
-        providersApi.list(),
-      ]);
-      setUsage(usageRes || null);
-      setProviders(provRes?.providers || []);
-      if (usageRes?.activeRequests) setActiveRequests(usageRes.activeRequests);
-      if (Array.isArray(usageRes?.recentRequests)) setRecentRequests(usageRes.recentRequests);
-      if (usageRes?.errorProvider !== undefined) setErrorProvider(usageRes.errorProvider);
-    } catch (err) {
-      toast.error(err?.message || 'Failed to load usage stats');
-    } finally {
-      setLoadingUsage(false);
+  const ingestRecentBatch = useCallback((incoming, { animateNew = true } = {}) => {
+    if (!Array.isArray(incoming) || incoming.length === 0) return [];
+    const newlyArrived = [];
+    for (const item of incoming) {
+      if (!item) continue;
+      const key = item.id || `${item.timestamp}-${item.provider}-${item.model}-${item.latencyMs}`;
+      if (!seenReqIdsRef.current.has(key)) {
+        seenReqIdsRef.current.add(key);
+        if (hydratedRecentRef.current) {
+          newlyArrived.push({ key, item });
+        }
+      }
     }
-  }, [range, toast]);
+    hydratedRecentRef.current = true;
+    setRecentRequests((prev) => mergeRecentRequests(prev, incoming));
+
+    if (animateNew && newlyArrived.length > 0) {
+      const addedKeys = newlyArrived.map((x) => x.key);
+      setNewArrivalIds((prev) => {
+        const next = new Set(prev);
+        for (const k of addedKeys) next.add(k);
+        return next;
+      });
+      const clearHighlightTimer = setTimeout(() => {
+        setNewArrivalIds((prev) => {
+          const next = new Set(prev);
+          for (const k of addedKeys) next.delete(k);
+          return next;
+        });
+      }, 2600);
+      pulseTimersRef.current.push(clearHighlightTimer);
+
+      const slugsToPulse = [...new Set(newlyArrived.map((x) => x.item.provider).filter(Boolean))];
+      if (slugsToPulse.length > 0) {
+        setRecentPulseSlugs((prev) => {
+          const next = { ...prev };
+          for (const slug of slugsToPulse) {
+            next[slug] = (next[slug] || 0) + 1;
+          }
+          return next;
+        });
+        const clearBeamTimer = setTimeout(() => {
+          setRecentPulseSlugs((prev) => {
+            const next = { ...prev };
+            for (const slug of slugsToPulse) {
+              const rem = (next[slug] || 1) - 1;
+              if (rem <= 0) delete next[slug];
+              else next[slug] = rem;
+            }
+            return next;
+          });
+        }, 2800);
+        pulseTimersRef.current.push(clearBeamTimer);
+      }
+    }
+    return newlyArrived;
+  }, []);
+
+  const loadUsage = useCallback(
+    async ({ silent = false } = {}) => {
+      if (!silent) setLoadingUsage(true);
+      try {
+        const [usageRes, provRes] = await Promise.all([
+          usageApi.get(range),
+          providersApi.list(),
+        ]);
+        setUsage(usageRes || null);
+        setProviders(provRes?.providers || []);
+        if (usageRes?.activeRequests) setActiveRequests(usageRes.activeRequests);
+        if (Array.isArray(usageRes?.recentRequests) && usageRes.recentRequests.length > 0) {
+          ingestRecentBatch(usageRes.recentRequests, { animateNew: silent });
+        }
+        if (usageRes?.errorProvider !== undefined) setErrorProvider(usageRes.errorProvider);
+      } catch (err) {
+        if (!silent) toast.error(err?.message || 'Failed to load usage stats');
+      } finally {
+        if (!silent) setLoadingUsage(false);
+      }
+    },
+    [range, toast, ingestRecentBatch]
+  );
 
   const loadLogs = useCallback(async () => {
     setLoadingLogs(true);
@@ -155,32 +278,73 @@ export function UsagePage() {
     loadLogs();
   }, [loadLogs]);
 
-  // Live SSE /api/usage/stream for real-time topology beams & recent requests feed
+  // Dual-mode live stream: SSE (/api/usage/stream) + resilient incremental polling (/api/usage/live)
+  // so multi-instance serverless deployments (Vercel + Supabase) deliver every single request
+  // batch reliably and NEVER clear previous history on reconnect.
   useEffect(() => {
+    let closed = false;
     const es = new EventSource('/api/usage/stream', { withCredentials: true });
-    es.onopen = () => setSseLive(true);
-    es.onerror = () => setSseLive(false);
+    es.onopen = () => {
+      if (!closed) setSseLive(true);
+    };
+    es.onerror = () => {
+      if (!closed) setSseLive(false);
+    };
     es.onmessage = (evt) => {
+      if (closed) return;
       try {
         const msg = JSON.parse(evt.data);
         if (msg.activeRequests) setActiveRequests(msg.activeRequests);
-        if (Array.isArray(msg.recentRequests)) setRecentRequests(msg.recentRequests);
+        if (Array.isArray(msg.recentRequests) && msg.recentRequests.length > 0) {
+          const arrived = ingestRecentBatch(msg.recentRequests, { animateNew: true });
+          if (arrived.length > 0) {
+            loadUsage({ silent: true });
+          }
+        }
         if (msg.errorProvider !== undefined) setErrorProvider(msg.errorProvider);
       } catch {
-        // ignore
+        // ignore malformed SSE packet
       }
     };
+
+    const pollLive = async () => {
+      if (closed || (typeof document !== 'undefined' && document.visibilityState === 'hidden')) {
+        return;
+      }
+      try {
+        const snap = await usageApi.live(MAX_LIVE_RECENT_UI);
+        if (closed || !snap) return;
+        setSseLive(true);
+        if (snap.activeRequests) setActiveRequests(snap.activeRequests);
+        if (snap.errorProvider !== undefined) setErrorProvider(snap.errorProvider);
+        if (Array.isArray(snap.recentRequests) && snap.recentRequests.length > 0) {
+          const arrived = ingestRecentBatch(snap.recentRequests, { animateNew: true });
+          if (arrived.length > 0) {
+            loadUsage({ silent: true });
+          }
+        }
+      } catch {
+        // transient network hiccup — keep existing history intact
+      }
+    };
+
+    const pollTimer = setInterval(pollLive, 3000);
     return () => {
+      closed = true;
       es.close();
+      clearInterval(pollTimer);
       setSseLive(false);
     };
-  }, []);
+  }, [ingestRecentBatch, loadUsage]);
 
   const handleClearLogs = async () => {
     setClearing(true);
     try {
       await usageApi.clearLogs();
       setClearOpen(false);
+      seenReqIdsRef.current.clear();
+      setRecentRequests([]);
+      setNewArrivalIds(new Set());
       toast.success('Cleared request logs');
       setOffset(0);
       await Promise.all([loadUsage(), loadLogs()]);
@@ -194,15 +358,27 @@ export function UsagePage() {
   const summary = usage?.summary || {};
   const totalReq = summary.totalRequests || 0;
   const byDay = usage?.byDay || [];
+  const chartSeries = useMemo(() => {
+    if (Array.isArray(usage?.series) && usage.series.length > 0) {
+      return usage.series;
+    }
+    return byDay.map((d) => ({
+      key: d.date,
+      label: String(d.date || '').slice(5),
+      fullLabel: d.date,
+      requests: d.requests || 0,
+      tokens: d.tokens || 0,
+      promptTokens: d.promptTokens || 0,
+      completionTokens: d.completionTokens || 0,
+      cost: d.cost || 0,
+      savedChars: d.savedChars || 0,
+      errors: d.errors || 0,
+    }));
+  }, [usage?.series, byDay]);
   const byProvider = usage?.byProvider || [];
   const byModel = usage?.byModel || [];
   const byKey = usage?.byKey || [];
   const byEndpoint = usage?.byEndpoint || [];
-
-  const maxDayValue = useMemo(() => {
-    if (byDay.length === 0) return 1;
-    return Math.max(0.0001, ...byDay.map((d) => Number(d[chartMetric] || 0)));
-  }, [byDay, chartMetric]);
 
   const maxProvReq = useMemo(
     () => Math.max(1, ...byProvider.map((p) => Number(p.requests || 0))),
@@ -228,31 +404,10 @@ export function UsagePage() {
     return [...slugs].sort();
   }, [providers, byProvider]);
 
-  const activeMetricDef = METRICS.find((m) => m.id === chartMetric) || METRICS[0];
-
-  // Build SVG area/polyline coordinates for interactive time-series UsageChart
-  const svgChart = useMemo(() => {
-    const W = 720;
-    const H = 170;
-    const padX = 28;
-    const padY = 18;
-    if (byDay.length === 0) return null;
-    const pts = byDay.map((d, i) => {
-      const val = Number(d[chartMetric] || 0);
-      const x =
-        byDay.length === 1
-          ? W / 2
-          : padX + (i / (byDay.length - 1)) * (W - padX * 2);
-      const y = H - padY - (val / maxDayValue) * (H - padY * 2);
-      return { x, y, val, day: d };
-    });
-    const linePath = pts.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(' ');
-    const areaPath =
-      pts.length > 0
-        ? `${linePath} L ${pts[pts.length - 1].x.toFixed(1)} ${(H - padY).toFixed(1)} L ${pts[0].x.toFixed(1)} ${(H - padY).toFixed(1)} Z`
-        : '';
-    return { W, H, pts, linePath, areaPath };
-  }, [byDay, chartMetric, maxDayValue]);
+  const activeRangeLabel = useMemo(
+    () => RANGES.find((r) => r.id === range)?.label || range,
+    [range]
+  );
 
   const groupedRows = useMemo(() => {
     if (tableView === 'provider') {
@@ -452,8 +607,10 @@ export function UsagePage() {
               <ProviderTopology
                 providers={providers}
                 activeRequests={activeRequests}
+                recentPulseSlugs={recentPulseSlugs}
                 errorProvider={errorProvider}
                 byProvider={byProvider}
+                sseLive={sseLive}
               />
             </div>
 
@@ -461,15 +618,15 @@ export function UsagePage() {
               <div className="flex items-center justify-between border-b border-[var(--border-subtle)] bg-[var(--bg-subtle)] px-4 py-2.5">
                 <div className="flex items-center gap-2">
                   <Radio
-                    className={`h-3.5 w-3.5 ${sseLive ? 'text-emerald-400' : 'text-[var(--text-muted)]'}`}
+                    className={`h-3.5 w-3.5 ${sseLive ? 'text-emerald-500' : 'text-[var(--text-muted)]'}`}
                     aria-hidden="true"
                   />
                   <span className="text-xs font-semibold uppercase tracking-wide text-[var(--text-primary)]">
                     Live Recent Requests
                   </span>
                 </div>
-                <span className="font-mono text-[10.5px] text-[var(--text-muted)]">
-                  {recentRequests.length} recent
+                <span className="rounded-full bg-[var(--bg-card)] px-2 py-0.5 font-mono text-[10.5px] font-semibold text-[var(--text-secondary)]">
+                  {recentRequests.length} saved
                 </span>
               </div>
 
@@ -479,7 +636,9 @@ export function UsagePage() {
                     Live requests stream here in real time as clients call 001Router.
                   </div>
                 ) : (
-                  recentRequests.slice(0, 25).map((r, idx) => {
+                  recentRequests.map((r, idx) => {
+                    const reqKey =
+                      r.id || `${r.timestamp}-${r.provider}-${r.model}-${r.latencyMs}-${idx}`;
                     const httpCode =
                       typeof r.httpStatus === 'number'
                         ? r.httpStatus
@@ -490,8 +649,24 @@ export function UsagePage() {
                             : 500;
                     const ok =
                       r.status === 'ok' || (httpCode >= 200 && httpCode < 400);
+                    const isFresh = newArrivalIds.has(reqKey);
+                    const totalTok = (Number(r.promptTokens) || 0) + (Number(r.completionTokens) || 0);
                     return (
-                      <div key={r.id || idx} className="space-y-1 px-4 py-2.5 text-xs">
+                      <button
+                        key={reqKey}
+                        type="button"
+                        onClick={() =>
+                          setSelectedLog({
+                            ...r,
+                            providerSlug: r.provider,
+                            status: httpCode,
+                            estimatedCost: r.cost ?? r.estimatedCost ?? 0,
+                          })
+                        }
+                        className={`block w-full space-y-1.5 px-4 py-2.5 text-left text-xs transition-colors hover:bg-[var(--bg-elevated)]/70 ${
+                          isFresh ? 'live-req-new bg-emerald-500/[0.06]' : ''
+                        }`}
+                      >
                         <div className="flex items-center justify-between gap-2">
                           <span className="inline-flex min-w-0 items-center gap-1.5">
                             <span
@@ -502,13 +677,18 @@ export function UsagePage() {
                             <code className="truncate font-semibold text-[var(--text-primary)]">
                               {r.model || r.resolvedModel || r.requestedModel || r.provider}
                             </code>
+                            {isFresh ? (
+                              <span className="shrink-0 rounded bg-emerald-500/15 px-1 py-0.2 font-mono text-[9px] font-bold text-emerald-500">
+                                NEW
+                              </span>
+                            ) : null}
                           </span>
                           <span className="inline-flex shrink-0 items-center gap-1.5 font-mono text-[10.5px]">
                             <span
-                              className={`rounded px-1 py-0.2 text-[9.5px] font-bold ${
+                              className={`rounded px-1.5 py-0.2 text-[9.5px] font-bold ${
                                 ok
-                                  ? 'bg-emerald-500/15 text-emerald-400'
-                                  : 'bg-red-500/15 text-red-400'
+                                  ? 'bg-emerald-500/15 text-emerald-500'
+                                  : 'bg-red-500/15 text-red-500'
                               }`}
                             >
                               {httpCode}
@@ -518,19 +698,37 @@ export function UsagePage() {
                             </span>
                           </span>
                         </div>
-                        <div className="flex items-center justify-between text-[11px] text-[var(--text-secondary)]">
-                          <span>{r.provider || 'router'}</span>
-                          <span>
-                            {formatCompactNumber((r.promptTokens || 0) + (r.completionTokens || 0))}{' '}
-                            tok · {formatRelativeTime(r.timestamp)}
+                        <div className="flex flex-wrap items-center justify-between gap-1 text-[11px] text-[var(--text-secondary)]">
+                          <span className="inline-flex items-center gap-1.5">
+                            <span className="font-medium text-[var(--text-primary)]">
+                              {r.provider || 'router'}
+                            </span>
+                            {r.fallbackHops > 0 ? (
+                              <span className="inline-flex items-center gap-0.5 rounded bg-amber-500/15 px-1 text-[9.5px] font-semibold text-amber-500">
+                                <GitBranch className="h-2.5 w-2.5" aria-hidden="true" />
+                                {r.fallbackHops}
+                              </span>
+                            ) : null}
+                            {r.savedChars > 0 ? (
+                              <span className="rounded bg-violet-500/12 px-1 text-[9.5px] font-semibold text-violet-400">
+                                −{formatCompactNumber(r.savedChars)}c
+                              </span>
+                            ) : null}
+                          </span>
+                          <span className="font-mono text-[10.5px] text-[var(--text-muted)]">
+                            {totalTok > 0
+                              ? `${formatCompactNumber(r.promptTokens || 0)}/${formatCompactNumber(r.completionTokens || 0)} tok`
+                              : '0 tok'}
+                            {Number(r.cost) > 0 ? ` · ${formatCost(r.cost)}` : ''} ·{' '}
+                            {formatRelativeTime(r.timestamp)}
                           </span>
                         </div>
                         {!ok && r.error ? (
-                          <div className="truncate rounded bg-red-500/10 px-2 py-0.5 font-mono text-[10px] text-red-400">
+                          <div className="truncate rounded bg-red-500/10 px-2 py-0.5 font-mono text-[10px] text-red-500">
                             {r.error}
                           </div>
                         ) : null}
-                      </div>
+                      </button>
                     );
                   })
                 )}
@@ -538,106 +736,28 @@ export function UsagePage() {
             </div>
           </section>
 
-          {/* Interactive SVG Area/Line Time-Series UsageChart */}
-          <section className="r-card p-5">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div className="flex items-center gap-2">
-                <BarChart3 className="h-4 w-4 text-[#E56A4A]" aria-hidden="true" />
-                <h2 className="text-sm font-semibold text-[var(--text-primary)]">
-                  Activity Trend ({range})
-                </h2>
-              </div>
-
-              <div className="flex flex-wrap items-center gap-1.5">
-                {METRICS.map((m) => (
-                  <button
-                    key={m.id}
-                    type="button"
-                    onClick={() => setChartMetric(m.id)}
-                    className={`rounded-md border px-2.5 py-1 text-xs font-medium transition-colors ${
-                      chartMetric === m.id
-                        ? 'border-[#E56A4A] bg-[#E56A4A]/15 text-[#E56A4A]'
-                        : 'border-[var(--border-subtle)] bg-[var(--bg-subtle)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
-                    }`}
-                  >
-                    {m.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {!svgChart ? (
-              <div className="flex h-44 items-center justify-center text-xs text-[var(--text-muted)]">
-                No activity recorded in this time range.
-              </div>
+          {/* Activity Trend Chart powered by Lucian UX/UI (#095 Morphing Bars + #096 Scrub Line) */}
+          <section aria-label={`Activity Trend (${activeRangeLabel})`}>
+            {chartView === 'bars' ? (
+              <LucianActivityBarChart
+                series={chartSeries}
+                metric={chartMetric}
+                metrics={METRICS}
+                onMetricChange={setChartMetric}
+                rangeLabel={activeRangeLabel}
+                chartView={chartView}
+                onChartViewChange={setChartView}
+              />
             ) : (
-              <div className="mt-4 space-y-2">
-                <div className="h-5 text-xs text-[var(--text-secondary)]">
-                  {hoveredDay ? (
-                    <span>
-                      <strong className="text-[var(--text-primary)]">{hoveredDay.date}</strong>:{' '}
-                      {formatNumber(hoveredDay.requests)} reqs ·{' '}
-                      {formatNumber(hoveredDay.tokens)} tokens · {formatCost(hoveredDay.cost)} ·{' '}
-                      {formatNumber(hoveredDay.savedChars)} chars saved ·{' '}
-                      {formatNumber(hoveredDay.errors)} err
-                    </span>
-                  ) : (
-                    <span>Hover any point to inspect daily requests, tokens &amp; est. cost.</span>
-                  )}
-                </div>
-
-                <div className="overflow-x-auto rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-subtle)] p-2">
-                  <svg
-                    viewBox={`0 0 ${svgChart.W} ${svgChart.H}`}
-                    className="h-44 w-full min-w-[420px]"
-                    role="img"
-                    aria-label={`${activeMetricDef.label} trend chart`}
-                  >
-                    <defs>
-                      <linearGradient id="usage-area-grad" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="0%" stopColor={activeMetricDef.color} stopOpacity="0.32" />
-                        <stop offset="100%" stopColor={activeMetricDef.color} stopOpacity="0.02" />
-                      </linearGradient>
-                    </defs>
-                    <path d={svgChart.areaPath} fill="url(#usage-area-grad)" />
-                    <path
-                      d={svgChart.linePath}
-                      fill="none"
-                      stroke={activeMetricDef.color}
-                      strokeWidth="2.5"
-                      strokeLinejoin="round"
-                      strokeLinecap="round"
-                    />
-                    {svgChart.pts.map((pt) => (
-                      <g
-                        key={pt.day.date}
-                        onMouseEnter={() => setHoveredDay(pt.day)}
-                        onMouseLeave={() => setHoveredDay(null)}
-                        className="cursor-pointer"
-                      >
-                        <circle
-                          cx={pt.x}
-                          cy={pt.y}
-                          r={hoveredDay?.date === pt.day.date ? 6 : 4}
-                          fill={activeMetricDef.color}
-                          stroke="var(--bg-card)"
-                          strokeWidth="2"
-                        />
-                        <text
-                          x={pt.x}
-                          y={svgChart.H - 3}
-                          textAnchor="middle"
-                          fontSize="9.5"
-                          fill="var(--text-muted)"
-                          fontFamily="monospace"
-                        >
-                          {String(pt.day.date).slice(5)}
-                        </text>
-                      </g>
-                    ))}
-                  </svg>
-                </div>
-              </div>
+              <LucianTrendScrubChart
+                series={chartSeries}
+                metric={chartMetric}
+                metrics={METRICS}
+                onMetricChange={setChartMetric}
+                rangeLabel={activeRangeLabel}
+                chartView={chartView}
+                onChartViewChange={setChartView}
+              />
             )}
           </section>
 

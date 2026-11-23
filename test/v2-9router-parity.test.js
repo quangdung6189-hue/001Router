@@ -1093,6 +1093,30 @@ describe("001Router v2.0 — 9Router Full Parity Suite", () => {
       assert.equal(chatRes.status, 200);
       const chatJson = await chatRes.json();
       assert.equal(chatJson.choices[0].message.content, "Relay OK");
+
+      // 13e. Verify GET /api/usage?range=today returns 12 hourly series buckets and
+      // GET /api/usage/live returns persisted requests even if in-memory liveEvents is empty
+      const usageTodayRes = await apiFetch("/api/usage?range=today");
+      assert.equal(usageTodayRes.status, 200);
+      const usageToday = await usageTodayRes.json();
+      assert.ok(Array.isArray(usageToday.series) && usageToday.series.length === 12);
+      assert.ok(usageToday.series.some((b) => b.requests > 0));
+      assert.ok(Array.isArray(usageToday.recentRequests) && usageToday.recentRequests.length > 0);
+
+      // Simulate serverless cold instance where in-memory liveEvents.recentRequests is empty
+      app.liveEvents.recentRequests = [];
+      const liveRes = await apiFetch("/api/usage/live?limit=50");
+      assert.equal(liveRes.status, 200);
+      const liveJson = await liveRes.json();
+      assert.ok(
+        Array.isArray(liveJson.recentRequests) && liveJson.recentRequests.length > 0,
+        "GET /api/usage/live must hydrate persisted logs when in-memory liveEvents is empty"
+      );
+      const relayEntry = liveJson.recentRequests.find((r) => r.provider === "deepseek-relay");
+      assert.ok(relayEntry, "Persisted deepseek-relay request must appear in /api/usage/live");
+      assert.equal(relayEntry.httpStatus, 200);
+      assert.equal(relayEntry.promptTokens, 5);
+      assert.equal(relayEntry.completionTokens, 2);
     } finally {
       await new Promise((resolve) => relayServer.close(resolve));
     }

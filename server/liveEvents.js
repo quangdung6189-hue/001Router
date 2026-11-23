@@ -8,7 +8,7 @@ import { nanoid } from "nanoid";
 import { redactSecrets } from "./security/redact.js";
 
 const MAX_CONSOLE_LOGS = 500;
-const MAX_RECENT_REQUESTS = 50;
+const MAX_RECENT_REQUESTS = 100;
 
 export class LiveEventsHub {
   constructor() {
@@ -71,6 +71,12 @@ export class LiveEventsHub {
     this.consoleLogs = [];
   }
 
+  clearRecentRequests() {
+    this.recentRequests = [];
+    this.errorProvider = null;
+    this._broadcastUsageSnapshot();
+  }
+
   /**
    * Record that an upstream request has started on `providerSlug`.
    * @param {string} providerSlug
@@ -98,19 +104,34 @@ export class LiveEventsHub {
       const errSnippet = !ok
         ? redactSecrets(String(summary.error || `HTTP ${summary.status || 500}`)).slice(0, 140)
         : undefined;
-      this.recentRequests.unshift({
-        id: nanoid(8),
-        timestamp: new Date().toISOString(),
+      const entryId = summary.id || nanoid(10);
+      const entry = {
+        id: entryId,
+        timestamp: summary.timestamp || new Date().toISOString(),
         provider: providerSlug || "unknown",
-        model: summary.model || "unknown",
+        model: summary.model || summary.resolvedModel || summary.requestedModel || "unknown",
+        requestedModel: summary.requestedModel || summary.model || "",
+        resolvedModel: summary.resolvedModel || summary.model || "",
+        endpoint: summary.endpoint || "/v1/chat/completions",
+        keyName: summary.keyName || "Anonymous",
         status: ok ? "ok" : "error",
         httpStatus: summary.status || 200,
         promptTokens: Number(summary.promptTokens) || 0,
         completionTokens: Number(summary.completionTokens) || 0,
+        cachedTokens: Number(summary.cachedTokens) || 0,
         cost: Number(summary.cost) || 0,
+        savedChars: Number(summary.savedChars) || 0,
         latencyMs: Number(summary.latencyMs) || 0,
+        fallbackHops: Number(summary.fallbackHops) || 0,
+        stream: Boolean(summary.stream),
         ...(errSnippet ? { error: errSnippet } : {})
-      });
+      };
+      const existingIdx = this.recentRequests.findIndex((item) => item.id === entryId);
+      if (existingIdx !== -1) {
+        this.recentRequests[existingIdx] = { ...this.recentRequests[existingIdx], ...entry };
+      } else {
+        this.recentRequests.unshift(entry);
+      }
       if (this.recentRequests.length > MAX_RECENT_REQUESTS) {
         this.recentRequests.length = MAX_RECENT_REQUESTS;
       }
@@ -129,14 +150,15 @@ export class LiveEventsHub {
     this._broadcastUsageSnapshot();
   }
 
-  getUsageSnapshot() {
+  getUsageSnapshot(limit = 50) {
     const active = {};
     for (const [k, v] of this.activeRequests.entries()) {
       if (v > 0) active[k] = v;
     }
+    const maxItems = Math.max(1, Math.min(Number(limit) || 50, MAX_RECENT_REQUESTS));
     return {
       activeRequests: active,
-      recentRequests: this.recentRequests.slice(0, 30),
+      recentRequests: this.recentRequests.slice(0, maxItems),
       errorProvider: this.errorProvider,
       timestamp: new Date().toISOString()
     };
@@ -163,14 +185,15 @@ export class LiveEventsHub {
    * @param {import("express").Request} req
    * @param {import("express").Response} res
    */
-  attachUsageStream(req, res) {
+  attachUsageStream(req, res, initialSnapshot = null) {
     res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
     res.setHeader("Cache-Control", "no-cache, no-transform");
     res.setHeader("Connection", "keep-alive");
     res.flushHeaders?.();
 
     this.usageClients.add(res);
-    res.write(`data: ${JSON.stringify(this.getUsageSnapshot())}\n\n`);
+    const snap = initialSnapshot || this.getUsageSnapshot();
+    res.write(`data: ${JSON.stringify(snap)}\n\n`);
 
     const heartbeat = setInterval(() => {
       if (res.writableEnded) {

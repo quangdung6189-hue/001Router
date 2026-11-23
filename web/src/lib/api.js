@@ -460,6 +460,7 @@ export const securityApi = {
 
 export const usageApi = {
   get: (range = '7d') => apiFetch(`/api/usage?range=${encodeURIComponent(range)}`),
+  live: (limit = 100) => apiFetch(`/api/usage/live?limit=${encodeURIComponent(limit)}`),
   logs: (params = {}) => {
     const qs = new URLSearchParams();
     if (params.limit !== undefined) qs.set('limit', String(params.limit));
