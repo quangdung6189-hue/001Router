@@ -1,5 +1,6 @@
 import { upstreamFetch } from "./proxy.js";
 import crypto from "node:crypto";
+import { extractCodeAndState } from "./oauthFlows.js";
 import { isLoopbackHost } from "./security/headers.js";
 import {
   classifyHostForSSRF,
@@ -599,6 +600,8 @@ export async function inspectGoogleAccountAndPlan(accessToken, options = {}) {
 export async function exchangeGoogleOAuthPkce({
   code,
   state,
+  pastedUrl,
+  callbackUrl,
   tokenUrl = DEFAULT_GOOGLE_TOKEN_URL,
   fetchImpl = upstreamFetch,
   userinfoUrl = DEFAULT_GOOGLE_USERINFO_URL,
@@ -610,12 +613,13 @@ export async function exchangeGoogleOAuthPkce({
   const now = nowFn();
   pruneExpiredGoogleStates(now);
 
-  const trimmedCode = typeof code === "string" ? code.trim() : "";
+  const extracted = extractCodeAndState({ code, state, pastedUrl, callbackUrl });
+  const trimmedCode = extracted.code;
   if (!trimmedCode) {
     throw createHttpError(400, "Missing required Google OAuth authorization 'code'");
   }
 
-  const trimmedState = typeof state === "string" ? state.trim() : "";
+  const trimmedState = extracted.state;
   if (!trimmedState) {
     throw createHttpError(400, "Missing required Google OAuth PKCE 'state'");
   }

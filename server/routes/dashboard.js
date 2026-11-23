@@ -75,6 +75,7 @@ import {
 } from "../googleOAuth.js";
 import {
   exchangeGenericOAuthPkce,
+  extractCodeAndState,
   getGenericOAuthAccessToken,
   pollDeviceCodeFlow,
   startDeviceCodeFlow,
@@ -1721,9 +1722,18 @@ export function createDashboardRouter(storage, liveEvents = null) {
     const dispatcher = existingGemini ? getProxyDispatcher(existingGemini, storage) : undefined;
     const googleOpts = extractGoogleOAuthOptions(req);
 
+    let extractedInput;
+    try {
+      extractedInput = extractCodeAndState(body);
+    } catch (err) {
+      return res.status(Number(err?.status) || 400).json({
+        error: sanitizeSecrets(err?.message || "Invalid Google OAuth callback URL")
+      });
+    }
+
     // Always consume any persisted cross-instance PKCE record to prevent replay attacks
-    if (typeof body.state === "string" && body.state.trim()) {
-      const targetState = body.state.trim();
+    if (extractedInput.state) {
+      const targetState = extractedInput.state;
       const inMemory = Boolean(peekGooglePkceState(targetState));
       let restoredEnc = "";
       const hasPersisted =
@@ -1753,8 +1763,10 @@ export function createDashboardRouter(storage, liveEvents = null) {
     let exchanged;
     try {
       exchanged = await exchangeGoogleOAuthPkce({
-        code: body.code,
-        state: body.state,
+        code: extractedInput.code,
+        state: extractedInput.state,
+        pastedUrl: body.pastedUrl,
+        callbackUrl: body.callbackUrl,
         ...(googleOpts.tokenUrl ? { tokenUrl: googleOpts.tokenUrl } : {}),
         ...(googleOpts.userinfoUrl ? { userinfoUrl: googleOpts.userinfoUrl } : {}),
         ...(googleOpts.modelsUrl ? { modelsUrl: googleOpts.modelsUrl } : {}),

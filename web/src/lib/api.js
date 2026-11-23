@@ -145,10 +145,13 @@ export const providersApi = {
       method: 'POST',
       body: payload,
     }),
-  exchangeGoogleOAuth: (code, state) =>
+  exchangeGoogleOAuth: (codeOrPayload, state) =>
     apiFetch('/api/providers/oauth/google/exchange', {
       method: 'POST',
-      body: { code, state },
+      body:
+        codeOrPayload && typeof codeOrPayload === 'object'
+          ? codeOrPayload
+          : { code: codeOrPayload, state },
     }),
   refreshGooglePlan: (providerId) =>
     apiFetch(`/api/providers/${encodeURIComponent(providerId)}/oauth/google/refresh-plan`, {
