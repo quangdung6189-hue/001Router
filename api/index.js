@@ -1,4 +1,4 @@
-import { createApp } from "../server/index.js";
+import { createApp, shouldEnforcePasswordChange } from "../server/index.js";
 
 let appPromise = null;
 
@@ -6,7 +6,8 @@ function getApp() {
   if (!appPromise) {
     appPromise = createApp({
       host: process.env.HOST || "127.0.0.1",
-      enforceBindCheck: false
+      enforceBindCheck: false,
+      enforcePasswordChange: shouldEnforcePasswordChange()
     }).catch((err) => {
       appPromise = null;
       throw err;

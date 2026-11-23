@@ -66,6 +66,7 @@ export async function runSecurityScan(options = {}) {
     typeof process.env.ROUTER001_MASTER_KEY === "string" &&
       process.env.ROUTER001_MASTER_KEY.trim()
   );
+  const masterKeyFromEnv = hasMasterKey;
   if (!hasMasterKey) {
     try {
       const stat = await fs.stat(masterKeyPath);
@@ -335,6 +336,14 @@ export async function runSecurityScan(options = {}) {
         : "Custom bcrypt password configured"
     },
     {
+      id: "masterKeyLocation",
+      label: "Master Key Separation",
+      status: masterKeyFromEnv ? "PASS" : "WARN",
+      detail: masterKeyFromEnv
+        ? "Master key supplied via ROUTER001_MASTER_KEY (kept outside the data directory)"
+        : "Master key is stored next to db.json — anyone who copies the data folder gets both. Set ROUTER001_MASTER_KEY (64 hex chars) and delete data/.master.key after migrating"
+    },
+    {
       id: "codeScan",
       label: "Static Code Scan (no eval / child_process)",
       status: codeClean ? "PASS" : "FAIL",
@@ -364,6 +373,7 @@ export async function runSecurityScan(options = {}) {
     bindHost,
     isLoopback: loopback,
     defaultPassword,
+    masterKeyFromEnv,
     codeClean,
     checks
   };

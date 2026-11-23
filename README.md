@@ -47,6 +47,9 @@ Các lệnh hữu ích khác:
 
 1. Truy cập: **`http://localhost:20128`**
 2. Mật khẩu mặc định lần đầu: **`1234`** — hãy đổi ngay. Mật khẩu mới phải dài **8–72 ký tự** và không được là mật khẩu phổ biến (`1234`, `12345678`, `password`…).
+   - Lần đăng nhập đầu bằng `1234`, dashboard **bắt buộc** đổi mật khẩu mới được dùng (mọi API khác trả `403 PASSWORD_CHANGE_REQUIRED`). Đặt `ROUTER001_ALLOW_DEFAULT_PASSWORD=1` nếu cần tắt (không khuyến nghị).
+   - **Master key:** mặc định lưu ở `data/.master.key` cạnh `db.json`. Để tách khỏi dữ liệu, đặt `ROUTER001_MASTER_KEY` (64 ký tự hex, dùng đúng giá trị trong file hiện tại để vẫn giải mã được dữ liệu cũ) rồi chuyển file `.master.key` ra ngoài thư mục data. Mục *Master Key Separation* trong Security Scan sẽ chuyển sang PASS.
+   - **Reverse proxy:** đặt `ROUTER001_TRUST_PROXY=1` (số hop) để khoá đăng nhập tính theo IP thật của client thay vì IP của proxy. Không đặt = không tin header `X-Forwarded-*`.
    - Khi server bind vào loopback (mặc định `127.0.0.1`), chỉ chấp nhận `Host` là `localhost` / `127.x.x.x` / `::1` (chống DNS-rebinding). Nếu truy cập qua reverse proxy / tên miền riêng, khai báo: `ROUTER001_ALLOWED_HOSTS=router.example.com,other.host` (phân cách bằng dấu phẩy).
 3. Sau khi đăng nhập, vào mục **Settings** để đổi mật khẩu mới. Mật khẩu được băm an toàn bằng `bcryptjs` và lưu trong `app/data/db.json`.
 4. Trên trang chủ (**Endpoint & Keys**), bạn sẽ thấy sẵn một **Router API Key** mặc định dạng `sk-001r-...` để sử dụng ngay (có thể tạo thêm hoặc thu hồi bất cứ lúc nào).

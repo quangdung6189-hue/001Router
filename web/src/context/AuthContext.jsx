@@ -7,6 +7,7 @@ const AuthContext = createContext(null);
 export function AuthProvider({ children }) {
   const [authenticated, setAuthenticated] = useState(false);
   const [defaultPassword, setDefaultPassword] = useState(false);
+  const [passwordChangeRequired, setPasswordChangeRequired] = useState(false);
   const [loading, setLoading] = useState(true);
   const navigate = useNavigate();
   const location = useLocation();
@@ -29,6 +30,7 @@ export function AuthProvider({ children }) {
       const res = await authApi.me();
       setAuthenticated(Boolean(res?.authenticated));
       setDefaultPassword(Boolean(res?.defaultPassword));
+      setPasswordChangeRequired(Boolean(res?.passwordChangeRequired));
     } catch {
       setAuthenticated(false);
     } finally {
@@ -46,6 +48,7 @@ export function AuthProvider({ children }) {
     try {
       const me = await authApi.me();
       setDefaultPassword(Boolean(me?.defaultPassword));
+      setPasswordChangeRequired(Boolean(me?.passwordChangeRequired));
     } catch {
       // ignore
     }
@@ -65,12 +68,14 @@ export function AuthProvider({ children }) {
       authenticated,
       defaultPassword,
       setDefaultPassword,
+      passwordChangeRequired,
+      setPasswordChangeRequired,
       loading,
       login,
       logout,
       checkAuth,
     }),
-    [authenticated, defaultPassword, loading, login, logout, checkAuth]
+    [authenticated, defaultPassword, passwordChangeRequired, loading, login, logout, checkAuth]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

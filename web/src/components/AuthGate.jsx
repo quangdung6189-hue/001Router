@@ -1,8 +1,9 @@
 import { Navigate, Outlet, useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import { ForcePasswordChange } from './ForcePasswordChange';
 
 export function AuthGate() {
-  const { authenticated, loading } = useAuth();
+  const { authenticated, loading, passwordChangeRequired } = useAuth();
   const location = useLocation();
 
   if (loading) {
@@ -18,6 +19,10 @@ export function AuthGate() {
 
   if (!authenticated) {
     return <Navigate to="/login" replace state={{ from: location.pathname }} />;
+  }
+
+  if (passwordChangeRequired) {
+    return <ForcePasswordChange />;
   }
 
   return <Outlet />;

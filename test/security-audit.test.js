@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
-import { createApp } from "../server/index.js";
+import { createApp, parseTrustProxy } from "../server/index.js";
 import { createMockUpstream } from "./mock-upstream.js";
 import {
   MAX_JSON_DEPTH,
@@ -369,6 +369,139 @@ describe("Security audit regression suite (2026-11)", () => {
     } finally {
       main.close();
       other.close();
+    }
+  });
+});
+
+describe("Security hardening round 2: forced password change, trust proxy, master key", () => {
+  async function boot(options = {}, env = {}) {
+    const saved = {};
+    for (const [k, v] of Object.entries(env)) {
+      saved[k] = process.env[k];
+      process.env[k] = v;
+    }
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "001router-audit2-"));
+    const app = await createApp({ dataDir: dir, port: 20128, ...options });
+    const server = app.listen(0, "127.0.0.1");
+    await new Promise((r) => server.once("listening", r));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    return {
+      base,
+      app,
+      async close() {
+        await new Promise((r) => server.close(r));
+        await fs.rm(dir, { recursive: true, force: true });
+        for (const [k, v] of Object.entries(saved)) {
+          if (v === undefined) delete process.env[k];
+          else process.env[k] = v;
+        }
+      }
+    };
+  }
+  const post = (base, p, body, headers = {}) =>
+    fetch(`${base}${p}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...headers },
+      body: JSON.stringify(body)
+    });
+
+  it("12. enforcePasswordChange: default password session can ONLY change the password", async () => {
+    const t = await boot({ enforcePasswordChange: true });
+    try {
+      const login = await post(t.base, "/api/login", { password: "1234" });
+      assert.equal(login.status, 200);
+      assert.equal((await login.json()).passwordChangeRequired, true);
+      let cookie = login.headers.get("set-cookie").split(";")[0];
+      const get = (p) => fetch(`${t.base}${p}`, { headers: { cookie } });
+
+      const me = await (await get("/api/me")).json();
+      assert.equal(me.passwordChangeRequired, true);
+      for (const p of ["/api/providers", "/api/keys", "/api/keys/reveal-initial", "/api/settings", "/api/export", "/api/cli-tools/statuses", "/api/catalog"]) {
+        const r = await get(p);
+        assert.equal(r.status, 403, `${p} must be blocked`);
+        assert.equal((await r.json()).code, "PASSWORD_CHANGE_REQUIRED");
+      }
+      // rejected/weak passwords keep the lock
+      const weak = await post(t.base, "/api/settings/password", { currentPassword: "1234", newPassword: "12345678" }, { cookie });
+      assert.equal(weak.status, 400);
+      assert.equal((await get("/api/providers")).status, 403);
+      // a strong password lifts it
+      const ok = await post(t.base, "/api/settings/password", { currentPassword: "1234", newPassword: "Str0ng-Passphrase!" }, { cookie });
+      assert.equal(ok.status, 200);
+      cookie = ok.headers.get("set-cookie").split(";")[0];
+      assert.equal((await get("/api/providers")).status, 200);
+      assert.notEqual((await (await get("/api/me")).json()).passwordChangeRequired, true);
+    } finally {
+      await t.close();
+    }
+  });
+
+  it("12b. enforcement is off by default for embedded/test use and when explicitly disabled", async () => {
+    const t = await boot({});
+    try {
+      const login = await post(t.base, "/api/login", { password: "1234" });
+      const cookie = login.headers.get("set-cookie").split(";")[0];
+      assert.notEqual((await login.json()).passwordChangeRequired, true);
+      assert.equal((await fetch(`${t.base}/api/providers`, { headers: { cookie } })).status, 200);
+    } finally {
+      await t.close();
+    }
+  });
+
+  it("13. parseTrustProxy never trusts all forwarded headers", () => {
+    assert.equal(parseTrustProxy(undefined), false);
+    assert.equal(parseTrustProxy(""), false);
+    assert.equal(parseTrustProxy("0"), false);
+    assert.equal(parseTrustProxy("false"), false);
+    assert.equal(parseTrustProxy("true"), 1);
+    assert.equal(parseTrustProxy("2"), 2);
+    assert.equal(parseTrustProxy("loopback"), "loopback");
+  });
+
+  it("13b. login lockout keys on the real client IP behind a trusted proxy, and ignores spoofing without it", async () => {
+    const tp = await boot({}, { ROUTER001_TRUST_PROXY: "1" });
+    try {
+      const attempt = (ip) => post(tp.base, "/api/login", { password: "wrong" }, { "x-forwarded-for": ip });
+      for (let i = 0; i < 6; i++) await attempt("203.0.113.7"); // attacker locks only their own IP
+      assert.equal((await attempt("203.0.113.7")).status, 429);
+      const other = await post(tp.base, "/api/login", { password: "1234" }, { "x-forwarded-for": "198.51.100.9" });
+      assert.equal(other.status, 200, "a different client behind the proxy must not be locked out");
+    } finally {
+      await tp.close();
+    }
+    const plain = await boot({});
+    try {
+      // not trusting the proxy: X-Forwarded-For is ignored, so rotating it does not reset the counter
+      let last = 0;
+      for (let i = 0; i < 7; i++) {
+        last = (await post(plain.base, "/api/login", { password: "wrong" }, { "x-forwarded-for": `203.0.113.${i}` })).status;
+      }
+      assert.equal(last, 429);
+    } finally {
+      await plain.close();
+    }
+  });
+
+  it("14. security scan flags a master key stored next to db.json and passes when supplied via env", async () => {
+    const t = await boot({});
+    try {
+      const login = await post(t.base, "/api/login", { password: "1234" });
+      const cookie = login.headers.get("set-cookie").split(";")[0];
+      const scan = await (await post(t.base, "/api/security/scan", {}, { cookie })).json();
+      const check = scan.checks.find((c) => c.id === "masterKeyLocation");
+      assert.equal(check.status, "WARN");
+      assert.equal(scan.masterKeyFromEnv, false);
+    } finally {
+      await t.close();
+    }
+    const e = await boot({}, { ROUTER001_MASTER_KEY: "a".repeat(64) });
+    try {
+      const login = await post(e.base, "/api/login", { password: "1234" });
+      const cookie = login.headers.get("set-cookie").split(";")[0];
+      const scan = await (await post(e.base, "/api/security/scan", {}, { cookie })).json();
+      assert.equal(scan.checks.find((c) => c.id === "masterKeyLocation").status, "PASS");
+    } finally {
+      await e.close();
     }
   });
 });

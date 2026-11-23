@@ -23,6 +23,24 @@ import {
 import { redactSecrets, stripPrototypePollution } from "./security/redact.js";
 
 export const DEFAULT_HOST = "127.0.0.1";
+
+/**
+ * Parse `ROUTER001_TRUST_PROXY`: "" -> false, "true"/"false", a hop count ("1"), or an Express trust list.
+ * @param {string | undefined} raw
+ * @returns {boolean | number | string}
+ */
+export function parseTrustProxy(raw) {
+  const v = String(raw ?? "").trim();
+  if (!v || v.toLowerCase() === "false" || v === "0") return false;
+  if (v.toLowerCase() === "true") return 1; // never "trust everything": cap at one hop
+  if (/^\d+$/.test(v)) return Number(v);
+  return v;
+}
+
+/** Whether production entry points must force the default password to be replaced. */
+export function shouldEnforcePasswordChange() {
+  return process.env.ROUTER001_ALLOW_DEFAULT_PASSWORD !== "1";
+}
 const DEFAULT_WEB_DIST = path.resolve(import.meta.dirname, "../web/dist");
 
 /**
@@ -52,6 +70,7 @@ export function assertSafeNetworkBind(host, storage) {
  *   port?: number,
  *   host?: string,
  *   enforceBindCheck?: boolean,
+ *   enforcePasswordChange?: boolean,
  *   webDistDir?: string,
  *   oauthExchangeUrl?: string,
  *   oauthAuthBaseUrl?: string,
@@ -85,6 +104,12 @@ export async function createApp(options = {}) {
 
   const app = express();
   app.disable("x-powered-by");
+  // Optional reverse-proxy awareness so `req.ip` (login lockout) is the real client, not the proxy.
+  // e.g. ROUTER001_TRUST_PROXY=1 (one hop) | loopback | 10.0.0.0/8. Unset = never trust forwarded headers.
+  const trustProxy = parseTrustProxy(process.env.ROUTER001_TRUST_PROXY);
+  if (trustProxy !== false) app.set("trust proxy", trustProxy);
+  // Force replacing the default password '1234' before the dashboard can be used (production entry points)
+  storage.enforcePasswordChange = options.enforcePasswordChange === true;
   app.bindHost = bindHost;
   app.storage = storage;
   app.locals.storage = storage;
@@ -399,8 +424,20 @@ const isDirectRun =
 if (isDirectRun) {
   const port = Number(process.env.PORT) || DEFAULT_PORT;
   const host = process.env.HOST || DEFAULT_HOST;
-  const app = await createApp({ port, host, enforceBindCheck: true });
+  const app = await createApp({
+    port,
+    host,
+    enforceBindCheck: true,
+    enforcePasswordChange: shouldEnforcePasswordChange()
+  });
   const initialKey = app.storage.peekInitialRouterKey();
+  if (!process.env.ROUTER001_MASTER_KEY?.trim()) {
+    console.warn(
+      "[SECURITY WARNING] Master key is stored next to db.json in the data directory. " +
+        "For stronger protection set ROUTER001_MASTER_KEY (e.g. `node -e \"console.log(require('crypto').randomBytes(32).toString('hex'))\"`) " +
+        "and move data/.master.key out of the data folder."
+    );
+  }
   app.listen(port, host, () => {
     console.log(`001Router listening on http://${host}:${port}`);
     if (initialKey && initialKey.key) {

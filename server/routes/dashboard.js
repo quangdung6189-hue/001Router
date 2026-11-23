@@ -18,6 +18,7 @@ import {
   createDashboardAuthMiddleware,
   isDashboardAuthenticated,
   isDashboardLoginRequired,
+  isPasswordChangeRequired,
   maskKey,
   sanitizeSecrets,
   signSessionToken
@@ -861,7 +862,8 @@ export function createDashboardRouter(storage, liveEvents = null) {
     );
     return res.json({
       ok: true,
-      defaultPassword: storage.isDefaultPasswordSync()
+      defaultPassword: storage.isDefaultPasswordSync(),
+      ...(isPasswordChangeRequired(storage) ? { passwordChangeRequired: true } : {})
     });
   });
 
@@ -882,6 +884,7 @@ export function createDashboardRouter(storage, liveEvents = null) {
       return res.json({
         authenticated: true,
         defaultPassword: storage.isDefaultPasswordSync(),
+        ...(isPasswordChangeRequired(storage) ? { passwordChangeRequired: true } : {}),
         ...(!loginRequired ? { requireLogin: false } : {})
       });
     }

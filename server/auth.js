@@ -212,8 +212,31 @@ export function createDashboardAuthMiddleware(storage) {
     if (!isDashboardAuthenticated(req, secret, version)) {
       return res.status(401).json({ error: "Unauthorized" });
     }
+    if (isPasswordChangeRequired(storage) && !isPasswordChangeAllowedPath(req)) {
+      return res.status(403).json({
+        error: "Default dashboard password must be changed before using the dashboard",
+        code: "PASSWORD_CHANGE_REQUIRED"
+      });
+    }
     next();
   };
+}
+
+/**
+ * True when the server enforces replacing the shipped default password (`1234`) and it is still active.
+ * Only meaningful when dashboard login is enforced.
+ * @param {import("./storage.js").Storage} storage
+ */
+export function isPasswordChangeRequired(storage) {
+  if (!storage || storage.enforcePasswordChange !== true) return false;
+  if (!isDashboardLoginRequired(storage)) return false;
+  return Boolean(storage.isDefaultPasswordSync?.());
+}
+
+/** Endpoints a session may still use while a password change is pending. */
+function isPasswordChangeAllowedPath(req) {
+  const pathname = String(req.originalUrl || req.url || "").split("?")[0].replace(/\/+$/, "");
+  return pathname === "/api/settings/password";
 }
 
 /**
