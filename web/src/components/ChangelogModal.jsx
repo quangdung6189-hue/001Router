@@ -18,7 +18,7 @@ const RELEASES = [
     date: '2026-11-10',
     badge: 'Security & OAuth',
     highlights: [
-      'AES-256-GCM at-rest encryption for provider keys, Service Account JSONs, OAuth credentials, and proxy pool URLs.',
+      'Protected storage for provider keys, Service Account JSONs, OAuth credentials, and proxy pool URLs.',
       'Official OAuth 2.0 PKCE (Google Cloud, OpenRouter, GitLab, Custom OAuth) and RFC 8628 Device Code flows (Kilo Code, Nous Research).',
       '1-Click CLI Tools auto-configuration with automatic backup & reset for Claude Code, Codex, OpenCode, Cline, Kilo Code, Droid, Continue, and Aider.',
       '470+ model catalog across 56+ official providers with automated live sync.',

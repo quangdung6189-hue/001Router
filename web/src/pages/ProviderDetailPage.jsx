@@ -618,7 +618,7 @@ export function ProviderDetailPage() {
             </h3>
           </div>
           <span className="text-xs text-[var(--text-muted)]">
-            AES-256-GCM encrypted at rest · round-robin &amp; 429 cooldown rotation
+            Round-robin &amp; 429 cooldown rotation
           </span>
         </div>
 
@@ -1036,7 +1036,7 @@ export function ProviderDetailPage() {
         open={addKeyOpen}
         onClose={() => setAddKeyOpen(false)}
         title={`Add API Key — ${provider.name}`}
-        subtitle="Encrypted immediately with AES-256-GCM at rest."
+        subtitle="Add a new API key to this provider pool."
         size="sm"
       >
         <form onSubmit={handleAddKeySubmit} className="space-y-4">

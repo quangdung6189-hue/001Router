@@ -198,10 +198,6 @@ export function ProxyPoolsPage() {
       {/* Top Info Banner & Actions */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-2 text-xs">
-          <span className="inline-flex items-center gap-1 rounded-full border border-emerald-500/30 bg-emerald-500/12 px-2.5 py-1 font-semibold text-emerald-400">
-            <Lock className="h-3 w-3" aria-hidden="true" />
-            AES-256-GCM Encrypted Credentials
-          </span>
           <span className="inline-flex items-center gap-1 rounded-full border border-sky-500/30 bg-sky-500/12 px-2.5 py-1 font-semibold text-sky-400">
             <Globe className="h-3 w-3" aria-hidden="true" />
             HTTP · HTTPS · SOCKS5 Outbound Relay
@@ -243,8 +239,7 @@ export function ProxyPoolsPage() {
               <Link to="/providers" className="font-semibold text-[#E56A4A] hover:underline">
                 Providers → Outbound Proxy Pool
               </Link>
-              . Proxy credentials (<code>user:password@host:port</code>) are encrypted at rest with{' '}
-              <strong>AES-256-GCM</strong> in <code>db.json</code> and always masked in API
+              . Proxy credentials (<code>user:password@host:port</code>) are always masked in API
               responses.
             </p>
           </div>
@@ -289,9 +284,6 @@ export function ProxyPoolsPage() {
                         </h3>
                         <span className="rounded-full border border-[#E56A4A]/35 bg-[#E56A4A]/12 px-2 py-0.5 font-mono text-[10px] font-bold uppercase text-[#E56A4A]">
                           {pool.type || 'HTTP'}
-                        </span>
-                        <span className="rounded bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-400">
-                          AES-256-GCM
                         </span>
                       </div>
                       <div className="mt-1 text-[11px] text-[var(--text-muted)]">

@@ -4,7 +4,6 @@ import {
   ArrowUpDown,
   Brain,
   Calendar,
-  Clock,
   Cpu,
   Eye,
   LayoutGrid,
@@ -21,13 +20,11 @@ import {
   formatNumber,
   normalizePresetItem,
   providersApi,
-  settingsApi,
 } from '../lib/api';
 import { useToast } from '../context/ToastContext';
 import { useLocale } from '../context/LocaleContext';
 import { ProviderLogo } from '../components/ProviderLogo';
 import { CopyButton } from '../components/CopyButton';
-import { Switch } from '../components/Switch';
 
 const NEW_MODEL_WINDOW_DAYS = 30;
 
@@ -121,10 +118,6 @@ export function ModelsPage() {
   const setHeaderSearch = outletCtx.setHeaderSearch;
 
   const [catalogData, setCatalogData] = useState(null);
-  const [syncStatus, setSyncStatus] = useState(null);
-  const [catalogAutoSync, setCatalogAutoSync] = useState(true);
-  const [togglingAutoSync, setTogglingAutoSync] = useState(false);
-  const [syncingCatalog, setSyncingCatalog] = useState(false);
   const [connectedProviders, setConnectedProviders] = useState([]);
   const [presets, setPresets] = useState(FALLBACK_PRESETS);
   const [loading, setLoading] = useState(true);
@@ -141,20 +134,12 @@ export function ModelsPage() {
   const loadCatalog = useCallback(async () => {
     setLoading(true);
     try {
-      const [catRes, provRes, statusRes, settingsRes] = await Promise.all([
+      const [catRes, provRes] = await Promise.all([
         catalogApi.get().catch(() => null),
         providersApi.list().catch(() => null),
-        catalogApi.syncStatus().catch(() => null),
-        settingsApi.get().catch(() => null),
       ]);
 
       if (catRes) setCatalogData(catRes);
-      if (statusRes) setSyncStatus(statusRes);
-      if (settingsRes?.settings?.catalogAutoSync !== undefined) {
-        setCatalogAutoSync(Boolean(settingsRes.settings.catalogAutoSync));
-      } else if (statusRes?.autoSync !== undefined) {
-        setCatalogAutoSync(Boolean(statusRes.autoSync));
-      }
       if (Array.isArray(provRes?.providers)) {
         setConnectedProviders(provRes.providers);
       }
@@ -172,40 +157,6 @@ export function ModelsPage() {
       setLoading(false);
     }
   }, [toast]);
-
-  const handleSyncCatalog = async () => {
-    setSyncingCatalog(true);
-    try {
-      const res = await catalogApi.sync();
-      await loadCatalog();
-      const total = res?.totalModels ?? res?.total ?? 0;
-      const added = res?.addedCount ?? res?.added ?? 0;
-      toast.success(
-        `Đã đồng bộ ${total} models mới nhất${added > 0 ? ` (+${added} mới)` : ' (đã cập nhật)'}`
-      );
-    } catch (err) {
-      toast.error(err?.message || 'Failed to sync latest models');
-    } finally {
-      setSyncingCatalog(false);
-    }
-  };
-
-  const handleToggleAutoSync = async (nextVal) => {
-    const prev = catalogAutoSync;
-    setCatalogAutoSync(nextVal);
-    setTogglingAutoSync(true);
-    try {
-      await settingsApi.update({ catalogAutoSync: nextVal });
-      toast.success(
-        nextVal ? 'Đã bật tự động đồng bộ mỗi 24h' : 'Đã tạm dừng tự động đồng bộ 24h'
-      );
-    } catch (err) {
-      setCatalogAutoSync(prev);
-      toast.error(err?.message || 'Failed to update auto-sync setting');
-    } finally {
-      setTogglingAutoSync(false);
-    }
-  };
 
   useEffect(() => {
     loadCatalog();
@@ -426,66 +377,8 @@ export function ModelsPage() {
     return { total, providersCount, freeCount, visionCount, reasoningCount, newCount };
   }, [allModels]);
 
-  const lastUpdatedLabel = useMemo(() => {
-    const raw = syncStatus?.lastSyncAt || catalogData?.generatedAt;
-    if (!raw) return 'v1.2 Live';
-    return String(raw).slice(0, 10);
-  }, [syncStatus, catalogData]);
-
   return (
     <div className="space-y-6">
-      {/* Daily Auto-Sync Bar */}
-      <section className="r-card flex flex-wrap items-center justify-between gap-3 px-4 py-3">
-        <div className="flex flex-wrap items-center gap-3 text-xs">
-          <div className="flex items-center gap-1.5 text-[var(--text-secondary)]">
-            <Clock className="h-3.5 w-3.5 text-[#E56A4A]" aria-hidden="true" />
-            <span>Cập nhật gần nhất:</span>
-            <span className="rounded bg-[var(--bg-subtle)] px-2 py-0.5 font-mono text-[11px] font-semibold text-[var(--text-primary)]">
-              {lastUpdatedLabel}
-            </span>
-          </div>
-
-          <span
-            className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[11px] font-semibold ${
-              catalogAutoSync
-                ? 'border-emerald-500/35 bg-emerald-500/15 text-emerald-400'
-                : 'border-[var(--border-subtle)] bg-[var(--bg-subtle)] text-[var(--text-muted)]'
-            }`}
-          >
-            <span
-              className={`h-1.5 w-1.5 rounded-full ${
-                catalogAutoSync ? 'bg-emerald-400' : 'bg-[var(--text-muted)]'
-              }`}
-              aria-hidden="true"
-            />
-            Auto-Sync Daily (24h): {catalogAutoSync ? 'ON' : 'OFF'}
-          </span>
-
-          <Switch
-            size="sm"
-            checked={catalogAutoSync}
-            disabled={togglingAutoSync}
-            onChange={handleToggleAutoSync}
-            aria-label="Toggle Daily Auto-Sync (24h)"
-          />
-        </div>
-
-        <button
-          type="button"
-          onClick={handleSyncCatalog}
-          disabled={syncingCatalog || loading}
-          className="r-btn-primary inline-flex items-center gap-1.5 px-3 py-1.5 text-xs shadow-xs"
-        >
-          <RefreshCw
-            className={`h-3.5 w-3.5 ${
-              syncingCatalog ? 'animate-spin motion-reduce:animate-none' : ''
-            }`}
-            aria-hidden="true"
-          />
-          {syncingCatalog ? 'Đang đồng bộ…' : 'Đồng bộ ngay (Sync Latest Models)'}
-        </button>
-      </section>
-
       {/* Top Summary Strip */}
       <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
         <div className="r-card p-3.5">

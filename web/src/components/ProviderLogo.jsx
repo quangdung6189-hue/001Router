@@ -108,14 +108,12 @@ export const PRESET_LOGO_MAP = {
   'api-airforce': 'api-airforce.png',
   bazaarlink: 'bazaarlink.png',
   agnes: 'agnes.png',
-  runcrate: 'runcrate.png',
   alicode: 'alicode.png',
   'alicode-intl': 'alicode-intl.png',
   'alitp-intl': 'alitp-intl.png',
   'volcengine-ark': 'volcengine-ark.png',
   'xiaomi-tokenplan': 'xiaomi-tokenplan.png',
   llm7: 'llm7.png',
-  synthetic: 'synthetic.png',
   blackbox: 'blackbox.png',
   tokenharbor: 'tokenharbor.png',
   tokenrouter: 'tokenrouter.png',
@@ -175,11 +173,11 @@ export function resolveProviderLogoUrl({ preset, slug, logo, logoExt = 'png', sr
 }
 
 const SIZE_MAP = {
-  xs: { box: 22, img: 16, font: 9, radius: 'rounded-md' },
-  sm: { box: 28, img: 20, font: 10, radius: 'rounded-lg' },
-  md: { box: 36, img: 26, font: 11, radius: 'rounded-lg' },
-  lg: { box: 40, img: 28, font: 12, radius: 'rounded-xl' },
-  xl: { box: 48, img: 34, font: 14, radius: 'rounded-xl' },
+  xs: { box: 22, pad: 3, font: 9, radius: 'rounded-md', imgRadius: 'rounded-[3px]' },
+  sm: { box: 28, pad: 4, font: 10, radius: 'rounded-lg', imgRadius: 'rounded-[5px]' },
+  md: { box: 36, pad: 5, font: 11, radius: 'rounded-lg', imgRadius: 'rounded-[6px]' },
+  lg: { box: 40, pad: 6, font: 12, radius: 'rounded-xl', imgRadius: 'rounded-[7px]' },
+  xl: { box: 48, pad: 7, font: 14, radius: 'rounded-xl', imgRadius: 'rounded-[8px]' },
 };
 
 export function ProviderLogo({
@@ -196,17 +194,16 @@ export function ProviderLogo({
   className = '',
 }) {
   const effectiveUrl = resolveProviderLogoUrl({ preset, slug, logo, logoExt, src });
-  const [errored, setErrored] = useState(() =>
-    effectiveUrl ? failedLogoCache.has(effectiveUrl) : true
-  );
+  const [failedUrl, setFailedUrl] = useState(null);
 
   const dims =
     typeof size === 'number'
       ? {
           box: size,
-          img: Math.round(size * 0.72),
+          pad: Math.max(3, Math.round(size * 0.15)),
           font: Math.max(9, Math.floor(size * 0.33)),
-          radius: size <= 24 ? 'rounded-md' : 'rounded-lg',
+          radius: size <= 24 ? 'rounded-md' : size >= 40 ? 'rounded-xl' : 'rounded-lg',
+          imgRadius: size <= 24 ? 'rounded-[3px]' : 'rounded-[6px]',
         }
       : SIZE_MAP[size] || SIZE_MAP.lg;
 
@@ -218,9 +215,9 @@ export function ProviderLogo({
     '?'
   ).toUpperCase();
 
-  const showFallback = !effectiveUrl || errored;
+  const errored = !effectiveUrl || failedUrl === effectiveUrl || failedLogoCache.has(effectiveUrl);
 
-  if (showFallback) {
+  if (errored) {
     return (
       <span
         style={{
@@ -239,12 +236,14 @@ export function ProviderLogo({
 
   const tintBg =
     color && color.startsWith('#') && color.length === 7 ? `${color}1f` : 'rgba(255,255,255,0.06)';
+  const imgSize = Math.max(12, dims.box - dims.pad * 2);
 
   return (
     <span
       style={{
         width: `${dims.box}px`,
         height: `${dims.box}px`,
+        padding: `${dims.pad}px`,
         backgroundColor: tintBg,
       }}
       className={`inline-flex shrink-0 items-center justify-center overflow-hidden border border-white/10 ${dims.radius} ${className}`.trim()}
@@ -252,21 +251,15 @@ export function ProviderLogo({
       <img
         src={effectiveUrl}
         alt={name || preset || slug || 'Provider logo'}
-        width={dims.img}
-        height={dims.img}
+        width={imgSize}
+        height={imgSize}
         {...(priority ? { fetchPriority: 'high' } : { loading: 'lazy' })}
         decoding="async"
         onError={() => {
           failedLogoCache.add(effectiveUrl);
-          setErrored(true);
+          setFailedUrl(effectiveUrl);
         }}
-        className="object-contain"
-        style={{
-          width: `${dims.img}px`,
-          height: `${dims.img}px`,
-          maxWidth: `${dims.img}px`,
-          maxHeight: `${dims.img}px`,
-        }}
+        className={`block h-full w-full object-contain ${dims.imgRadius}`}
       />
     </span>
   );

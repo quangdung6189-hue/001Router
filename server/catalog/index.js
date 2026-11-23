@@ -299,13 +299,18 @@ const SUPPLEMENTAL_SERVICE_MODELS = {
  */
 export function getPresetLogo(presetId) {
   const candidate = PRESET_LOGO_BASENAMES[presetId] || presetId || "local-device";
-  for (const ext of ["png", "svg"]) {
-    const fullPath = path.join(PROVIDERS_PUBLIC_DIR, `${candidate}.${ext}`);
-    if (fs.existsSync(fullPath)) {
-      return { logo: candidate, logoExt: /** @type {"png" | "svg"} */ (ext) };
+  if (fs.existsSync(PROVIDERS_PUBLIC_DIR)) {
+    for (const ext of ["png", "svg"]) {
+      const fullPath = path.join(PROVIDERS_PUBLIC_DIR, `${candidate}.${ext}`);
+      if (fs.existsSync(fullPath)) {
+        return { logo: candidate, logoExt: /** @type {"png" | "svg"} */ (ext) };
+      }
     }
+    return { logo: "local-device", logoExt: "png" };
   }
-  return { logo: "local-device", logoExt: "png" };
+  // Serverless environments (e.g. Vercel) serve web/public/providers via CDN
+  // rather than bundling it into the API function filesystem.
+  return { logo: candidate, logoExt: "png" };
 }
 
 /**

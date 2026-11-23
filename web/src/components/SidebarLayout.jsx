@@ -504,47 +504,6 @@ export function SidebarLayout() {
           <span>{t('nav.landing')}</span>
           <ExternalLink className="h-3.5 w-3.5 text-[#E56A4A]" aria-hidden="true" />
         </Link>
-
-        <div className="space-y-2 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-card)] p-3">
-          <div className="flex items-center justify-between text-xs">
-            <span className="inline-flex items-center gap-1.5 font-medium text-[var(--text-primary)]">
-              <span className="relative flex h-2 w-2" aria-hidden="true">
-                {health.ok === true ? (
-                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75 motion-reduce:animate-none" />
-                ) : null}
-                <span
-                  className={`relative inline-flex h-2 w-2 rounded-full ${
-                    health.ok === true
-                      ? 'bg-emerald-500'
-                      : health.ok === false
-                        ? 'bg-red-500'
-                        : 'bg-[var(--text-muted)]'
-                  }`}
-                />
-              </span>
-              {health.ok === true
-                ? `${t('nav.online')} :${health.port}`
-                : health.ok === false
-                  ? t('nav.offline')
-                  : t('nav.checking')}
-            </span>
-            <span className="rounded bg-emerald-500/12 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-emerald-500">
-              BYOK
-            </span>
-          </div>
-
-          <div className="flex items-start gap-2 border-t border-[var(--border-subtle)] pt-2">
-            <ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-500" aria-hidden="true" />
-            <div className="min-w-0">
-              <div className="text-[11px] font-semibold text-[var(--text-primary)]">
-                {t('nav.statusTitle')}
-              </div>
-              <p className="mt-0.5 text-[10px] leading-relaxed text-[var(--text-muted)]">
-                {t('nav.statusDesc')}
-              </p>
-            </div>
-          </div>
-        </div>
       </div>
     </div>
   );

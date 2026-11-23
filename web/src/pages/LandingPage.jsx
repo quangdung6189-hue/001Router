@@ -190,8 +190,8 @@ const ADVANCED_FEATURES = [
     icon: KeyRound,
   },
   {
-    title: 'AES-256-GCM Encryption at Rest',
-    desc: 'All upstream API keys & proxy credentials are encrypted on disk (enc:v1:...) androuter keys are SHA-256 hashed.',
+    title: 'Protected Credential Vault',
+    desc: 'All upstream API keys, proxy credentials, and router client keys are protected automatically.',
     icon: Lock,
   },
   {
@@ -425,17 +425,17 @@ export function LandingPage() {
                 <span className="flex h-8 w-8 items-center justify-center rounded-full bg-[#E56A4A] text-xs font-bold text-white">
                   1
                 </span>
-                <span className="font-mono text-xs text-[var(--text-muted)]">AES-256-GCM</span>
+                <span className="font-mono text-xs text-[var(--text-muted)]">BYOK</span>
               </div>
               <h3 className="text-lg font-bold">Connect Official API Keys</h3>
               <p className="text-xs leading-relaxed text-[var(--text-secondary)]">
-                Add official developer API keys or local LLMs in the dashboard. Every secret is
-                encrypted at rest with AES-256-GCM and supports multi-key round-robin pools.
+                Add official developer API keys or local LLMs in the dashboard with multi-key
+                round-robin pools and automatic cooldown recovery.
               </p>
               <div className="code-surface rounded-lg border p-3 font-mono text-xs">
-                <div className="text-emerald-400">✓ AES-256-GCM encrypted db.json</div>
-                <div className="mt-1 text-sky-400">✓ SHA-256 hashed sk-001r-* keys</div>
-                <div className="mt-1 text-[var(--text-secondary)]">✓ 100% ToS-Safe Official BYOK</div>
+                <div className="text-emerald-400">✓ Multi-key provider pools</div>
+                <div className="mt-1 text-sky-400">✓ Per-client router keys (sk-001r-*)</div>
+                <div className="mt-1 text-[var(--text-secondary)]">✓ Official APIs &amp; Local LLMs</div>
               </div>
             </div>
 
@@ -808,7 +808,6 @@ export function LandingPage() {
                 <pre className="overflow-x-auto p-4 font-mono text-xs leading-relaxed">
                   <code>{`$ npm start
 ✓ 001Router v1.2 listening on http://127.0.0.1:20128
-✓ AES-256-GCM master key verified (app/data/.master.key)
 ✓ Model Catalog loaded: 47 providers · 471 models
 
 # Connect Claude Code to 001Router:
@@ -837,7 +836,7 @@ $ curl -sS ${v1Endpoint}/chat/completions \\
               <Waypoints className="h-4 w-4" aria-hidden="true" />
             </div>
             <span className="font-semibold text-[var(--text-primary)]">001Router v1.2</span>
-            <span>· 47+ Official AI Providers · 9 Service Kinds · AES-256-GCM Encrypted</span>
+            <span>· 47+ Official AI Providers · 9 Service Kinds</span>
           </div>
 
           <div className="flex flex-wrap items-center gap-4">

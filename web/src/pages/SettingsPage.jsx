@@ -4,6 +4,7 @@ import {
   AlertTriangle,
   ArrowLeftRight,
   CheckCircle2,
+  Clock,
   DollarSign,
   Download,
   Eye,
@@ -25,7 +26,7 @@ import {
   Sun,
   Upload,
 } from 'lucide-react';
-import { securityApi, settingsApi } from '../lib/api';
+import { catalogApi, securityApi, settingsApi } from '../lib/api';
 import { useToast } from '../context/ToastContext';
 import { useTheme } from '../context/ThemeContext';
 import { useLocale } from '../context/LocaleContext';
@@ -57,8 +58,10 @@ export function SettingsPage() {
   const [port, setPort] = useState(20128);
 
   const [securityStatus, setSecurityStatus] = useState(null);
-  const [scanResults, setScanResults] = useState(null);
-  const [scanning, setScanning] = useState(false);
+  const [syncStatus, setSyncStatus] = useState(null);
+  const [catalogAutoSync, setCatalogAutoSync] = useState(true);
+  const [syncingCatalog, setSyncingCatalog] = useState(false);
+  const [togglingAutoSync, setTogglingAutoSync] = useState(false);
 
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
@@ -83,9 +86,10 @@ export function SettingsPage() {
   const loadSettings = useCallback(async () => {
     setLoading(true);
     try {
-      const [res, secRes] = await Promise.all([
+      const [res, secRes, syncRes] = await Promise.all([
         settingsApi.get(),
         securityApi.status().catch(() => null),
+        catalogApi.syncStatus().catch(() => null),
       ]);
       const s = res?.settings || {};
       setTimeoutMs(String(s.timeoutMs ?? 120000));
@@ -107,12 +111,15 @@ export function SettingsPage() {
       );
       setStickyRoundRobinLimit(String(s.stickyRoundRobinLimit ?? 3));
       setPort(s.port || 20128);
+      if (syncRes) setSyncStatus(syncRes);
+      if (s.catalogAutoSync !== undefined) {
+        setCatalogAutoSync(Boolean(s.catalogAutoSync));
+      } else if (syncRes?.autoSync !== undefined) {
+        setCatalogAutoSync(Boolean(syncRes.autoSync));
+      }
 
       if (secRes) {
         setSecurityStatus(secRes);
-        if (secRes.lastScan) {
-          setScanResults(secRes.lastScan);
-        }
         if (typeof secRes.defaultPassword === 'boolean') {
           setDefaultPassword?.(secRes.defaultPassword);
         }
@@ -128,18 +135,38 @@ export function SettingsPage() {
     loadSettings();
   }, [loadSettings]);
 
-  const handleRunSecurityScan = async () => {
-    setScanning(true);
+  const handleSyncCatalog = async () => {
+    setSyncingCatalog(true);
     try {
-      const res = await securityApi.scan();
-      setScanResults(res);
-      const secStatus = await securityApi.status().catch(() => null);
-      if (secStatus) setSecurityStatus(secStatus);
-      toast.success('Security & encryption audit completed');
+      const res = await catalogApi.sync();
+      const syncRes = await catalogApi.syncStatus().catch(() => null);
+      if (syncRes) setSyncStatus(syncRes);
+      const total = res?.totalModels ?? res?.total ?? 0;
+      const added = res?.addedCount ?? res?.added ?? 0;
+      toast.success(
+        `Đã đồng bộ ${total} models mới nhất${added > 0 ? ` (+${added} mới)` : ' (đã cập nhật)'}`
+      );
     } catch (err) {
-      toast.error(err?.message || 'Failed to run security scan');
+      toast.error(err?.message || 'Failed to sync latest models');
     } finally {
-      setScanning(false);
+      setSyncingCatalog(false);
+    }
+  };
+
+  const handleToggleAutoSync = async (nextVal) => {
+    const prev = catalogAutoSync;
+    setCatalogAutoSync(nextVal);
+    setTogglingAutoSync(true);
+    try {
+      await settingsApi.update({ catalogAutoSync: nextVal });
+      toast.success(
+        nextVal ? 'Đã bật tự động đồng bộ mỗi 24h' : 'Đã tạm dừng tự động đồng bộ 24h'
+      );
+    } catch (err) {
+      setCatalogAutoSync(prev);
+      toast.error(err?.message || 'Failed to update auto-sync setting');
+    } finally {
+      setTogglingAutoSync(false);
     }
   };
 
@@ -245,7 +272,7 @@ export function SettingsPage() {
   const handleExportDownload = async (e) => {
     e?.preventDefault();
     if (exportMode === 'encrypted' && exportPassphrase.length < 4) {
-      toast.error('Enter a passphrase (at least 4 characters) for AES-256-GCM encrypted export.');
+      toast.error('Enter a passphrase (at least 4 characters) for encrypted export.');
       return;
     }
     if (exportMode === 'plain' && !exportConfirmPwd) {
@@ -346,7 +373,7 @@ export function SettingsPage() {
       return;
     }
     if (parsedImport.isEncrypted && !importPassphrase) {
-      setImportError('This bundle is AES-256-GCM encrypted. Enter the decryption passphrase.');
+      setImportError('This bundle is encrypted. Enter the decryption passphrase.');
       return;
     }
     setImportError('');
@@ -358,57 +385,9 @@ export function SettingsPage() {
   };
 
   const isDefaultPwd = defaultPassword || securityStatus?.defaultPassword === true;
-
-  const securityBadges = [
-    {
-      id: 'encryptionAtRest',
-      label: 'AES-256-GCM Encryption at Rest',
-      desc: 'Upstream provider API keys & proxy credentials stored as enc:v1:<iv>:<tag>:<ciphertext>.',
-      ok: securityStatus?.encryptionAtRest !== false,
-    },
-    {
-      id: 'routerKeysHashed',
-      label: 'SHA-256 Hashed Router Keys',
-      desc: 'Client sk-001r-... tokens hashed with SHA-256; full secret shown only once on creation.',
-      ok: securityStatus?.routerKeysHashed !== false,
-    },
-    {
-      id: 'bindHost',
-      label: `Loopback Bind (${securityStatus?.bindHost || '127.0.0.1'})`,
-      desc: 'Gateway binds to 127.0.0.1 by default; blocks non-loopback bind if password is still 1234.',
-      ok: !securityStatus?.bindHost || securityStatus.bindHost === '127.0.0.1' || securityStatus.bindHost === 'localhost',
-    },
-    {
-      id: 'corsLocked',
-      label: 'CORS & CSRF Lockdown',
-      desc: '/api/* locked to same-origin + X-Requested-With: 001router header verification.',
-      ok: securityStatus?.corsLocked !== false,
-    },
-    {
-      id: 'headers',
-      label: 'CSP & Security Headers',
-      desc: 'Content-Security-Policy, X-Frame-Options: DENY, nosniff, no-referrer, no-store.',
-      ok: securityStatus?.headers !== false,
-    },
-    {
-      id: 'ssrfGuard',
-      label: 'SSRF & Metadata Guard',
-      desc: 'Blocks cloud metadata (169.254.0.0/16) & prototype pollution (__proto__, constructor).',
-      ok: true,
-    },
-    {
-      id: 'secretRedactor',
-      label: 'Global Secret Redactor',
-      desc: 'Scrubs sk-*, AIza*, gsk_*, xai-*, Bearer tokens from all logs and error messages.',
-      ok: true,
-    },
-  ];
-
-  const auditChecks = Array.isArray(scanResults?.checks)
-    ? scanResults.checks
-    : Array.isArray(scanResults?.results)
-      ? scanResults.results
-      : null;
+  const lastCatalogSyncLabel = syncStatus?.lastSyncAt
+    ? String(syncStatus.lastSyncAt).slice(0, 10)
+    : 'v1.2 Live';
 
   return (
     <div className="space-y-6">
@@ -443,126 +422,73 @@ export function SettingsPage() {
         </section>
       ) : null}
 
-      {/* Security & Encryption Audit Card (Section 9.8.13) */}
+      {/* Model Catalog Auto-Sync Card */}
       <section className="r-card space-y-4 p-5">
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--border-subtle)] pb-3.5">
+        <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-2.5">
-            <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-emerald-500/15 text-emerald-400">
-              <ShieldCheck className="h-5 w-5" aria-hidden="true" />
+            <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-[#E56A4A]/15 text-[#E56A4A]">
+              <Clock className="h-5 w-5" aria-hidden="true" />
             </div>
             <div>
               <h2 className="text-base font-semibold text-[var(--text-primary)]">
-                Security &amp; Encryption Hardening Audit (v1.2)
+                Đồng bộ danh mục AI Models
               </h2>
               <p className="text-xs text-[var(--text-secondary)]">
-                Live cryptographic &amp; network hardening verification for local BYOK storage.
+                Tự động cập nhật danh sách mô hình AI mới nhất mỗi 24 giờ hoặc đồng bộ thủ công.
               </p>
             </div>
           </div>
 
           <button
             type="button"
-            onClick={handleRunSecurityScan}
-            disabled={scanning}
-            className="r-btn-primary inline-flex items-center gap-1.5 px-4 py-2 text-xs"
+            onClick={handleSyncCatalog}
+            disabled={syncingCatalog || loading}
+            className="r-btn-primary inline-flex items-center gap-1.5 px-3.5 py-2 text-xs shadow-xs"
           >
-            <RefreshCw className={`h-3.5 w-3.5 ${scanning ? 'animate-spin motion-reduce:animate-none' : ''}`} aria-hidden="true" />
-            {scanning ? 'Đang quét bảo mật…' : 'Quét bảo mật ngay (Run Security Scan)'}
+            <RefreshCw
+              className={`h-3.5 w-3.5 ${
+                syncingCatalog ? 'animate-spin motion-reduce:animate-none' : ''
+              }`}
+              aria-hidden="true"
+            />
+            {syncingCatalog ? 'Đang đồng bộ…' : 'Đồng bộ ngay (Sync Latest Models)'}
           </button>
         </div>
 
-        {/* 7 Security Pillars Grid */}
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-          {securityBadges.map((item) => (
-            <div
-              key={item.id}
-              className="r-card-subtle flex flex-col justify-between p-3.5"
-            >
-              <div className="flex items-start justify-between gap-2">
-                <span className="text-xs font-semibold text-[var(--text-primary)]">
-                  {item.label}
-                </span>
-                <span
-                  className={`shrink-0 rounded-full px-2 py-0.5 font-mono text-[10px] font-bold ${
-                    item.ok
-                      ? 'bg-emerald-500/15 text-emerald-400'
-                      : 'bg-amber-500/15 text-amber-400'
-                  }`}
-                >
-                  {item.ok ? 'ACTIVE' : 'WARN'}
-                </span>
-              </div>
-              <p className="mt-1.5 text-[11px] leading-relaxed text-[var(--text-secondary)]">
-                {item.desc}
-              </p>
-            </div>
-          ))}
-        </div>
-
-        {/* Live Scan Audit PASS/FAIL Table */}
-        {auditChecks && auditChecks.length > 0 ? (
-          <div className="space-y-2 pt-2">
-            <div className="flex items-center justify-between text-xs">
-              <span className="font-semibold text-[var(--text-primary)]">
-                Latest Security Audit Report
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-subtle)] px-4 py-3 text-xs">
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="flex items-center gap-1.5 text-[var(--text-secondary)]">
+              <span>Cập nhật gần nhất:</span>
+              <span className="rounded bg-[var(--bg-card)] px-2 py-0.5 font-mono text-[11px] font-semibold text-[var(--text-primary)]">
+                {lastCatalogSyncLabel}
               </span>
-              {scanResults?.passed !== undefined ? (
-                <span className="font-mono text-emerald-400">
-                  {scanResults.passed}/{scanResults.total || auditChecks.length} checks passed
-                </span>
-              ) : null}
             </div>
-            <div
-              tabIndex={0}
-              role="region"
-              aria-label="Security Scan Audit Results"
-              className="responsive-table-wrapper"
+
+            <span
+              className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[11px] font-semibold ${
+                catalogAutoSync
+                  ? 'border-emerald-500/35 bg-emerald-500/15 text-emerald-400'
+                  : 'border-[var(--border-subtle)] bg-[var(--bg-card)] text-[var(--text-muted)]'
+              }`}
             >
-              <table className="responsive-table">
-                <thead>
-                  <tr>
-                    <th>Security Check</th>
-                    <th>Status</th>
-                    <th>Detail</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {auditChecks.map((chk, idx) => {
-                    const passed =
-                      chk.pass === true ||
-                      chk.ok === true ||
-                      chk.status === 'PASS' ||
-                      chk.status === 'WARN';
-                    const isWarn = chk.status === 'WARN' || chk.warn === true;
-                    return (
-                      <tr key={chk.id || chk.name || idx} className="text-xs">
-                        <td className="font-semibold text-[var(--text-primary)]">
-                          {chk.name || chk.check || chk.id}
-                        </td>
-                        <td>
-                          <span
-                            className={`inline-flex rounded px-2 py-0.5 font-mono text-[10px] font-bold ${
-                              isWarn
-                                ? 'bg-amber-500/15 text-amber-400'
-                                : passed
-                                  ? 'bg-emerald-500/15 text-emerald-400'
-                                  : 'bg-red-500/15 text-red-400'
-                            }`}
-                          >
-                            {chk.status || (passed ? 'PASS' : 'FAIL')}
-                          </span>
-                        </td>
-                        <td className="font-mono text-[11px] text-[var(--text-secondary)]">
-                          {chk.detail || chk.message || 'Verified'}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
+              <span
+                className={`h-1.5 w-1.5 rounded-full ${
+                  catalogAutoSync ? 'bg-emerald-400' : 'bg-[var(--text-muted)]'
+                }`}
+                aria-hidden="true"
+              />
+              Auto-Sync Daily (24h): {catalogAutoSync ? 'ON' : 'OFF'}
+            </span>
           </div>
-        ) : null}
+
+          <Switch
+            size="sm"
+            checked={catalogAutoSync}
+            disabled={togglingAutoSync}
+            onChange={handleToggleAutoSync}
+            aria-label="Toggle Daily Auto-Sync (24h)"
+          />
+        </div>
       </section>
 
       {/* Appearance, Language, Pricing & Changelog */}
@@ -1038,8 +964,8 @@ export function SettingsPage() {
                   },
                   {
                     id: 'encrypted',
-                    title: 'Encrypted (AES-256-GCM + scrypt Passphrase)',
-                    desc: 'Encrypts upstream API keys with your custom passphrase for secure migration.',
+                    title: 'Encrypted (Passphrase Protected)',
+                    desc: 'Protects upstream API keys with your custom passphrase for migration.',
                     icon: Lock,
                     tone: 'text-sky-400',
                   },
@@ -1088,7 +1014,7 @@ export function SettingsPage() {
                     htmlFor="export-passphrase"
                     className="block text-xs font-medium text-[var(--text-secondary)]"
                   >
-                    Encryption Passphrase (AES-256-GCM)
+                    Encryption Passphrase
                   </label>
                   <input
                     id="export-passphrase"
@@ -1220,7 +1146,7 @@ export function SettingsPage() {
             {parsedImport.valid ? (
               <div className="rounded-lg border border-emerald-500/35 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-400">
                 {parsedImport.isEncrypted
-                  ? 'Encrypted AES-256-GCM bundle ready to decrypt & import'
+                  ? 'Encrypted bundle ready to decrypt & import'
                   : `Ready (${importMode}): ${
                       Array.isArray(parsedImport.data.providers)
                         ? parsedImport.data.providers.length

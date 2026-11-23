@@ -332,7 +332,7 @@ export function MediaProviderDetailPage() {
           <p className="mt-1 text-xs text-[var(--text-secondary)]">
             {preset.keyOptional
               ? 'Self-hosted / local media endpoint — API key is optional.'
-              : 'Enter your official API key (AES-256-GCM encrypted at rest) to activate this provider.'}
+              : 'Enter your official API key to activate this provider.'}
           </p>
           <form onSubmit={handleQuickConnect} className="mt-4 grid gap-3 sm:grid-cols-3">
             <input

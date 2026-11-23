@@ -303,18 +303,7 @@ export function OverviewPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-wrap items-center justify-between gap-2.5">
-        <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--text-secondary)]">
-          <span className="inline-flex items-center gap-1 rounded-full border border-emerald-500/30 bg-emerald-500/12 px-2.5 py-1 font-semibold text-emerald-400">
-            <Lock className="h-3 w-3" aria-hidden="true" />
-            AES-256-GCM Encrypted DB
-          </span>
-          <span className="inline-flex items-center gap-1 rounded-full border border-sky-500/30 bg-sky-500/12 px-2.5 py-1 font-semibold text-sky-400">
-            <Shield className="h-3 w-3" aria-hidden="true" />
-            SHA-256 Hashed Router Keys
-          </span>
-        </div>
-
+      <div className="flex flex-wrap items-center justify-end gap-2.5">
         <div className="flex flex-wrap items-center gap-2.5">
           <div className="inline-flex items-center gap-2 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-card)] px-2.5 py-1.5 text-xs">
             <span className="font-medium text-[var(--text-secondary)]">Require Key</span>
@@ -384,12 +373,12 @@ export function OverviewPage() {
               />
               <div>
                 <h2 className="text-sm font-bold text-amber-400">
-                  Copy Your Key Now (Shown Only Once — Stored as SHA-256 Hash)
+                  Copy Your Key Now (Shown Only Once)
                 </h2>
                 <p className="mt-0.5 text-xs text-[var(--text-secondary)]">
-                  For security, 001Router stores only the SHA-256 hash of{' '}
-                  <strong className="text-[var(--text-primary)]">{oneTimeBannerKey.name}</strong> on
-                  disk. Copy and save this secret token before closing.
+                  The full secret for{' '}
+                  <strong className="text-[var(--text-primary)]">{oneTimeBannerKey.name}</strong> is
+                  only displayed once. Copy and save this token before closing.
                 </p>
               </div>
             </div>
@@ -693,12 +682,6 @@ export function OverviewPage() {
                           <code className="rounded bg-[var(--bg-subtle)] px-2 py-1 text-xs text-[var(--text-primary)]">
                             {displayKey}
                           </code>
-                          <span
-                            title="Stored on disk as a one-way SHA-256 hash"
-                            className="rounded bg-sky-500/15 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-sky-400"
-                          >
-                            SHA-256
-                          </span>
                           {fullKey ? (
                             <>
                               <button
@@ -787,7 +770,7 @@ export function OverviewPage() {
         open={createOpen}
         onClose={() => setCreateOpen(false)}
         title={t('overview.createKey')}
-        subtitle="Generate a local client token (sk-001r-...). The full secret is shown once and stored as a SHA-256 hash."
+        subtitle="Generate a client token (sk-001r-...). The full secret is shown only once."
         size="sm"
       >
         <form onSubmit={handleCreateKey} className="space-y-4">
@@ -828,12 +811,12 @@ export function OverviewPage() {
         </form>
       </ModalDialog>
 
-      {/* Newly Created Key Modal (Shown Only Once — SHA-256 Hashed) */}
+      {/* Newly Created Key Modal (Shown Only Once) */}
       <ModalDialog
         open={Boolean(createdKeyModal)}
         onClose={() => setCreatedKeyModal(null)}
         title="Copy Your Key Now (Shown Only Once)"
-        subtitle={`Key "${createdKeyModal?.name || ''}" is stored as a SHA-256 hash and cannot be viewed again after closing.`}
+        subtitle={`Key "${createdKeyModal?.name || ''}" cannot be viewed again after closing.`}
         size="sm"
         footer={
           <button
@@ -848,9 +831,9 @@ export function OverviewPage() {
         {createdKeyModal ? (
           <div className="space-y-3">
             <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-2.5 text-xs text-amber-400">
-              <strong>Important:</strong> Copy this secret key now. Only its SHA-256 hash and{' '}
-              <code>{createdKeyModal.keyPreview || 'prefix…last4'}</code> preview are persisted to{' '}
-              <code>db.json</code>.
+              <strong>Important:</strong> Copy this secret key now. Only a masked preview (
+              <code>{createdKeyModal.keyPreview || 'prefix…last4'}</code>) will remain visible
+              after closing.
             </div>
             <div className="flex items-center gap-2 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-subtle)] p-2.5">
               <code className="flex-1 overflow-x-auto text-xs font-semibold text-emerald-400 select-all">

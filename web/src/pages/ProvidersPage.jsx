@@ -1982,7 +1982,6 @@ export function ProvidersPage() {
           `${activeKeyCount} ${t('common.keys')}`,
           modelsCount ? `${modelsCount} ${t('common.models')}` : '',
           resolvedBaseUrl,
-          'AES-256-GCM',
         ]
           .filter(Boolean)
           .join(' · ');
@@ -3486,10 +3485,6 @@ export function ProvidersPage() {
                     <span className="font-semibold text-[var(--text-primary)]">
                       {form.name || activePresetMeta?.name || 'Provider'}
                     </span>
-                    <span className="inline-flex items-center gap-1 rounded-full border border-emerald-500/30 bg-emerald-500/12 px-2 py-0.5 text-[10px] font-semibold text-emerald-500">
-                      <Lock className="h-2.5 w-2.5" aria-hidden="true" />
-                      AES-256-GCM Encrypted at Rest
-                    </span>
                     <span className="rounded bg-[var(--bg-card)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--text-secondary)]">
                       {FORMAT_LABELS[form.formatType] || form.formatType}
                     </span>
@@ -4012,9 +4007,6 @@ export function ProvidersPage() {
                                               {saInfo.location ? ` · ${saInfo.location}` : ''}
                                             </span>
                                           ) : null}
-                                          <span className="rounded bg-emerald-500/15 px-1.5 py-0.2 text-[9px] font-semibold text-emerald-500">
-                                            AES-256-GCM
-                                          </span>
                                         </div>
                                         <button
                                           type="button"
@@ -4064,9 +4056,6 @@ export function ProvidersPage() {
                                               {googleMeta.projectId}
                                             </span>
                                           ) : null}
-                                          <span className="rounded bg-emerald-500/15 px-1.5 py-0.2 text-[9px] font-semibold text-emerald-500">
-                                            AES-256-GCM
-                                          </span>
                                         </div>
                                         <button
                                           type="button"
@@ -4111,9 +4100,6 @@ export function ProvidersPage() {
                                               org:{row.oauthMeta.orgId}
                                             </span>
                                           ) : null}
-                                          <span className="rounded bg-emerald-500/15 px-1.5 py-0.2 text-[9px] font-semibold text-emerald-500">
-                                            AES-256-GCM
-                                          </span>
                                         </div>
                                         <button
                                           type="button"
@@ -4997,7 +4983,7 @@ export function ProvidersPage() {
                                       <code className="font-mono text-emerald-500">
                                         {googleClientStatus.source === 'env'
                                           ? 'Environment (.env)'
-                                          : 'Đã lưu mã hóa AES-256-GCM'}
+                                          : 'Đã lưu trên hệ thống'}
                                       </code>
                                     </span>
                                     {googleClientStatus.clientIdPreview ? (
@@ -5047,10 +5033,7 @@ export function ProvidersPage() {
                           ) : (
                             <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3.5 py-2.5 text-[11.5px] leading-relaxed text-[var(--text-secondary)]">
                               <strong className="text-amber-400">Chỉ cần cấu hình 1 lần duy nhất:</strong>{' '}
-                              Tải tệp <code>client_secret_*.json</code> từ Google Cloud của bạn (hoặc đặt biến môi trường <code>GOOGLE_OAUTH_CLIENT_ID</code> &amp; <code>GOOGLE_OAUTH_CLIENT_SECRET</code>). Sau lần đầu tiên, 001Router lưu mã hóa AES-256-GCM để mọi lần sau bạn bấm <strong>1-Click → chọn tài khoản Gmail</strong> ngay lập tức.
-                              <span className="mt-1 block text-[11px] text-[var(--text-muted)]">
-                                Lưu ý bảo mật: 001Router dùng Google OAuth 2.0 chính chủ (không giả mạo OAuth Client riêng hay đọc quota nội bộ của Antigravity).
-                              </span>
+                              Tải tệp <code>client_secret_*.json</code> từ Google Cloud của bạn (hoặc đặt biến môi trường <code>GOOGLE_OAUTH_CLIENT_ID</code> &amp; <code>GOOGLE_OAUTH_CLIENT_SECRET</code>). Sau lần đầu tiên, 001Router sẽ tự lưu cấu hình để mọi lần sau bạn bấm <strong>1-Click → chọn tài khoản Gmail</strong> ngay lập tức.
                             </div>
                           )}
 
@@ -5082,7 +5065,7 @@ export function ProvidersPage() {
                                     2. Tải client_secret_*.json
                                   </div>
                                   <p className="mt-1 text-[10.5px] leading-relaxed text-[var(--text-secondary)]">
-                                    Tải tệp JSON về và kéo thả vào ô dưới — hệ thống tự lưu mã hóa AES-256-GCM cho lần sau.
+                                    Tải tệp JSON về và kéo thả vào ô dưới — hệ thống tự lưu lại cho lần sau.
                                   </p>
                                 </li>
                                 <li className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-card)] p-2.5">
@@ -5461,7 +5444,7 @@ export function ProvidersPage() {
                                 : t('providers.web.openrouterBtn')}
                             </button>
                             <span className="font-mono text-[11px] text-[var(--text-muted)]">
-                              openrouter.ai/auth · SHA-256 S256
+                              openrouter.ai/auth
                             </span>
                           </div>
                         </div>
