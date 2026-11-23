@@ -1775,7 +1775,11 @@ export function getPreset(presetId) {
  */
 export function normalizeBaseUrl(url) {
   if (typeof url !== "string") return "";
-  return url.trim().replace(/\/+$/, "");
+  return url
+    .trim()
+    .replace(/\/+$/, "")
+    .replace(/\/(chat\/completions|messages|responses)$/i, "")
+    .replace(/\/+$/, "");
 }
 
 /**

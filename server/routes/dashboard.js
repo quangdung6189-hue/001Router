@@ -7,6 +7,7 @@ import {
   buildUpstreamUrl,
   getPreset,
   isKeyOptionalProvider,
+  isLocalUrl,
   isValidHttpUrl,
   normalizeBaseUrl
 } from "../presets.js";
@@ -52,7 +53,7 @@ import {
 } from "../security/redact.js";
 import { getSecurityStatus, runSecurityScan } from "../security/scan.js";
 import { getProxyDispatcher } from "../proxy.js";
-import { buildUpstreamHeaders } from "../router.js";
+import { buildAlternateAuthHeaders, buildUpstreamHeaders } from "../router.js";
 import {
   hasBaseUrlTemplatePlaceholder,
   parseProviderCredentialJson,
@@ -655,12 +656,27 @@ async function runProviderConnectionTest(
         provider.formatType,
         "models"
       );
-      const modelsRes = await fetch(modelsUrl, {
+      let modelsRes = await fetch(modelsUrl, {
         method: "GET",
         headers,
         signal: controller.signal,
         ...(dispatcher ? { dispatcher } : {})
       });
+
+      if ((modelsRes.status === 401 || modelsRes.status === 403) && resolvedSecret) {
+        const altHeaders = buildAlternateAuthHeaders(headers, resolvedSecret);
+        if (altHeaders) {
+          const retryRes = await fetch(modelsUrl, {
+            method: "GET",
+            headers: altHeaders,
+            signal: controller.signal,
+            ...(dispatcher ? { dispatcher } : {})
+          });
+          if (retryRes.ok) {
+            modelsRes = retryRes;
+          }
+        }
+      }
 
       if (modelsRes.ok) {
         const data = await modelsRes.json().catch(() => ({}));
@@ -707,13 +723,28 @@ async function runProviderConnectionTest(
       messages: [{ role: "user", content: "hi" }]
     };
 
-    const chatRes = await fetch(testUrl, {
+    let chatRes = await fetch(testUrl, {
       method: "POST",
       headers: { ...headers, "content-type": "application/json" },
       body: JSON.stringify(testPayload),
       signal: controller.signal,
       ...(dispatcher ? { dispatcher } : {})
     });
+    if ((chatRes.status === 401 || chatRes.status === 403) && resolvedSecret) {
+      const altHeaders = buildAlternateAuthHeaders(headers, resolvedSecret);
+      if (altHeaders) {
+        const retryChatRes = await fetch(testUrl, {
+          method: "POST",
+          headers: { ...altHeaders, "content-type": "application/json" },
+          body: JSON.stringify(testPayload),
+          signal: controller.signal,
+          ...(dispatcher ? { dispatcher } : {})
+        });
+        if (retryChatRes.ok) {
+          chatRes = retryChatRes;
+        }
+      }
+    }
     const errOrOkText = await chatRes.text().catch(() => "");
     clearTimeout(timer);
 
@@ -2254,6 +2285,9 @@ export function createDashboardRouter(storage, liveEvents = null) {
         target.name = body.name.trim();
       }
       target.baseUrl = nextBaseUrl;
+      if (nextFormatType !== target.formatType && body.authStyle === undefined) {
+        delete target.authStyle;
+      }
       target.formatType = nextFormatType;
       if (Array.isArray(body.apiKeys)) {
         target.apiKeys = mergeUpdatedApiKeys(body.apiKeys, target.apiKeys || []);
@@ -2411,8 +2445,13 @@ export function createDashboardRouter(storage, liveEvents = null) {
         authCtx.extraHeaders
       );
 
-      // 2. OpenRouter official /auth/key inspector
-      if (presetSlug === "openrouter" || baseUrlLower.includes("openrouter.ai")) {
+      const isLoopbackBase = isLocalUrl(provider.baseUrl);
+
+      // 2. OpenRouter official /auth/key inspector (skip when baseUrl points to a custom third-party relay)
+      if (
+        baseUrlLower.includes("openrouter.ai") ||
+        (presetSlug === "openrouter" && isLoopbackBase && provider.formatType !== "anthropic")
+      ) {
         const keyInfoUrl = `${provider.baseUrl.replace(/\/+$/, "")}/auth/key`;
         const infoRes = await fetch(keyInfoUrl, {
           method: "GET",
@@ -2457,7 +2496,10 @@ export function createDashboardRouter(storage, liveEvents = null) {
       }
 
       // 3. Official OpenAI API Key inspector (GET /models + optional 1-token billing check)
-      if (presetSlug === "openai" || baseUrlLower.includes("api.openai.com")) {
+      if (
+        baseUrlLower.includes("api.openai.com") ||
+        (presetSlug === "openai" && isLoopbackBase && provider.formatType !== "anthropic")
+      ) {
         const modelsUrl = buildUpstreamUrl(provider.baseUrl, provider.formatType, "models");
         const modelsRes = await fetch(modelsUrl, {
           method: "GET",
@@ -2557,9 +2599,8 @@ export function createDashboardRouter(storage, liveEvents = null) {
 
       // 4. Google Gemini API Key inspector (GET /models + chat-ready filter)
       if (
-        presetSlug === "gemini" ||
-        provider.formatType === "gemini-openai" ||
-        baseUrlLower.includes("generativelanguage.googleapis.com")
+        baseUrlLower.includes("generativelanguage.googleapis.com") ||
+        (presetSlug === "gemini" && isLoopbackBase && provider.formatType !== "anthropic")
       ) {
         const modelsUrl = buildUpstreamUrl(provider.baseUrl, provider.formatType, "models");
         const modelsRes = await fetch(modelsUrl, {
@@ -2791,12 +2832,26 @@ export function createDashboardRouter(storage, liveEvents = null) {
         provider.formatType,
         "models"
       );
-      const upstreamRes = await fetch(modelsUrl, {
+      let upstreamRes = await fetch(modelsUrl, {
         method: "GET",
         headers,
         signal: controller.signal,
         ...(dispatcher ? { dispatcher } : {})
       });
+      if ((upstreamRes.status === 401 || upstreamRes.status === 403) && resolvedSecret) {
+        const altHeaders = buildAlternateAuthHeaders(headers, resolvedSecret);
+        if (altHeaders) {
+          const retryRes = await fetch(modelsUrl, {
+            method: "GET",
+            headers: altHeaders,
+            signal: controller.signal,
+            ...(dispatcher ? { dispatcher } : {})
+          });
+          if (retryRes.ok) {
+            upstreamRes = retryRes;
+          }
+        }
+      }
       clearTimeout(timer);
 
       if (!upstreamRes.ok) {

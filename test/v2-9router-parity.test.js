@@ -5,7 +5,8 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { createApp } from "../server/index.js";
-import { sanitizeUpstreamPayload } from "../server/router.js";
+import { buildUpstreamHeaders, sanitizeUpstreamPayload } from "../server/router.js";
+import { normalizeBaseUrl } from "../server/presets.js";
 import { createMockUpstream } from "./mock-upstream.js";
 
 function extractCookie(res) {
@@ -938,5 +939,162 @@ describe("001Router v2.0 — 9Router Full Parity Suite", () => {
     const scan = await scanRes.json();
     assert.equal(scan.ok, true);
     assert.equal(scan.encryptionAtRest, true);
+  });
+
+  it("13. decrypts secrets on refreshFromPostgres and handles custom relays with switched Wire Format & auth-header retry", async () => {
+    // 13a. Verify Storage.refreshFromPostgres() decrypts encrypted API keys & proxy URLs
+    const encryptedPayload = app.storage._prepareDiskPayload();
+    const parsedDisk = JSON.parse(encryptedPayload);
+    assert.ok(
+      parsedDisk.providers.some((p) =>
+        (p.apiKeys || []).some((k) => typeof k.key === "string" && k.key.startsWith("enc:v1:"))
+      ),
+      "Disk/Postgres payload must store encrypted enc:v1: keys"
+    );
+    const originalPgPool = app.storage.pgPool;
+    const originalPgTs = app.storage._pgUpdatedAt;
+    try {
+      app.storage._pgUpdatedAt = 0;
+      app.storage.pgPool = {
+        async query() {
+          return { rows: [{ payload: encryptedPayload, ts: 9999999 }] };
+        }
+      };
+      await app.storage.refreshFromPostgres();
+      for (const p of app.storage.getProviders()) {
+        for (const k of p.apiKeys || []) {
+          assert.ok(
+            !String(k.key || "").startsWith("enc:v1:"),
+            `Provider '${p.slug}' key must be decrypted after refreshFromPostgres()`
+          );
+        }
+      }
+    } finally {
+      app.storage.pgPool = originalPgPool;
+      app.storage._pgUpdatedAt = originalPgTs;
+    }
+
+    // 13b. normalizeBaseUrl strips accidental pasted endpoint suffixes
+    assert.equal(normalizeBaseUrl("https://relay.example/v1/messages/"), "https://relay.example/v1");
+    assert.equal(
+      normalizeBaseUrl("https://relay.example/v1/chat/completions"),
+      "https://relay.example/v1"
+    );
+    assert.equal(normalizeBaseUrl("https://relay.example/v1/responses"), "https://relay.example/v1");
+
+    // 13c. Switching preset Wire Format overrides preset's default authStyle
+    const dsAnthropicHeaders = buildUpstreamHeaders(
+      { preset: "deepseek", formatType: "anthropic", baseUrl: "https://relay.example/v1" },
+      "sk-relay-test-key"
+    );
+    assert.equal(dsAnthropicHeaders["x-api-key"], "sk-relay-test-key");
+    assert.equal(dsAnthropicHeaders["anthropic-version"], "2023-06-01");
+    assert.equal(dsAnthropicHeaders.authorization, undefined);
+
+    const antOpenAiHeaders = buildUpstreamHeaders(
+      { preset: "anthropic", formatType: "openai", baseUrl: "https://relay.example/v1" },
+      "sk-relay-test-key"
+    );
+    assert.equal(antOpenAiHeaders.authorization, "Bearer sk-relay-test-key");
+    assert.equal(antOpenAiHeaders["x-api-key"], undefined);
+
+    // 13d. End-to-end custom relay under deepseek preset switched to Anthropic format:
+    // mock relay requires Bearer on /v1/models and Bearer on /v1/messages (rejects x-api-key with 401)
+    const relayKey = "sk-relay-valid-9999";
+    const relayServer = http.createServer((req, res) => {
+      const auth = req.headers.authorization || "";
+      if (auth !== `Bearer ${relayKey}`) {
+        res.writeHead(401, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({
+            error: { code: "invalid_api_key", message: "API key invalid", type: "invalid_api_key" }
+          })
+        );
+        return;
+      }
+      if (req.url === "/v1/models") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ data: [{ id: "deepseek-chat" }, { id: "claude-sonnet-4-5" }] }));
+        return;
+      }
+      if (req.url === "/v1/messages") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({
+            id: "msg_relay_1",
+            type: "message",
+            role: "assistant",
+            model: "claude-sonnet-4-5",
+            content: [{ type: "text", text: "Relay OK" }],
+            stop_reason: "end_turn",
+            usage: { input_tokens: 5, output_tokens: 2 }
+          })
+        );
+        return;
+      }
+      res.writeHead(404).end();
+    });
+
+    await new Promise((resolve) => relayServer.listen(0, "127.0.0.1", resolve));
+    const relayPort = relayServer.address().port;
+    try {
+      const createRes = await apiFetch("/api/providers", {
+        method: "POST",
+        body: {
+          preset: "deepseek",
+          name: "DeepSeek Relay",
+          slug: "deepseek-relay",
+          baseUrl: `http://127.0.0.1:${relayPort}/v1/messages`,
+          formatType: "anthropic",
+          apiKeys: [{ label: "Primary", key: relayKey }],
+          models: ["claude-sonnet-4-5"]
+        }
+      });
+      assert.equal(createRes.status, 201);
+      const relayProv = (await createRes.json()).provider;
+      assert.equal(relayProv.baseUrl, `http://127.0.0.1:${relayPort}/v1`);
+
+      // Test connection & inspect-account & model discovery & live chat routing all succeed via auth-header fallback
+      const testRes = await apiFetch(`/api/providers/${relayProv.id}/test`, {
+        method: "POST",
+        body: {}
+      });
+      const testJson = await testRes.json();
+      assert.equal(testJson.ok, true, `Expected test ok, got: ${JSON.stringify(testJson)}`);
+      assert.equal(testJson.modelsCount, 2);
+
+      const inspectRes = await apiFetch(`/api/providers/${relayProv.id}/inspect-account`, {
+        method: "POST",
+        body: { checkBilling: true }
+      });
+      const inspectJson = await inspectRes.json();
+      assert.equal(inspectJson.ok, true);
+      assert.equal(inspectJson.modelsCount, 2);
+
+      const modelsRes = await apiFetch(`/api/providers/${relayProv.id}/models`, {
+        method: "POST",
+        body: {}
+      });
+      const modelsJson = await modelsRes.json();
+      assert.equal(modelsJson.ok, true);
+      assert.ok(modelsJson.models.includes("claude-sonnet-4-5"));
+
+      const chatRes = await fetch(`${baseUrl}/v1/chat/completions`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${routerKey}`
+        },
+        body: JSON.stringify({
+          model: "deepseek-relay/claude-sonnet-4-5",
+          messages: [{ role: "user", content: "hi" }]
+        })
+      });
+      assert.equal(chatRes.status, 200);
+      const chatJson = await chatRes.json();
+      assert.equal(chatJson.choices[0].message.content, "Relay OK");
+    } finally {
+      await new Promise((resolve) => relayServer.close(resolve));
+    }
   });
 });

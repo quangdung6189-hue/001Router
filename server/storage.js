@@ -198,6 +198,66 @@ export class Storage {
     this._pgSyncInFlight = null;
   }
 
+  _decryptLoadedSecrets(loaded) {
+    let needsSave = false;
+    if (!loaded || typeof loaded !== "object") return false;
+
+    if (Array.isArray(loaded.providers)) {
+      for (const provider of loaded.providers) {
+        if (!provider || !Array.isArray(provider.apiKeys)) continue;
+        for (const keyEntry of provider.apiKeys) {
+          if (!keyEntry || typeof keyEntry !== "object") continue;
+          if (typeof keyEntry.key === "string" && keyEntry.key) {
+            if (isEncrypted(keyEntry.key)) {
+              keyEntry.key = decryptSecret(keyEntry.key, this.masterKey);
+            } else {
+              needsSave = true;
+            }
+          }
+          if (typeof keyEntry.serviceAccountJson === "string" && keyEntry.serviceAccountJson) {
+            if (isEncrypted(keyEntry.serviceAccountJson)) {
+              keyEntry.serviceAccountJson = decryptSecret(
+                keyEntry.serviceAccountJson,
+                this.masterKey
+              );
+            } else {
+              needsSave = true;
+            }
+          }
+          if (typeof keyEntry.oauthCredentials === "string" && keyEntry.oauthCredentials) {
+            if (isEncrypted(keyEntry.oauthCredentials)) {
+              keyEntry.oauthCredentials = decryptSecret(
+                keyEntry.oauthCredentials,
+                this.masterKey
+              );
+            } else {
+              needsSave = true;
+            }
+          } else if (
+            keyEntry.oauthCredentials &&
+            typeof keyEntry.oauthCredentials === "object"
+          ) {
+            keyEntry.oauthCredentials = JSON.stringify(keyEntry.oauthCredentials);
+            needsSave = true;
+          }
+        }
+      }
+    }
+
+    if (Array.isArray(loaded.proxyPools)) {
+      for (const pool of loaded.proxyPools) {
+        if (!pool || typeof pool.url !== "string" || !pool.url) continue;
+        if (isEncrypted(pool.url)) {
+          pool.url = decryptSecret(pool.url, this.masterKey);
+        } else {
+          needsSave = true;
+        }
+      }
+    }
+
+    return needsSave;
+  }
+
   async refreshFromPostgres() {
     if (!this.pgPool) return;
     if (this._pgSyncInFlight) return this._pgSyncInFlight;
@@ -214,6 +274,7 @@ export class Storage {
         }
         const parsed = JSON.parse(row.payload);
         if (parsed && typeof parsed === "object") {
+          this._decryptLoadedSecrets(parsed);
           this.data = parsed;
           this._pgUpdatedAt = remoteTs;
           try {
@@ -263,11 +324,12 @@ export class Storage {
     if (this.pgPool) {
       await this._ensurePgTable();
       const res = await this.pgPool.query(
-        "SELECT payload FROM router001_state WHERE id = 'primary' LIMIT 1"
+        "SELECT payload, EXTRACT(EPOCH FROM updated_at) AS ts FROM router001_state WHERE id = 'primary' LIMIT 1"
       );
       if (res.rows[0]?.payload) {
         try {
           loaded = JSON.parse(res.rows[0].payload);
+          this._pgUpdatedAt = Number(res.rows[0].ts) || 0;
         } catch {
           loaded = null;
         }
@@ -476,56 +538,8 @@ export class Storage {
     }
 
     // Transparent migration of legacy plaintext provider keys, service account JSONs, proxy URLs, and router keys
-    for (const provider of loaded.providers) {
-      if (!provider || !Array.isArray(provider.apiKeys)) continue;
-      for (const keyEntry of provider.apiKeys) {
-        if (!keyEntry || typeof keyEntry !== "object") continue;
-        if (typeof keyEntry.key === "string" && keyEntry.key) {
-          if (isEncrypted(keyEntry.key)) {
-            keyEntry.key = decryptSecret(keyEntry.key, this.masterKey);
-          } else {
-            // Legacy plaintext key found on disk: mark for immediate encrypted re-save
-            needsSave = true;
-          }
-        }
-        if (typeof keyEntry.serviceAccountJson === "string" && keyEntry.serviceAccountJson) {
-          if (isEncrypted(keyEntry.serviceAccountJson)) {
-            keyEntry.serviceAccountJson = decryptSecret(
-              keyEntry.serviceAccountJson,
-              this.masterKey
-            );
-          } else {
-            // Unencrypted service account JSON found on disk: mark for immediate encrypted re-save
-            needsSave = true;
-          }
-        }
-        if (typeof keyEntry.oauthCredentials === "string" && keyEntry.oauthCredentials) {
-          if (isEncrypted(keyEntry.oauthCredentials)) {
-            keyEntry.oauthCredentials = decryptSecret(
-              keyEntry.oauthCredentials,
-              this.masterKey
-            );
-          } else {
-            // Unencrypted OAuth credentials found on disk: mark for immediate encrypted re-save
-            needsSave = true;
-          }
-        } else if (
-          keyEntry.oauthCredentials &&
-          typeof keyEntry.oauthCredentials === "object"
-        ) {
-          keyEntry.oauthCredentials = JSON.stringify(keyEntry.oauthCredentials);
-          needsSave = true;
-        }
-      }
-    }
-
-    for (const pool of loaded.proxyPools) {
-      if (!pool || typeof pool.url !== "string" || !pool.url) continue;
-      if (isEncrypted(pool.url)) {
-        pool.url = decryptSecret(pool.url, this.masterKey);
-      } else {
-        needsSave = true;
-      }
+    if (this._decryptLoadedSecrets(loaded)) {
+      needsSave = true;
     }
 
     for (const keyObj of loaded.keys) {
@@ -678,12 +692,17 @@ export class Storage {
 
   async _writePayload(payload) {
     if (this.pgPool) {
-      await this.pgPool.query(
+      const res = await this.pgPool.query(
         `INSERT INTO router001_state (id, payload, updated_at)
          VALUES ('primary', $1, NOW())
-         ON CONFLICT (id) DO UPDATE SET payload = EXCLUDED.payload, updated_at = NOW()`,
+         ON CONFLICT (id) DO UPDATE SET payload = EXCLUDED.payload, updated_at = NOW()
+         RETURNING EXTRACT(EPOCH FROM updated_at) AS ts`,
         [payload]
       );
+      const writtenTs = Number(res.rows?.[0]?.ts) || 0;
+      if (writtenTs) {
+        this._pgUpdatedAt = writtenTs;
+      }
       return;
     }
 

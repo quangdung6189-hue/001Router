@@ -62,7 +62,15 @@ function buildServiceHeaders(provider, apiKey, extraHeaders = {}) {
   if (!apiKey) return headers;
 
   const presetDef = getPreset(provider?.preset);
-  const authStyle = provider?.authStyle || presetDef?.authStyle || "bearer";
+  const formatChanged = Boolean(
+    presetDef?.formatType &&
+    provider?.formatType &&
+    provider.formatType !== presetDef.formatType
+  );
+  const authStyle =
+    provider?.authStyle ||
+    (!formatChanged ? presetDef?.authStyle : undefined) ||
+    (provider?.formatType === "anthropic" ? "x-api-key" : "bearer");
 
   switch (authStyle) {
     case "x-subscription-token":

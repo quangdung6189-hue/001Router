@@ -2222,11 +2222,14 @@ export function ProvidersPage() {
   };
 
   const handleInspectAccount = async (keyId = '') => {
-    if (!form?.id) return;
+    if (!form) return;
     setInspectingAccount(true);
+    setModalFeedback(null);
     try {
+      const saved = await saveFormProvider();
+      if (!saved?.id) return;
       const res = await providersApi.inspectAccount(
-        form.id,
+        saved.id,
         keyId ? { keyId, checkBilling: true } : { checkBilling: true }
       );
       setAccountReport(res);
@@ -2245,22 +2248,34 @@ export function ProvidersPage() {
   };
 
   const handleTestSingleKey = async (row) => {
-    if (!form?.id || !row?.id) return;
-    setKeyTestingId(row.id);
+    if (!form || !row) return;
+    setKeyTestingId(row.id || row.localId);
+    setModalFeedback(null);
     try {
-      const res = await providersApi.testKey(form.id, row.id, form.models?.[0] || '');
-      setPerKeyResults((prev) => ({ ...prev, [row.id]: res }));
+      const saved = await saveFormProvider();
+      if (!saved?.id) return;
+      const matchedKey =
+        (saved.apiKeys || []).find((k) => row.id && k.id === row.id) ||
+        (saved.apiKeys || []).find((k) => row.label && k.label === row.label) ||
+        (saved.apiKeys || [])[0];
+      const targetKeyId = matchedKey?.id || row.id;
+      if (!targetKeyId) {
+        toast.error('Vui lòng nhập API key trước khi kiểm tra.');
+        return;
+      }
+      const res = await providersApi.testKey(saved.id, targetKeyId, '');
+      setPerKeyResults((prev) => ({ ...prev, [targetKeyId]: res }));
       if (res.ok) {
-        toast.success(`${row.label || row.maskedKey}: ${res.message || 'Connected'}`);
+        toast.success(`${row.label || matchedKey?.maskedKey || row.maskedKey}: ${res.message || 'Connected'}`);
         setForm((prev) => ({
           ...prev,
           apiKeys: prev.apiKeys.map((item) =>
-            item.id === row.id ? { ...item, cooldownUntil: null, lastError: '' } : item
+            item.id === targetKeyId ? { ...item, cooldownUntil: null, lastError: '' } : item
           ),
         }));
         await loadProviders();
       } else {
-        toast.error(`${row.label || row.maskedKey}: ${res.message || 'Test failed'}`);
+        toast.error(`${row.label || matchedKey?.maskedKey || row.maskedKey}: ${res.message || 'Test failed'}`);
       }
     } catch (err) {
       toast.error(err?.message || 'Key connection test failed');
@@ -2665,7 +2680,7 @@ export function ProvidersPage() {
         setTestingModelId(null);
         return;
       }
-      const targetModel = specificModel || form.models[0] || undefined;
+      const targetModel = specificModel || undefined;
       const res = await providersApi.test(saved.id, targetModel);
       setCardTestResults((prev) => ({ ...prev, [saved.id]: res }));
       if (specificModel) {
@@ -3771,7 +3786,7 @@ export function ProvidersPage() {
                             </h3>
                           </div>
                           <div className="flex flex-wrap items-center gap-1.5">
-                            {form.id && form.apiKeys.length > 0 ? (
+                            {(form.id || form.apiKeys.some((k) => k.key?.trim())) && form.apiKeys.length > 0 ? (
                               <button
                                 type="button"
                                 disabled={inspectingAccount}

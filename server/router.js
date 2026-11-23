@@ -342,9 +342,14 @@ export function buildUpstreamHeaders(provider, apiKey, clientAnthropicVersion, e
   };
 
   const presetDef = provider?.preset ? getPreset(provider.preset) : null;
+  const formatChanged = Boolean(
+    presetDef?.formatType &&
+    provider?.formatType &&
+    provider.formatType !== presetDef.formatType
+  );
   const authStyle =
     provider?.authStyle ||
-    presetDef?.authStyle ||
+    (!formatChanged ? presetDef?.authStyle : undefined) ||
     (provider?.formatType === "anthropic" ? "x-api-key" : "bearer");
 
   if (apiKey) {
@@ -362,6 +367,33 @@ export function buildUpstreamHeaders(provider, apiKey, clientAnthropicVersion, e
   }
 
   return headers;
+}
+
+/**
+ * Build an alternate authentication header set (swapping `x-api-key` <-> `Authorization: Bearer`)
+ * for third-party OpenAI/Anthropic-compatible relays that require the other header style.
+ * Returns null if no alternate header can be derived.
+ * @param {Record<string, string>} headers
+ * @param {string} apiKey
+ * @returns {Record<string, string> | null}
+ */
+export function buildAlternateAuthHeaders(headers, apiKey) {
+  if (!apiKey || !headers || typeof headers !== "object") return null;
+  const next = { ...headers };
+  if (next["x-api-key"] && !next["authorization"]) {
+    delete next["x-api-key"];
+    next["authorization"] = `Bearer ${apiKey}`;
+    return next;
+  }
+  if (next["authorization"] && !next["x-api-key"]) {
+    delete next["authorization"];
+    next["x-api-key"] = apiKey;
+    if (!next["anthropic-version"]) {
+      next["anthropic-version"] = "2023-06-01";
+    }
+    return next;
+  }
+  return null;
 }
 
 /**
@@ -1132,13 +1164,35 @@ export class RouterService {
               );
               this.liveEvents?.markRequestStart(provider.slug);
               markedActive = true;
-              const upstreamRes = await upstreamFetch(upstreamUrl, {
+              let upstreamRes = await upstreamFetch(upstreamUrl, {
                 method: "POST",
                 headers,
                 body: JSON.stringify(upstreamPayload),
                 signal: controller.signal,
                 ...(dispatcher ? { dispatcher } : {})
               });
+
+              // On Anthropic-format custom relays (e.g. Claude Code / OneAPI / xai247 proxies),
+              // some gateways require Authorization: Bearer while others require x-api-key.
+              // If the primary header gets 401, retry once with the alternate auth header.
+              if (
+                upstreamRes.status === 401 &&
+                resolvedSecret &&
+                provider.formatType === "anthropic" &&
+                !String(provider.baseUrl || "").toLowerCase().includes("api.anthropic.com")
+              ) {
+                const altHeaders = buildAlternateAuthHeaders(headers, resolvedSecret);
+                if (altHeaders) {
+                  await upstreamRes.text().catch(() => "");
+                  upstreamRes = await upstreamFetch(upstreamUrl, {
+                    method: "POST",
+                    headers: altHeaders,
+                    body: JSON.stringify(upstreamPayload),
+                    signal: controller.signal,
+                    ...(dispatcher ? { dispatcher } : {})
+                  });
+                }
+              }
 
               if (!upstreamRes.ok) {
                 clearTimeout(timer);
