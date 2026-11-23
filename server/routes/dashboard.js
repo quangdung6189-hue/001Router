@@ -84,6 +84,9 @@ import {
 import {
   GEMINI_CLI_DEFAULT_REDIRECT,
   exchangeGeminiCliOAuth,
+  fetchGeminiCliQuota,
+  getGeminiCliAccessToken,
+  loadGeminiCliProject,
   peekGeminiCliState,
   restoreGeminiCliState,
   startGeminiCliOAuth
@@ -676,6 +679,42 @@ async function runProviderConnectionTest(
     );
 
     const secrets = collectProviderSecrets(provider, resolvedSecret);
+
+    // Gemini CLI / Cloud Code Assist keys cannot be probed through `{baseUrl}/models` or
+    // `{baseUrl}/chat/completions` — the upstream only speaks `v1internal:*` RPCs. Probe
+    // `loadCodeAssist` instead, which returns the project + plan tier in one shot.
+    if (keyEntry.authMethod === "gemini_cli" && resolvedSecret) {
+      let probe;
+      try {
+        probe = await loadGeminiCliProject(resolvedSecret, {
+          ...(dispatcher ? { dispatcher } : {})
+        });
+      } catch (err) {
+        clearTimeout(timer);
+        return {
+          ok: false,
+          status: Number(err?.status) || 0,
+          latencyMs: Date.now() - started,
+          message: sanitizeSecrets(err?.message || "Cloud Code Assist probe failed", secrets)
+        };
+      }
+      clearTimeout(timer);
+
+      return {
+        ok: true,
+        status: 200,
+        latencyMs: Date.now() - started,
+        message: `Connected via Cloud Code Assist (${probe.tierLabel}${
+          probe.projectId ? `, project ${probe.projectId}` : ""
+        })`,
+        modelsCount: Array.isArray(provider.models) ? provider.models.length : 0,
+        oauthMeta: {
+          tier: probe.tier,
+          tierLabel: probe.tierLabel,
+          projectId: probe.projectId
+        }
+      };
+    }
 
     if (!requestedModel) {
       const modelsUrl = buildUpstreamUrl(
@@ -4276,7 +4315,7 @@ export function createDashboardRouter(storage, liveEvents = null) {
 
   // --- Quota & Budget Tracker ---
 
-  router.get("/quota", (_req, res) => {
+  router.get("/quota", async (_req, res) => {
     const now = Date.now();
     const nowIso = new Date(now).toISOString();
     const todayPrefix = nowIso.slice(0, 10);
@@ -4319,7 +4358,8 @@ export function createDashboardRouter(storage, liveEvents = null) {
     }
 
     const quotas = storage.getQuotas();
-    const items = storage.getProviders().map((provider) => {
+    const items = await Promise.all(
+      storage.getProviders().map(async (provider) => {
       const enabledKeys = (provider.apiKeys || []).filter((k) => k.enabled !== false);
       let activeKeys = 0;
       let cooldownKeys = 0;
@@ -4343,6 +4383,43 @@ export function createDashboardRouter(storage, liveEvents = null) {
       };
       const storedBudget = quotas[provider.id] || {};
 
+      // Live plan/quota for Gemini CLI accounts — read straight from Cloud Code Assist so the
+      // page shows the real tier and remaining buckets instead of only a self-set budget.
+      let cloudCodeQuota = null;
+      const cliKey = (provider.apiKeys || []).find(
+        (k) => k.enabled !== false && k.authMethod === "gemini_cli" && k.oauthCredentials
+      );
+      if (cliKey) {
+        try {
+          const dispatcher = getProxyDispatcher(provider, storage);
+          const { accessToken } = await getGeminiCliAccessToken(cliKey.oauthCredentials, {
+            ...(dispatcher ? { dispatcher } : {})
+          });
+          const metaProject = cliKey.oauthMeta?.projectId || "";
+          const [plan, quota] = await Promise.all([
+            loadGeminiCliProject(accessToken, {
+              ...(dispatcher ? { dispatcher } : {})
+            }).catch(() => null),
+            fetchGeminiCliQuota(accessToken, {
+              projectId: metaProject,
+              ...(dispatcher ? { dispatcher } : {})
+            }).catch(() => null)
+          ]);
+          if (plan || quota) {
+            cloudCodeQuota = {
+              tier: plan?.tier || cliKey.oauthMeta?.tier || "",
+              tierLabel:
+                plan?.tierLabel || cliKey.oauthMeta?.tierLabel || "Gemini CLI · Connected",
+              projectId: plan?.projectId || metaProject,
+              email: cliKey.oauthMeta?.email || "",
+              buckets: Array.isArray(quota?.buckets) ? quota.buckets : []
+            };
+          }
+        } catch {
+          // Best-effort: never break the quota list because one upstream probe failed.
+        }
+      }
+
       return {
         providerId: provider.id,
         slug: provider.slug,
@@ -4358,9 +4435,11 @@ export function createDashboardRouter(storage, liveEvents = null) {
           dailyTokenLimit: storedBudget.dailyTokenLimit ?? null,
           dailyRequestLimit: storedBudget.dailyRequestLimit ?? null,
           monthlyTokenLimit: storedBudget.monthlyTokenLimit ?? null
-        }
+        },
+        ...(cloudCodeQuota ? { cloudCodeQuota } : {})
       };
-    });
+      })
+    );
 
     return res.json({ items });
   });
