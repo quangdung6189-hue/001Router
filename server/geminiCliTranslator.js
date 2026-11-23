@@ -242,6 +242,19 @@ export function openAIToGeminiContents(body) {
 }
 
 /**
+ * Cloud Code Assist expects a numeric `sessionId` — a UUID or missing value makes the request
+ * look like a non-CLI client and Google answers 403 "You do not have a valid license of this
+ * product" (#3501). Derive a stable 64-bit-ish number from the project/model pair.
+ * @param {string} seed
+ * @returns {number}
+ */
+function toNumericSessionId(seed) {
+  const digest = crypto.createHash("sha256").update(String(seed || "gemini-cli")).digest();
+  // Keep it inside Number.MAX_SAFE_INTEGER while staying deterministic per seed.
+  return digest.readUIntBE(0, 6);
+}
+
+/**
  * Wrap Gemini contents in the Cloud Code envelope the CLI upstream requires.
  * @param {string} model
  * @param {any} body OpenAI chat body
@@ -256,6 +269,7 @@ export function buildCloudCodeRequest(model, body, projectId) {
     userAgent: "gemini-cli",
     requestId: `req-${crypto.randomUUID()}`,
     request: {
+      sessionId: toNumericSessionId(`${projectId || "p"}:${model}`),
       contents: gemini.contents,
       generationConfig: gemini.generationConfig,
       ...(gemini.systemInstruction ? { systemInstruction: gemini.systemInstruction } : {}),

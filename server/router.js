@@ -1256,8 +1256,35 @@ export class RouterService {
                       });
                     }
                   } catch {
-                    // Fall through: the upstream will report the real error.
+                    // Fall through to the explicit failure below.
                   }
+                }
+
+                // Never send a project-less envelope: Google answers 403 #3501 and the user
+                // cannot tell it apart from a broken key.
+                if (!cloudProject) {
+                  const msg =
+                    "Gemini CLI account has no Cloud Code Assist project yet. Google did not provision one (onboardUser returned no project). Open Providers -> Google Gemini, sign in again with 'Đăng nhập Gemini CLI', then retry. If it still fails, this Google account is not eligible for Cloud Code Assist.";
+                  clearTimeout(timer);
+                  this.liveEvents?.markRequestEnd(provider.slug, {
+                    model: `${provider.slug}/${target.upstreamModel}`,
+                    status: 403,
+                    latencyMs: Date.now() - attemptStart,
+                    error: msg
+                  });
+                  markedActive = false;
+                  attemptTrail.push({
+                    target: target.raw,
+                    providerSlug: provider.slug,
+                    model: target.upstreamModel,
+                    keyId: keyEntry.id,
+                    status: 403,
+                    latencyMs: Date.now() - attemptStart,
+                    error: msg
+                  });
+                  lastErrorStatus = 403;
+                  lastErrorMessage = msg;
+                  break;
                 }
 
                 effectiveUrl = isStream ? GEMINI_CLI_STREAM_URL : GEMINI_CLI_GENERATE_URL;

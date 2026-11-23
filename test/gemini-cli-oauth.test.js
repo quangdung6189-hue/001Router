@@ -394,7 +394,35 @@ describe("Gemini CLI wire translation", () => {
     assert.equal(props.fixed.const, undefined);
   });
 
-  it("15. generateContent endpoint constant points at Cloud Code Assist", () => {
+  it("16. the Cloud Code envelope carries a numeric sessionId (UUID/absent triggers 403 #3501)", () => {
+    const env = buildCloudCodeRequest(
+      "gemini-2.5-pro",
+      { messages: [{ role: "user", content: "hi" }] },
+      "proj-1"
+    );
+    assert.equal(typeof env.request.sessionId, "number");
+    assert.ok(Number.isInteger(env.request.sessionId));
+    assert.ok(env.request.sessionId > 0);
+    assert.ok(env.request.sessionId <= Number.MAX_SAFE_INTEGER);
+
+    // Deterministic per project+model, so repeat turns stay on one logical session.
+    const again = buildCloudCodeRequest(
+      "gemini-2.5-pro",
+      { messages: [{ role: "user", content: "hi again" }] },
+      "proj-1"
+    );
+    assert.equal(again.request.sessionId, env.request.sessionId);
+
+    // A different project must not reuse the session id.
+    const other = buildCloudCodeRequest(
+      "gemini-2.5-pro",
+      { messages: [{ role: "user", content: "hi" }] },
+      "proj-2"
+    );
+    assert.notEqual(other.request.sessionId, env.request.sessionId);
+  });
+
+  it("17. generateContent endpoint constant points at Cloud Code Assist", () => {
     assert.equal(
       GEMINI_CLI_GENERATE_URL,
       "https://cloudcode-pa.googleapis.com/v1internal:generateContent"
