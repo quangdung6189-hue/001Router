@@ -3,7 +3,8 @@ import { PRESETS, buildUpstreamUrl, getPreset, isKeyOptionalProvider } from "./p
 import {
   GEMINI_CLI_GENERATE_URL,
   GEMINI_CLI_STREAM_URL,
-  buildGeminiCliHeaders
+  buildGeminiCliHeaders,
+  loadGeminiCliProject
 } from "./geminiCliOAuth.js";
 import { buildCloudCodeRequest } from "./geminiCliTranslator.js";
 import {
@@ -1227,10 +1228,38 @@ export class RouterService {
               let effectiveBody = JSON.stringify(upstreamPayload);
               let effectiveHeaders = headers;
               if (isGeminiCliKey) {
-                const cloudProject =
+                let cloudProject =
                   keyEntry?.oauthMeta?.projectId ||
                   keyEntry?.oauthCredentials?.projectId ||
                   "";
+
+                // An empty project means the account was never onboarded to Cloud Code Assist;
+                // sending the envelope anyway makes Google answer 403 "You do not have a valid
+                // license of this product" (#3501). Provision once, persist, then continue.
+                if (!cloudProject) {
+                  try {
+                    const plan = await loadGeminiCliProject(resolvedSecret, {
+                      ...(dispatcher ? { dispatcher } : {})
+                    });
+                    cloudProject = plan.projectId || "";
+                    if (cloudProject && keyEntry?.id) {
+                      await this.storage.update((data) => {
+                        const p = data.providers.find((x) => x.id === provider.id);
+                        const k = (p?.apiKeys || []).find((x) => x.id === keyEntry.id);
+                        if (!k) return;
+                        k.oauthMeta = {
+                          ...(k.oauthMeta || {}),
+                          projectId: cloudProject,
+                          tier: plan.tier,
+                          tierLabel: plan.tierLabel
+                        };
+                      });
+                    }
+                  } catch {
+                    // Fall through: the upstream will report the real error.
+                  }
+                }
+
                 effectiveUrl = isStream ? GEMINI_CLI_STREAM_URL : GEMINI_CLI_GENERATE_URL;
                 effectiveBody = JSON.stringify(
                   buildCloudCodeRequest(target.upstreamModel, savedBody, cloudProject)

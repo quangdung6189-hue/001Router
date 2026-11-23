@@ -280,6 +280,28 @@ export function buildGeminiCliHeaders(accessToken, options = {}) {
 }
 
 /**
+ * Headers for the project-discovery RPCs (`loadCodeAssist` / `onboardUser`).
+ *
+ * These must match what the real `google-api-nodejs-client` sends. Google fingerprints the
+ * trio (User-Agent + X-Goog-Api-Client + Client-Metadata) and silently refuses to provision a
+ * `cloudaicompanionProject` — and later rejects chat with 403 "You do not have a valid license
+ * of this product" (#3501) — when they look like a generic HTTP client.
+ *
+ * @param {string} accessToken
+ * @returns {Record<string, string>}
+ */
+export function buildGeminiCliDiscoveryHeaders(accessToken) {
+  return {
+    authorization: `Bearer ${accessToken}`,
+    "content-type": "application/json",
+    accept: "application/json",
+    "user-agent": "google-api-nodejs-client/9.15.1",
+    "x-goog-api-client": "google-cloud-sdk vscode_cloudshelleditor/0.1",
+    "client-metadata": JSON.stringify(geminiCliClientMetadata())
+  };
+}
+
+/**
  * Call `v1internal:loadCodeAssist` to discover the free `cloudaicompanionProject` Google
  * auto-provisions for the signed-in account, plus the plan tier.
  *
@@ -296,7 +318,7 @@ export async function loadGeminiCliProject(accessToken, options = {}) {
   try {
     res = await fetchImpl(GEMINI_CLI_LOAD_CODE_ASSIST_URL, {
       method: "POST",
-      headers: buildGeminiCliHeaders(token),
+      headers: buildGeminiCliDiscoveryHeaders(token),
       body: JSON.stringify({ metadata: geminiCliClientMetadata(), mode: 1 }),
       ...(dispatcher ? { dispatcher } : {})
     });
@@ -328,12 +350,17 @@ export async function loadGeminiCliProject(accessToken, options = {}) {
     throw httpError(502, "loadCodeAssist returned invalid JSON");
   }
 
-  let projectId = "";
-  const rawProject = data?.cloudaicompanionProject;
-  if (typeof rawProject === "string") {
-    projectId = rawProject.trim();
-  } else if (rawProject && typeof rawProject === "object" && rawProject.id) {
-    projectId = String(rawProject.id).trim();
+  let projectId = extractCloudCodeProjectId(data);
+
+  // No project means the account was never onboarded to Cloud Code Assist. Chat then fails with
+  // 403 "You do not have a valid license of this product" (#3501), so provision it now — this is
+  // exactly what the official CLI does on first run.
+  if (!projectId) {
+    const tierId = pickOnboardTierId(data);
+    projectId = await onboardGeminiCliUser(token, tierId, {
+      ...(fetchImpl ? { fetchImpl } : {}),
+      ...(dispatcher ? { dispatcher } : {})
+    });
   }
 
   const currentTier = data?.currentTier?.name || "";
@@ -347,6 +374,105 @@ export async function loadGeminiCliProject(accessToken, options = {}) {
       : "Gemini CLI · Google Account Connected";
 
   return { projectId, tier, tierLabel, raw: data };
+}
+
+/**
+ * Pull the provisioned project id out of a loadCodeAssist/onboardUser payload.
+ * @param {any} data
+ * @returns {string}
+ */
+function extractCloudCodeProjectId(data) {
+  if (!data || typeof data !== "object") return "";
+  const raw = data.cloudaicompanionProject ?? data.response?.cloudaicompanionProject;
+  if (typeof raw === "string") return raw.trim();
+  if (raw && typeof raw === "object" && raw.id) return String(raw.id).trim();
+  return "";
+}
+
+/**
+ * Choose the tier to onboard into: the default entry of `allowedTiers`, else `legacy-tier`
+ * (what the official CLI falls back to).
+ * @param {any} data
+ * @returns {string}
+ */
+function pickOnboardTierId(data) {
+  if (Array.isArray(data?.allowedTiers)) {
+    for (const tier of data.allowedTiers) {
+      if (tier && typeof tier === "object" && tier.isDefault === true) {
+        const id = typeof tier.id === "string" ? tier.id.trim() : "";
+        if (id) return id;
+      }
+    }
+  }
+  return "legacy-tier";
+}
+
+/**
+ * Call `v1internal:onboardUser` until Google reports `done`, then return the project id.
+ * Without this step the account has no Cloud Code entitlement and every chat returns 403 #3501.
+ *
+ * @param {string} accessToken
+ * @param {string} tierId
+ * @param {{ fetchImpl?: typeof globalThis.fetch, dispatcher?: any }} [options]
+ * @returns {Promise<string>}
+ */
+export async function onboardGeminiCliUser(accessToken, tierId = "legacy-tier", options = {}) {
+  const { fetchImpl = upstreamFetch, dispatcher, retryDelayMs = 3000 } = options;
+  const token = String(accessToken || "").trim();
+  if (!token) throw httpError(400, "Missing access token for onboardUser");
+
+  const body = JSON.stringify({
+    tierId: tierId || "legacy-tier",
+    metadata: geminiCliClientMetadata()
+  });
+
+  // Google provisions asynchronously; the CLI polls. Two attempts is what the reference client
+  // uses, and a failure here is non-fatal (chat reports the real upstream error afterwards).
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    let res;
+    try {
+      res = await fetchImpl(GEMINI_CLI_ONBOARD_USER_URL, {
+        method: "POST",
+        headers: buildGeminiCliDiscoveryHeaders(token),
+        body,
+        ...(dispatcher ? { dispatcher } : {})
+      });
+    } catch {
+      continue;
+    }
+
+    const text = await res.text().catch(() => "");
+    if (!res.ok) {
+      if (attempt === 2) {
+        throw httpError(
+          res.status >= 400 && res.status < 500 ? 400 : 502,
+          redactSecrets(
+            `onboardUser failed (HTTP ${res.status}): ${text.slice(0, 240)}`,
+            [token]
+          )
+        );
+      }
+      continue;
+    }
+
+    let data = null;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      continue;
+    }
+
+    if (data?.done === true) {
+      const projectId = extractCloudCodeProjectId(data);
+      if (projectId) return projectId;
+    }
+
+    if (attempt < 2) {
+      await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+    }
+  }
+
+  return "";
 }
 
 /**
