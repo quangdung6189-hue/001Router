@@ -175,13 +175,50 @@ describe("Antigravity flavor — chat envelope", () => {
     });
     assert.equal(env.userAgent, "antigravity");
     assert.match(env.requestId, AGENT_REQUEST_ID);
-    assert.equal(env.model, "claude-sonnet-5-5-high(high)");
+    // "(high)" is an effort tag, not part of the model name: sent verbatim Google answers 404.
+    assert.equal(env.model, "claude-sonnet-5-5-high");
+    assert.deepEqual(env.request.generationConfig.thinkingConfig, {
+      thinkingBudget: 24576,
+      includeThoughts: true
+    });
     assert.equal(env.project, "ag-project-1");
     assert.equal("requestType" in env, false, "requestType triggers a detail-free 429");
     // Google: "Invalid value at 'request.session_id' (TYPE_STRING)" when this is a number.
     assert.equal(typeof env.request.sessionId, "string");
     assert.match(env.request.sessionId, /^-\d+$/);
     assert.ok(env.request.generationConfig.maxOutputTokens <= ANTIGRAVITY_MAX_OUTPUT_TOKENS);
+  });
+
+  it("7a. gemini-3.8-flash -> gemini-3.8-flash-medium + 8192 budget; reasoning_effort picks the tier", () => {
+    const flavor = getCloudCodeFlavor("antigravity");
+    const plain = buildCloudCodeRequest(
+      "gemini-3.8-flash",
+      { messages: [{ role: "user", content: "hi" }], max_tokens: 100 },
+      "p",
+      { flavor }
+    );
+    assert.equal(plain.model, "gemini-3.8-flash-medium");
+    assert.equal(plain.request.generationConfig.thinkingConfig.thinkingBudget, 8192);
+    // Thoughts count toward output: a 100-token cap would leave no room for the answer.
+    assert.ok(plain.request.generationConfig.maxOutputTokens >= 16384);
+
+    const high = buildCloudCodeRequest(
+      "gemini-3.8-flash",
+      { messages: [{ role: "user", content: "hi" }], reasoning_effort: "high" },
+      "p",
+      { flavor }
+    );
+    assert.equal(high.model, "gemini-3.8-flash-high");
+    assert.equal(high.request.generationConfig.thinkingConfig.thinkingBudget, 24576);
+
+    // An explicitly tiered id is not re-tiered by reasoning_effort.
+    const low = buildCloudCodeRequest(
+      "gemini-3.8-flash-low",
+      { messages: [{ role: "user", content: "hi" }], reasoning_effort: "high" },
+      "p",
+      { flavor }
+    );
+    assert.equal(low.model, "gemini-3.8-flash-low");
   });
 
   it("7. unknown Antigravity model ids pass through unchanged", () => {
@@ -197,6 +234,7 @@ describe("Antigravity flavor — chat envelope", () => {
       assert.equal(env.userAgent, "gemini-cli");
       assert.match(env.requestId, /^req-/);
       assert.equal(env.model, "gemini-2.5-pro");
+      assert.equal(env.request.generationConfig.thinkingConfig, undefined);
     }
   });
 });
@@ -344,7 +382,8 @@ describe("Antigravity routes + /v1 chat", () => {
       assert.match(call.headers["user-agent"], AG_UA);
       assert.equal(call.headers.authorization, "Bearer ya29.ag-access-token");
       assert.equal(call.body.userAgent, "antigravity");
-      assert.equal(call.body.model, "claude-sonnet-5-5-high(high)");
+      assert.equal(call.body.model, "claude-sonnet-5-5-high");
+      assert.doesNotMatch(call.body.model, /[()]/, "no effort suffix in the upstream model name");
       assert.equal(call.body.project, "ag-project-1");
       assert.match(call.body.requestId, AGENT_REQUEST_ID);
       assert.equal("requestType" in call.body, false);

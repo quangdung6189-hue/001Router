@@ -256,6 +256,64 @@ export function toNumericSessionId(seed) {
   return `-${n.toString()}`;
 }
 
+/** Effort level -> Gemini thinkingBudget (same table the reference router uses). */
+const THINKING_LEVEL_TO_BUDGET = Object.freeze({
+  minimal: 512,
+  low: 1024,
+  medium: 8192,
+  high: 24576
+});
+
+/**
+ * Output-token floor for a thinking budget, so thoughts cannot eat the whole answer.
+ * @param {number} budget
+ * @returns {number}
+ */
+function thinkingOutputFloor(budget) {
+  if (budget <= 1024) return 8192;
+  if (budget <= 8192) return 16384;
+  if (budget <= 24576) return 32768;
+  return 65535;
+}
+
+/**
+ * Turn a router model id into the id Google expects plus an optional thinking budget.
+ *
+ * Antigravity catalogs effort-tiered models as `name(level)`, e.g.
+ * `gemini-3.8-flash-medium(medium)`. The `(level)` part is NOT part of the upstream model name
+ * — sending it verbatim makes Google answer 404 "Requested entity was not found". It is
+ * stripped and becomes `generationConfig.thinkingConfig.thinkingBudget` instead.
+ *
+ * A tierless friendly id (`gemini-3.8-flash`) follows the client's `reasoning_effort` when the
+ * flavor knows a `<id>-<effort>` variant.
+ *
+ * @param {string} model
+ * @param {any} body OpenAI chat body
+ * @param {{ resolveModel?: (m: string) => string } | null} flavor
+ * @returns {{ model: string, thinkingBudget: number | null }}
+ */
+export function resolveUpstreamModel(model, body, flavor) {
+  const resolve = typeof flavor?.resolveModel === "function" ? flavor.resolveModel : (m) => m;
+  let requested = String(model || "");
+
+  const effort = typeof body?.reasoning_effort === "string" ? body.reasoning_effort.trim().toLowerCase() : "";
+  const effortTier = effort === "xhigh" || effort === "max" ? "high" : effort === "minimal" ? "low" : effort;
+  if (effortTier && THINKING_LEVEL_TO_BUDGET[effortTier] !== undefined) {
+    const tiered = `${requested}-${effortTier}`;
+    if (resolve(tiered) !== tiered) requested = tiered;
+  }
+
+  const resolved = resolve(requested);
+  const m = resolved.match(/^(.*)\(([^()]+)\)\s*$/);
+  if (!m) return { model: resolved, thinkingBudget: null };
+  const level = m[2].trim().toLowerCase();
+  const budget = THINKING_LEVEL_TO_BUDGET[level];
+  return {
+    model: m[1].trim(),
+    thinkingBudget: budget === undefined ? null : budget
+  };
+}
+
 /**
  * Deterministic RFC-4122-shaped (v5-style) UUID from a seed.
  * @param {string} seed
@@ -287,10 +345,18 @@ function uuidFromSeed(seed) {
 export function buildCloudCodeRequest(model, body, projectId, options = {}) {
   const flavor = options.flavor || null;
   const isAntigravity = flavor?.id === "antigravity";
-  const upstreamModel = flavor?.resolveModel ? flavor.resolveModel(model) : model;
+  const { model: upstreamModel, thinkingBudget } = resolveUpstreamModel(model, body, flavor);
   const gemini = openAIToGeminiContents(body);
 
   const generationConfig = { ...(gemini.generationConfig || {}) };
+  if (thinkingBudget !== null) {
+    // Thinking tokens count toward the output limit, so keep room for the answer.
+    generationConfig.thinkingConfig = { thinkingBudget, includeThoughts: true };
+    const floor = thinkingOutputFloor(thinkingBudget);
+    if (!(Number(generationConfig.maxOutputTokens) >= floor)) {
+      generationConfig.maxOutputTokens = floor;
+    }
+  }
   const cap = Number(flavor?.maxOutputTokens) || 0;
   if (cap > 0 && Number(generationConfig.maxOutputTokens) > cap) {
     generationConfig.maxOutputTokens = cap;
