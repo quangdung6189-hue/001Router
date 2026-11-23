@@ -33,7 +33,13 @@ export function getKeyAuthKind(keyEntry) {
   }
   // Gemini CLI / Cloud Code Assist accounts are Google OAuth, but surfaced as their own kind so
   // the UI can show the Cloud Code quota buckets instead of the AI Studio free/paid tier.
-  if (rawType === 'gemini_cli' || keyEntry.oauthMeta?.flow === 'gemini_cli') {
+  // Antigravity keys use the same Cloud Code wire format, so they share the Gemini CLI display.
+  if (
+    rawType === 'gemini_cli' ||
+    rawType === 'antigravity' ||
+    keyEntry.oauthMeta?.flow === 'gemini_cli' ||
+    keyEntry.oauthMeta?.flow === 'antigravity'
+  ) {
     return 'gemini_cli';
   }
   if (

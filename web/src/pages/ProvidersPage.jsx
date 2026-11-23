@@ -2197,6 +2197,31 @@ export function ProvidersPage() {
 
   const diagnoseGeminiCli = async () => providersApi.diagnoseGeminiCli({ forceRefresh: true });
 
+  // Antigravity — same Cloud Code machinery, but its keys live on a separate "antigravity"
+  // provider, so finishing the sign-in only reloads the list (the Gemini form stays open).
+  const startAntigravitySignIn = async (redirectUri) => {
+    const res = await providersApi.startAntigravityOAuth({
+      callbackUrl: redirectUri,
+      selectAccount: true,
+    });
+    const url = res?.authUrl || '';
+    if (!url) throw new Error('Server did not return an Antigravity authorization URL.');
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+      throw new Error('Invalid OAuth redirect URL protocol.');
+    }
+    return url;
+  };
+
+  const completeAntigravitySignIn = async (pastedUrl) => {
+    const res = await providersApi.exchangeAntigravityOAuth({ pastedUrl });
+    await loadProviders();
+    const who = res?.oauthMeta?.email ? ` (${res.oauthMeta.email})` : '';
+    toast.success(`Đã kết nối Antigravity${who} — xem provider "Antigravity (Google)".`);
+  };
+
+  const diagnoseAntigravity = async () => providersApi.diagnoseAntigravity({ forceRefresh: true });
+
   const handleOneClickGoogleSignIn = async () => {
     setModalFeedback(null);
     setStartingGoogleOAuth(true);
@@ -4909,6 +4934,14 @@ export function ProvidersPage() {
                           onStart={startGeminiCliSignIn}
                           onComplete={completeGeminiCliSignIn}
                           onDiagnose={diagnoseGeminiCli}
+                        />
+
+                        {/* Antigravity — Google's replacement for Gemini CLI (separate provider) */}
+                        <GeminiCliSignIn
+                          variant="antigravity"
+                          onStart={startAntigravitySignIn}
+                          onComplete={completeAntigravitySignIn}
+                          onDiagnose={diagnoseAntigravity}
                         />
 
                         {/* Primary Official Google OAuth 2.0 + PKCE Card */}

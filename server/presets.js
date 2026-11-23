@@ -1,7 +1,11 @@
 /**
- * Official provider presets and upstream URL normalization helpers for 001Router.
- * Supports official API keys, free-tier developer APIs, documented OAuth/Device flows,
- * and local self-hosted LLMs only. Zero client spoofing, zero web cookies, zero MITM.
+ * Provider presets and upstream URL normalization helpers for 001Router.
+ * By default: official API keys, free-tier developer APIs, documented OAuth/Device flows and
+ * local self-hosted LLMs. Zero web cookies, zero MITM.
+ *
+ * Experimental exception: the Gemini CLI and Antigravity sign-ins reuse those apps' own public
+ * OAuth clients and identify as them to Google (client impersonation). They are opt-in, outside
+ * Google's supported terms for third-party tools, and may get the Google account restricted.
  */
 
 import { enrichPresetWithCatalog, onCatalogReload } from "./catalog/index.js";
@@ -24,6 +28,32 @@ const RAW_PRESETS = [
     docsUrl: "https://aistudio.google.com/apikey",
     keyOptional: false,
     models: ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"]
+  },
+  {
+    // Google Antigravity (Cloud Code Assist). Keys are created only by the "Đăng nhập Antigravity"
+    // card (authMethod "antigravity"); requests go to v1internal on daily-cloudcode-pa, not baseUrl.
+    // Experimental: it signs in with the Antigravity IDE's OAuth client, which Google may restrict.
+    preset: "antigravity",
+    name: "Antigravity (Google)",
+    category: "free-tier",
+    tier: "free",
+    badge: "OAuth · Thử nghiệm",
+    color: "#F59E0B",
+    monogram: "AG",
+    baseUrl: "https://daily-cloudcode-pa.googleapis.com/v1internal",
+    formatType: "gemini-openai",
+    authStyle: "bearer",
+    docsUrl: "https://antigravity.google",
+    keyOptional: false,
+    models: [
+      "gemini-3.8-flash",
+      "gemini-3.1-pro-high",
+      "gemini-4-carbon",
+      "gemini-4-argon-medium",
+      "claude-sonnet-5-5",
+      "claude-opus-5-5",
+      "gpt-oss-120b-medium"
+    ]
   },
   {
     preset: "groq",

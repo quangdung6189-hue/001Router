@@ -255,23 +255,64 @@ function toNumericSessionId(seed) {
 }
 
 /**
- * Wrap Gemini contents in the Cloud Code envelope the CLI upstream requires.
+ * Deterministic RFC-4122-shaped (v5-style) UUID from a seed.
+ * @param {string} seed
+ * @returns {string}
+ */
+function uuidFromSeed(seed) {
+  const bytes = crypto.createHash("sha256").update(String(seed || "cloud-code")).digest().subarray(0, 16);
+  bytes[6] = (bytes[6] & 0x0f) | 0x50;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = bytes.toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+/**
+ * Wrap Gemini contents in the Cloud Code envelope the upstream requires.
+ *
+ * `options.flavor` (from geminiCliOAuth.getCloudCodeFlavor) selects the client dialect:
+ *  - gemini_cli: `userAgent: "gemini-cli"`, `requestId: "req-<uuid>"`;
+ *  - antigravity: `userAgent: "antigravity"`, `requestId: "agent/<conv>/<ts>/<traj>/<step>"`,
+ *    friendly model ids mapped to their effort-suffixed upstream ids, output tokens capped, and
+ *    no `requestType` (sending one makes Google answer a detail-free 429).
+ *
  * @param {string} model
  * @param {any} body OpenAI chat body
  * @param {string} projectId
+ * @param {{ flavor?: { id: string, envelopeUserAgent: string, maxOutputTokens: number, resolveModel: (m: string) => string } }} [options]
  * @returns {any}
  */
-export function buildCloudCodeRequest(model, body, projectId) {
+export function buildCloudCodeRequest(model, body, projectId, options = {}) {
+  const flavor = options.flavor || null;
+  const isAntigravity = flavor?.id === "antigravity";
+  const upstreamModel = flavor?.resolveModel ? flavor.resolveModel(model) : model;
   const gemini = openAIToGeminiContents(body);
+
+  const generationConfig = { ...(gemini.generationConfig || {}) };
+  const cap = Number(flavor?.maxOutputTokens) || 0;
+  if (cap > 0 && Number(generationConfig.maxOutputTokens) > cap) {
+    generationConfig.maxOutputTokens = cap;
+  }
+
+  const sessionSeed = `${projectId || "p"}:${model}`;
+  const contents = gemini.contents;
+  let requestId = `req-${crypto.randomUUID()}`;
+  if (isAntigravity) {
+    const conversationId = uuidFromSeed(`antigravity:conversation:${sessionSeed}`);
+    const trajectoryId = uuidFromSeed(`antigravity:trajectory:${sessionSeed}:agent`);
+    const step = Math.max(1, (Array.isArray(contents) ? contents.length : 1) * 2 - 1);
+    requestId = `agent/${conversationId}/${Date.now()}/${trajectoryId}/${step}`;
+  }
+
   const envelope = {
     project: projectId || "",
-    model,
-    userAgent: "gemini-cli",
-    requestId: `req-${crypto.randomUUID()}`,
+    model: upstreamModel,
+    userAgent: flavor?.envelopeUserAgent || "gemini-cli",
+    requestId,
     request: {
-      sessionId: toNumericSessionId(`${projectId || "p"}:${model}`),
-      contents: gemini.contents,
-      generationConfig: gemini.generationConfig,
+      sessionId: toNumericSessionId(sessionSeed),
+      contents,
+      generationConfig,
       ...(gemini.systemInstruction ? { systemInstruction: gemini.systemInstruction } : {}),
       ...(gemini.tools ? { tools: gemini.tools } : {})
     }

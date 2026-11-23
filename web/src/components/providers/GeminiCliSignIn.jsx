@@ -2,7 +2,40 @@ import { useMemo, useState } from 'react';
 import { CheckCircle2, ExternalLink, RefreshCw, Terminal } from 'lucide-react';
 import { CopyButton } from '../CopyButton';
 
-const DEFAULT_CLI_REDIRECT = 'http://127.0.0.1:1455/oauth2callback';
+const VARIANTS = {
+  gemini_cli: {
+    name: 'Gemini CLI',
+    title: 'Đăng nhập Gemini CLI (Cloud Code Assist)',
+    badge: 'Không cần GCP Project',
+    accent: '#E56A4A',
+    defaultRedirect: 'http://127.0.0.1:1455/oauth2callback',
+    description: (
+      <>
+        Dùng OAuth client công khai của <strong>Gemini CLI</strong> — cùng client mà 9router dùng.
+        Không cần tạo OAuth client riêng, không cần bật Cloud Billing. Server tự gọi{' '}
+        <code>loadCodeAssist</code> để lấy project miễn phí và <code>retrieveUserQuota</code> để
+        hiện gói.
+      </>
+    ),
+    warning: null,
+  },
+  antigravity: {
+    name: 'Antigravity',
+    title: 'Đăng nhập Antigravity (Google)',
+    badge: 'Thử nghiệm',
+    accent: '#F59E0B',
+    defaultRedirect: 'http://localhost:1456/callback',
+    description: (
+      <>
+        Dùng OAuth client của <strong>Antigravity IDE</strong> — dịch vụ Google thay cho Gemini CLI.
+        Kết nối tạo (hoặc cập nhật) provider riêng <strong>Antigravity (Google)</strong> với model
+        Gemini 3.x/4 và Claude. Chat đi qua <code>daily-cloudcode-pa.googleapis.com</code>.
+      </>
+    ),
+    warning:
+      'Đây là client không chính thức: Google có thể chặn hoặc hạn chế tài khoản dùng nó qua công cụ bên thứ ba. Nên dùng tài khoản phụ để thử.',
+  },
+};
 
 /**
  * Gemini CLI (Cloud Code Assist) sign-in — the same public OAuth client the official
@@ -12,7 +45,9 @@ const DEFAULT_CLI_REDIRECT = 'http://127.0.0.1:1455/oauth2callback';
  * This is the path that resolves the account plan/quota without any GCP project or
  * Cloud Billing, because the upstream is `cloudcode-pa.googleapis.com`.
  */
-export function GeminiCliSignIn({ onStart, onComplete, onDiagnose }) {
+export function GeminiCliSignIn({ onStart, onComplete, onDiagnose, variant = 'gemini_cli' }) {
+  const v = VARIANTS[variant] || VARIANTS.gemini_cli;
+  const DEFAULT_CLI_REDIRECT = v.defaultRedirect;
   const [redirectUri, setRedirectUri] = useState(DEFAULT_CLI_REDIRECT);
   const [authUrl, setAuthUrl] = useState('');
   const [pasted, setPasted] = useState('');
@@ -27,7 +62,7 @@ export function GeminiCliSignIn({ onStart, onComplete, onDiagnose }) {
         return 'Redirect URI phải bắt đầu bằng http:// hoặc https://';
       }
       if (!['127.0.0.1', 'localhost', '[::1]'].includes(u.hostname)) {
-        return 'Dùng 127.0.0.1 hoặc localhost — Google chỉ chấp nhận loopback cho client Gemini CLI.';
+        return `Dùng 127.0.0.1 hoặc localhost — Google chỉ chấp nhận loopback cho client ${v.name}.`;
       }
       return '';
     } catch {
@@ -53,7 +88,7 @@ export function GeminiCliSignIn({ onStart, onComplete, onDiagnose }) {
     } catch (err) {
       setFeedback({
         type: 'error',
-        message: err?.message || 'Không thể bắt đầu đăng nhập Gemini CLI.',
+        message: err?.message || `Không thể bắt đầu đăng nhập ${v.name}.`,
       });
     } finally {
       setBusy('');
@@ -77,12 +112,12 @@ export function GeminiCliSignIn({ onStart, onComplete, onDiagnose }) {
       setAuthUrl('');
       setFeedback({
         type: 'success',
-        message: 'Kết nối Gemini CLI thành công — đã đọc gói và quota.',
+        message: `Kết nối ${v.name} thành công — đã đọc gói và quota.`,
       });
     } catch (err) {
       setFeedback({
         type: 'error',
-        message: err?.message || 'Không thể hoàn tất kết nối Gemini CLI.',
+        message: err?.message || `Không thể hoàn tất kết nối ${v.name}.`,
       });
     } finally {
       setBusy('');
@@ -111,25 +146,33 @@ export function GeminiCliSignIn({ onStart, onComplete, onDiagnose }) {
         : 'border-blue-500/30 bg-blue-500/10 text-blue-400';
 
   return (
-    <div className="space-y-3 rounded-xl border border-[#E56A4A]/40 bg-[#E56A4A]/8 p-4">
+    <div
+      className="space-y-3 rounded-xl border p-4"
+      style={{ borderColor: `${v.accent}66`, backgroundColor: `${v.accent}14` }}
+    >
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-2">
-          <Terminal className="h-4 w-4 shrink-0 text-[#E56A4A]" aria-hidden="true" />
-          <h3 className="text-xs font-semibold text-[var(--text-primary)]">
-            Đăng nhập Gemini CLI (Cloud Code Assist)
-          </h3>
+          <Terminal className="h-4 w-4 shrink-0" style={{ color: v.accent }} aria-hidden="true" />
+          <h3 className="text-xs font-semibold text-[var(--text-primary)]">{v.title}</h3>
         </div>
-        <span className="rounded-full border border-[#E56A4A]/40 bg-[#E56A4A]/15 px-2 py-0.5 text-[10px] font-semibold text-[#E56A4A]">
-          Không cần GCP Project
+        <span
+          className="rounded-full border px-2 py-0.5 text-[10px] font-semibold"
+          style={{ color: v.accent, borderColor: `${v.accent}66`, backgroundColor: `${v.accent}26` }}
+        >
+          {v.badge}
         </span>
       </div>
 
-      <p className="text-xs leading-relaxed text-[var(--text-secondary)]">
-        Dùng OAuth client công khai của <strong>Gemini CLI</strong> — cùng client mà 9router dùng.
-        Không cần tạo OAuth client riêng, không cần bật Cloud Billing. Server tự gọi{' '}
-        <code>loadCodeAssist</code> để lấy project miễn phí và <code>retrieveUserQuota</code> để
-        hiện gói.
-      </p>
+      <p className="text-xs leading-relaxed text-[var(--text-secondary)]">{v.description}</p>
+
+      {v.warning ? (
+        <p
+          role="note"
+          className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[11px] leading-relaxed text-amber-500"
+        >
+          {v.warning}
+        </p>
+      ) : null}
 
       <ol className="list-decimal space-y-1.5 pl-4 text-[11px] leading-relaxed text-[var(--text-secondary)]">
         <li>
@@ -140,7 +183,7 @@ export function GeminiCliSignIn({ onStart, onComplete, onDiagnose }) {
               value={redirectUri}
               onChange={(e) => setRedirectUri(e.target.value)}
               spellCheck={false}
-              aria-label="Gemini CLI Redirect URI"
+              aria-label={`${v.name} Redirect URI`}
               className="field-input min-w-0 flex-1 px-2.5 py-1.5 font-mono text-xs"
             />
             <CopyButton value={redirectUri} size="xs" toastMessage={`Copied ${redirectUri}`} />
@@ -169,7 +212,8 @@ export function GeminiCliSignIn({ onStart, onComplete, onDiagnose }) {
               href={authUrl}
               target="_blank"
               rel="noopener noreferrer"
-              className="ml-3 font-semibold text-[#E56A4A] hover:underline"
+              className="ml-3 font-semibold hover:underline"
+              style={{ color: v.accent }}
             >
               Mở trang đăng nhập (nếu tab không tự mở)
             </a>
@@ -190,7 +234,7 @@ export function GeminiCliSignIn({ onStart, onComplete, onDiagnose }) {
         spellCheck={false}
         autoComplete="off"
         placeholder={`${redirectUri || DEFAULT_CLI_REDIRECT}?state=...&code=4/0A...&scope=...`}
-        aria-label="Gemini CLI callback URL"
+        aria-label={`${v.name} callback URL`}
         className="field-input w-full px-2.5 py-2 font-mono text-xs"
       />
 

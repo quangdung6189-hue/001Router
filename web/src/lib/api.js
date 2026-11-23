@@ -176,6 +176,21 @@ export const providersApi = {
           ? codeOrPayload
           : { code: codeOrPayload, state },
     }),
+  startAntigravityOAuth: (payload = {}) =>
+    apiFetch('/api/providers/oauth/antigravity/start', {
+      method: 'POST',
+      body: payload,
+    }),
+  exchangeAntigravityOAuth: (payload = {}) =>
+    apiFetch('/api/providers/oauth/antigravity/exchange', {
+      method: 'POST',
+      body: payload,
+    }),
+  diagnoseAntigravity: (payload = {}) =>
+    apiFetch('/api/providers/oauth/antigravity/diagnose', {
+      method: 'POST',
+      body: payload,
+    }),
   startOAuth: (provider, payload) =>
     apiFetch(`/api/providers/oauth/${encodeURIComponent(provider)}/start`, {
       method: 'POST',

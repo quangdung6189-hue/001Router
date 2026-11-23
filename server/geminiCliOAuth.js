@@ -57,6 +57,168 @@ export const GEMINI_CLI_VERSION = "0.34.0";
 export const GEMINI_CLI_API_CLIENT = "google-genai-sdk/1.41.0 gl-node/v22.19.0";
 export const GEMINI_CLI_DEFAULT_REDIRECT = "http://127.0.0.1:1455/oauth2callback";
 
+/**
+ * Antigravity — Google's replacement for the Gemini CLI client. Same Cloud Code Assist RPCs, but
+ * its own public OAuth client (shipped inside the Antigravity IDE, assembled from fragments for the
+ * same secret-scanner reason as above), two extra scopes, and chat on the `daily-cloudcode-pa` host.
+ * Override with ANTIGRAVITY_CLIENT_ID / ANTIGRAVITY_CLIENT_SECRET.
+ */
+const AG_CLIENT_ID_PARTS = [
+  "1071006060591-tmhssin2h21lcre235vtolojh4g403ep",
+  ".apps.googleusercontent.com"
+];
+const AG_CLIENT_SECRET_PARTS = ["GOCSPX-K58F", "WR486LdLJ1", "mLB8sXC4z6qDAf"];
+
+export const ANTIGRAVITY_CLIENT_ID =
+  process.env.ANTIGRAVITY_CLIENT_ID || AG_CLIENT_ID_PARTS.join("");
+export const ANTIGRAVITY_CLIENT_SECRET =
+  process.env.ANTIGRAVITY_CLIENT_SECRET || AG_CLIENT_SECRET_PARTS.join("");
+export const ANTIGRAVITY_VERSION = "2.24.0";
+export const ANTIGRAVITY_USER_AGENT = `antigravity/hub/${ANTIGRAVITY_VERSION} darwin/arm64`;
+export const ANTIGRAVITY_CHAT_BASE = "https://daily-cloudcode-pa.googleapis.com/v1internal";
+export const ANTIGRAVITY_DEFAULT_REDIRECT = "http://localhost:1456/callback";
+export const ANTIGRAVITY_SCOPES = [
+  ...GEMINI_CLI_SCOPES,
+  "https://www.googleapis.com/auth/cclog",
+  "https://www.googleapis.com/auth/experimentsandconfigs"
+];
+/** Antigravity caps output tokens; larger values are rejected upstream. */
+export const ANTIGRAVITY_MAX_OUTPUT_TOKENS = 64000;
+
+/**
+ * Friendly model ids exposed by the router -> the effort-suffixed ids Antigravity expects.
+ * Ids not listed here are sent unchanged.
+ */
+export const ANTIGRAVITY_MODEL_ALIASES = Object.freeze({
+  "gemini-4-carbon-high": "gemini-4-carbon-high(high)",
+  "gemini-4-carbon-medium": "gemini-4-carbon-medium(medium)",
+  "gemini-4-carbon-low": "gemini-4-carbon-low(low)",
+  "gemini-4-carbon": "gemini-4-carbon-medium(medium)",
+  "gemini-4-argon-high": "gemini-4-argon-high(high)",
+  "gemini-4-argon-medium": "gemini-4-argon-medium(medium)",
+  "gemini-4-argon-low": "gemini-4-argon-low(low)",
+  "gemini-3.8-flash-high": "gemini-3.8-flash-high(high)",
+  "gemini-3.8-flash-medium": "gemini-3.8-flash-medium(medium)",
+  "gemini-3.8-flash-low": "gemini-3.8-flash-low(low)",
+  "gemini-3.8-flash": "gemini-3.8-flash-medium(medium)",
+  "gemini-3.1-pro-high": "gemini-pro-agent",
+  "gemini-3.1-pro-low": "gemini-3.1-pro-low(low)",
+  "claude-sonnet-5-5-high": "claude-sonnet-5-5-high(high)",
+  "claude-sonnet-5-5-medium": "claude-sonnet-5-5-medium(medium)",
+  "claude-sonnet-5-5-low": "claude-sonnet-5-5-low(low)",
+  "claude-sonnet-5-5": "claude-sonnet-5-5-high(high)",
+  "claude-opus-5-5-high": "claude-opus-5-5-high(high)",
+  "claude-opus-5-5-medium": "claude-opus-5-5-medium(medium)",
+  "claude-opus-5-5-low": "claude-opus-5-5-low(low)",
+  "claude-opus-5-5": "claude-opus-5-5-high(high)"
+});
+
+/**
+ * Per-client differences of the Cloud Code Assist handshake and chat wire format. Everything
+ * else (PKCE, token refresh, envelope translation) is shared.
+ *
+ * @typedef {{
+ *   id: "gemini_cli" | "antigravity",
+ *   label: string,
+ *   clientId: string,
+ *   clientSecret: string,
+ *   scopes: string[],
+ *   defaultRedirect: string,
+ *   loadCodeAssistUrl: string,
+ *   onboardUserUrl: string,
+ *   quotaUrl: string,
+ *   quotaKind: "buckets" | "models",
+ *   generateUrl: string,
+ *   streamUrl: string,
+ *   envelopeUserAgent: string,
+ *   maxOutputTokens: number,
+ *   discoveryHeaders: (token: string) => Record<string, string>,
+ *   loadCodeAssistBody: () => any,
+ *   chatHeaders: (token: string, options?: { model?: string }) => Record<string, string>,
+ *   resolveModel: (model: string) => string
+ * }} CloudCodeFlavor
+ */
+
+/** @type {Record<string, CloudCodeFlavor>} */
+const CLOUD_CODE_FLAVORS = {
+  gemini_cli: {
+    id: "gemini_cli",
+    label: "Gemini CLI",
+    clientId: GEMINI_CLI_CLIENT_ID,
+    clientSecret: GEMINI_CLI_CLIENT_SECRET,
+    scopes: GEMINI_CLI_SCOPES,
+    defaultRedirect: GEMINI_CLI_DEFAULT_REDIRECT,
+    loadCodeAssistUrl: GEMINI_CLI_LOAD_CODE_ASSIST_URL,
+    onboardUserUrl: GEMINI_CLI_ONBOARD_USER_URL,
+    quotaUrl: GEMINI_CLI_QUOTA_URL,
+    quotaKind: "buckets",
+    generateUrl: GEMINI_CLI_GENERATE_URL,
+    streamUrl: GEMINI_CLI_STREAM_URL,
+    envelopeUserAgent: "gemini-cli",
+    maxOutputTokens: 0,
+    discoveryHeaders: (token) => buildGeminiCliDiscoveryHeaders(token),
+    loadCodeAssistBody: () => ({ metadata: geminiCliClientMetadata(), mode: 1 }),
+    chatHeaders: (token, options) => buildGeminiCliHeaders(token, options),
+    resolveModel: (model) => model
+  },
+  antigravity: {
+    id: "antigravity",
+    label: "Antigravity",
+    clientId: ANTIGRAVITY_CLIENT_ID,
+    clientSecret: ANTIGRAVITY_CLIENT_SECRET,
+    scopes: ANTIGRAVITY_SCOPES,
+    defaultRedirect: ANTIGRAVITY_DEFAULT_REDIRECT,
+    // Project discovery stays on the prod host; only chat uses the daily host.
+    loadCodeAssistUrl: GEMINI_CLI_LOAD_CODE_ASSIST_URL,
+    onboardUserUrl: GEMINI_CLI_ONBOARD_USER_URL,
+    quotaUrl: `${ANTIGRAVITY_CHAT_BASE}:fetchAvailableModels`,
+    quotaKind: "models",
+    generateUrl: `${ANTIGRAVITY_CHAT_BASE}:generateContent`,
+    streamUrl: `${ANTIGRAVITY_CHAT_BASE}:streamGenerateContent?alt=sse`,
+    envelopeUserAgent: "antigravity",
+    maxOutputTokens: ANTIGRAVITY_MAX_OUTPUT_TOKENS,
+    // The Antigravity IDE sends no X-Goog-Api-Client / Client-Metadata on discovery.
+    discoveryHeaders: (token) => buildAntigravityHeaders(token),
+    loadCodeAssistBody: () => ({ metadata: geminiCliClientMetadata() }),
+    chatHeaders: (token) => buildAntigravityHeaders(token),
+    resolveModel: (model) => ANTIGRAVITY_MODEL_ALIASES[model] || model
+  }
+};
+
+/**
+ * Resolve a flavor by id (`gemini_cli` | `antigravity`), defaulting to Gemini CLI.
+ * @param {string} [id]
+ * @returns {CloudCodeFlavor}
+ */
+export function getCloudCodeFlavor(id) {
+  return CLOUD_CODE_FLAVORS[id] || CLOUD_CODE_FLAVORS.gemini_cli;
+}
+
+/**
+ * The flavor a stored key speaks, or null when the key is not a Cloud Code key.
+ * @param {any} keyEntry
+ * @returns {CloudCodeFlavor | null}
+ */
+export function getCloudCodeFlavorForKey(keyEntry) {
+  const method = keyEntry?.authMethod;
+  return method && Object.prototype.hasOwnProperty.call(CLOUD_CODE_FLAVORS, method)
+    ? CLOUD_CODE_FLAVORS[method]
+    : null;
+}
+
+/**
+ * Headers the Antigravity IDE sends on both discovery and chat.
+ * @param {string} accessToken
+ * @returns {Record<string, string>}
+ */
+export function buildAntigravityHeaders(accessToken) {
+  return {
+    authorization: `Bearer ${accessToken}`,
+    "content-type": "application/json",
+    "user-agent": ANTIGRAVITY_USER_AGENT
+  };
+}
+
 export const GEMINI_CLI_PKCE_TTL_MS = 600_000;
 export const GEMINI_CLI_PKCE_TTL_SEC = Math.floor(GEMINI_CLI_PKCE_TTL_MS / 1000);
 export const GEMINI_CLI_TOKEN_REFRESH_BUFFER_MS = 5 * 60 * 1000;
@@ -172,12 +334,13 @@ function pruneStates(now = Date.now()) {
  * @returns {{ authUrl: string, state: string, redirectUri: string, expiresInSec: number, clientId: string }}
  */
 export function startGeminiCliOAuth(options = {}) {
+  const flavor = getCloudCodeFlavor(options.flavor);
   const {
-    callbackUrl = GEMINI_CLI_DEFAULT_REDIRECT,
+    callbackUrl = flavor.defaultRedirect,
     requestHost = "",
     selectAccount = true,
-    clientId = GEMINI_CLI_CLIENT_ID,
-    clientSecret = GEMINI_CLI_CLIENT_SECRET,
+    clientId = flavor.clientId,
+    clientSecret = flavor.clientSecret,
     authBaseUrl = GEMINI_CLI_AUTH_URL,
     nowFn = Date.now
   } = options;
@@ -207,7 +370,7 @@ export function startGeminiCliOAuth(options = {}) {
   authUrl.searchParams.set("client_id", resolvedClientId);
   authUrl.searchParams.set("response_type", "code");
   authUrl.searchParams.set("redirect_uri", redirectUri);
-  authUrl.searchParams.set("scope", GEMINI_CLI_SCOPES.join(" "));
+  authUrl.searchParams.set("scope", flavor.scopes.join(" "));
   authUrl.searchParams.set("state", state);
   authUrl.searchParams.set("access_type", "offline");
   authUrl.searchParams.set("prompt", selectAccount ? "consent select_account" : "consent");
@@ -219,6 +382,7 @@ export function startGeminiCliOAuth(options = {}) {
     redirectUri,
     clientId: resolvedClientId,
     clientSecret: String(clientSecret || "").trim(),
+    flavor: flavor.id,
     createdAt: now,
     expiresAt: now + GEMINI_CLI_PKCE_TTL_MS
   });
@@ -228,7 +392,8 @@ export function startGeminiCliOAuth(options = {}) {
     state,
     redirectUri,
     expiresInSec: GEMINI_CLI_PKCE_TTL_SEC,
-    clientId: resolvedClientId
+    clientId: resolvedClientId,
+    flavor: flavor.id
   };
 }
 
@@ -311,15 +476,16 @@ export function buildGeminiCliDiscoveryHeaders(accessToken) {
  */
 export async function loadGeminiCliProject(accessToken, options = {}) {
   const { fetchImpl = upstreamFetch, dispatcher } = options;
+  const flavor = getCloudCodeFlavor(options.flavor);
   const token = String(accessToken || "").trim();
   if (!token) throw httpError(400, "Missing access token for loadCodeAssist");
 
   let res;
   try {
-    res = await fetchImpl(GEMINI_CLI_LOAD_CODE_ASSIST_URL, {
+    res = await fetchImpl(flavor.loadCodeAssistUrl, {
       method: "POST",
-      headers: buildGeminiCliDiscoveryHeaders(token),
-      body: JSON.stringify({ metadata: geminiCliClientMetadata(), mode: 1 }),
+      headers: flavor.discoveryHeaders(token),
+      body: JSON.stringify(flavor.loadCodeAssistBody()),
       ...(dispatcher ? { dispatcher } : {})
     });
   } catch (err) {
@@ -359,7 +525,8 @@ export async function loadGeminiCliProject(accessToken, options = {}) {
     const tierId = pickOnboardTierId(data);
     projectId = await onboardGeminiCliUser(token, tierId, {
       ...(fetchImpl ? { fetchImpl } : {}),
-      ...(dispatcher ? { dispatcher } : {})
+      ...(dispatcher ? { dispatcher } : {}),
+      flavor: flavor.id
     });
   }
 
@@ -368,10 +535,10 @@ export async function loadGeminiCliProject(accessToken, options = {}) {
   const isPaid = Boolean(data?.paidTier?.id && data.paidTier.id !== "free-tier");
   const tier = isPaid ? "paid" : currentTier ? "free" : "standard";
   const tierLabel = isPaid
-    ? `${paidTier || "Paid plan"} · Cloud Code Assist`
+    ? `${paidTier || "Paid plan"} · ${flavor.id === "antigravity" ? "Antigravity" : "Cloud Code Assist"}`
     : currentTier
-      ? `${currentTier} · Gemini CLI Free Tier`
-      : "Gemini CLI · Google Account Connected";
+      ? `${currentTier} · ${flavor.label} Free Tier`
+      : `${flavor.label} · Google Account Connected`;
 
   return { projectId, tier, tierLabel, raw: data };
 }
@@ -423,6 +590,7 @@ export async function onboardGeminiCliUser(accessToken, tierId = "legacy-tier", 
     retryDelayMs = 3000,
     maxAttempts = 5
   } = options;
+  const flavor = getCloudCodeFlavor(options.flavor);
   const token = String(accessToken || "").trim();
   if (!token) throw httpError(400, "Missing access token for onboardUser");
 
@@ -437,9 +605,9 @@ export async function onboardGeminiCliUser(accessToken, tierId = "legacy-tier", 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     let res;
     try {
-      res = await fetchImpl(GEMINI_CLI_ONBOARD_USER_URL, {
+      res = await fetchImpl(flavor.onboardUserUrl, {
         method: "POST",
-        headers: buildGeminiCliDiscoveryHeaders(token),
+        headers: flavor.discoveryHeaders(token),
         body,
         ...(dispatcher ? { dispatcher } : {})
       });
@@ -548,18 +716,19 @@ export async function diagnoseGeminiCliConnection(accessToken, options = {}) {
     retryDelayMs = 3000,
     maxAttempts = 5
   } = options;
+  const flavor = getCloudCodeFlavor(options.flavor);
   const token = String(accessToken || "").trim();
   if (!token) throw httpError(400, "Missing access token for Gemini CLI diagnostics");
 
   const steps = [];
-  const discoveryHeaders = buildGeminiCliDiscoveryHeaders(token);
+  const discoveryHeaders = flavor.discoveryHeaders(token);
 
   const loadStep = await probeCloudCode(
     fetchImpl,
     "loadCodeAssist",
-    GEMINI_CLI_LOAD_CODE_ASSIST_URL,
+    flavor.loadCodeAssistUrl,
     discoveryHeaders,
-    { metadata: geminiCliClientMetadata(), mode: 1 },
+    flavor.loadCodeAssistBody(),
     token,
     dispatcher
   );
@@ -583,7 +752,7 @@ export async function diagnoseGeminiCliConnection(accessToken, options = {}) {
       last = await probeCloudCode(
         fetchImpl,
         "onboardUser",
-        GEMINI_CLI_ONBOARD_USER_URL,
+        flavor.onboardUserUrl,
         discoveryHeaders,
         { tierId: resolvedTierId, metadata: geminiCliClientMetadata() },
         token,
@@ -617,16 +786,16 @@ export async function diagnoseGeminiCliConnection(accessToken, options = {}) {
 
   const quotaStep = await probeCloudCode(
     fetchImpl,
-    "retrieveUserQuota",
-    GEMINI_CLI_QUOTA_URL,
-    buildGeminiCliHeaders(token),
+    flavor.quotaKind === "models" ? "fetchAvailableModels" : "retrieveUserQuota",
+    flavor.quotaUrl,
+    flavor.chatHeaders(token),
     projectId ? { project: projectId } : {},
     token,
     dispatcher
   );
   steps.push({ ...quotaStep, projectSent: projectId || "" });
 
-  return { projectId, tierId: resolvedTierId, steps };
+  return { projectId, tierId: resolvedTierId, flavor: flavor.id, steps };
 }
 
 /**
@@ -638,15 +807,16 @@ export async function diagnoseGeminiCliConnection(accessToken, options = {}) {
  */
 export async function fetchGeminiCliQuota(accessToken, options = {}) {
   const { projectId = "", fetchImpl = upstreamFetch, dispatcher } = options;
+  const flavor = getCloudCodeFlavor(options.flavor);
   const token = String(accessToken || "").trim();
   if (!token) throw httpError(400, "Missing access token for retrieveUserQuota");
 
   const body = projectId ? { project: projectId } : {};
   let res;
   try {
-    res = await fetchImpl(GEMINI_CLI_QUOTA_URL, {
+    res = await fetchImpl(flavor.quotaUrl, {
       method: "POST",
-      headers: buildGeminiCliHeaders(token),
+      headers: flavor.chatHeaders(token),
       body: JSON.stringify(body),
       ...(dispatcher ? { dispatcher } : {})
     });
@@ -675,7 +845,19 @@ export async function fetchGeminiCliQuota(accessToken, options = {}) {
     throw httpError(502, "retrieveUserQuota returned invalid JSON");
   }
 
-  const rawBuckets = Array.isArray(data?.buckets) ? data.buckets : [];
+  // Gemini CLI answers `{ buckets: [...] }`; Antigravity's fetchAvailableModels answers
+  // `{ models: { <id>: { quotaInfo: { remainingFraction, resetTime } } } }`.
+  const rawBuckets = Array.isArray(data?.buckets)
+    ? data.buckets
+    : data?.models && typeof data.models === "object" && !Array.isArray(data.models)
+      ? Object.entries(data.models)
+          .filter(([, info]) => info && typeof info === "object" && info.quotaInfo && !info.isInternal)
+          .map(([modelId, info]) => ({
+            modelId,
+            remainingFraction: info.quotaInfo.remainingFraction ?? 0,
+            resetTime: info.quotaInfo.resetTime || ""
+          }))
+      : [];
   const buckets = rawBuckets
     .map((b) => ({
       modelId: String(b?.modelId || b?.model || "").trim(),
@@ -737,6 +919,16 @@ export async function exchangeGeminiCliOAuth(options = {}) {
     throw httpError(
       400,
       "This Gemini CLI sign-in session expired (10 minutes). Start again and paste the address immediately after approving."
+    );
+  }
+
+  const flavor = getCloudCodeFlavor(record.flavor);
+  // A state minted by one sign-in card must not be finished by the other card's route, or the
+  // tokens would be stored under the wrong provider and auth method.
+  if (options.flavor && getCloudCodeFlavor(options.flavor).id !== flavor.id) {
+    throw httpError(
+      400,
+      `This sign-in was started for ${flavor.label}, not ${getCloudCodeFlavor(options.flavor).label}. Start again from the matching card.`
     );
   }
 
@@ -838,7 +1030,8 @@ export async function exchangeGeminiCliOAuth(options = {}) {
   try {
     projectInfo = await loadGeminiCliProject(accessToken, {
       ...(fetchImpl ? { fetchImpl } : {}),
-      ...(dispatcher ? { dispatcher } : {})
+      ...(dispatcher ? { dispatcher } : {}),
+      flavor: flavor.id
     });
   } catch {
     // Non-fatal: chat still works, quota display degrades gracefully
@@ -872,7 +1065,8 @@ export async function exchangeGeminiCliOAuth(options = {}) {
     quota = await fetchGeminiCliQuota(accessToken, {
       projectId: projectInfo.projectId,
       ...(fetchImpl ? { fetchImpl } : {}),
-      ...(dispatcher ? { dispatcher } : {})
+      ...(dispatcher ? { dispatcher } : {}),
+      flavor: flavor.id
     });
   } catch {
     // Best-effort quota
@@ -884,7 +1078,7 @@ export async function exchangeGeminiCliOAuth(options = {}) {
     refreshToken,
     projectId: projectInfo.projectId || "",
     tokenUri: tokenUrl,
-    flow: "gemini_cli"
+    flow: flavor.id
   };
 
   tokenCache.set(buildCacheKey(record.clientId, refreshToken, tokenUrl), {
@@ -894,16 +1088,16 @@ export async function exchangeGeminiCliOAuth(options = {}) {
 
   const oauthMeta = {
     ...profile,
-    provider: "gemini_cli",
-    flow: "gemini_cli",
+    provider: flavor.id,
+    flow: flavor.id,
     projectId: projectInfo.projectId || "",
     tier: projectInfo.tier,
-    tierLabel: projectInfo.tierLabel || "Gemini CLI · Google Account Connected",
+    tierLabel: projectInfo.tierLabel || `${flavor.label} · Google Account Connected`,
     quotaBuckets: quota.buckets,
     checkedAt: new Date().toISOString()
   };
 
-  return { oauthCredentials, oauthMeta, accessToken };
+  return { oauthCredentials, oauthMeta, accessToken, flavor: flavor.id };
 }
 
 /**

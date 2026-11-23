@@ -82,8 +82,9 @@ import {
   startGenericOAuthPkce
 } from "../oauthFlows.js";
 import {
-  GEMINI_CLI_DEFAULT_REDIRECT,
   diagnoseGeminiCliConnection,
+  getCloudCodeFlavor,
+  getCloudCodeFlavorForKey,
   exchangeGeminiCliOAuth,
   fetchGeminiCliQuota,
   getGeminiCliAccessToken,
@@ -684,11 +685,13 @@ async function runProviderConnectionTest(
     // Gemini CLI / Cloud Code Assist keys cannot be probed through `{baseUrl}/models` or
     // `{baseUrl}/chat/completions` — the upstream only speaks `v1internal:*` RPCs. Probe
     // `loadCodeAssist` instead, which returns the project + plan tier in one shot.
-    if (keyEntry.authMethod === "gemini_cli" && resolvedSecret) {
+    const probeFlavor = getCloudCodeFlavorForKey(keyEntry);
+    if (probeFlavor && resolvedSecret) {
       let probe;
       try {
         probe = await loadGeminiCliProject(resolvedSecret, {
-          ...(dispatcher ? { dispatcher } : {})
+          ...(dispatcher ? { dispatcher } : {}),
+          flavor: probeFlavor.id
         });
       } catch (err) {
         clearTimeout(timer);
@@ -705,7 +708,7 @@ async function runProviderConnectionTest(
         ok: true,
         status: 200,
         latencyMs: Date.now() - started,
-        message: `Connected via Cloud Code Assist (${probe.tierLabel}${
+        message: `Connected via ${probeFlavor.label} (${probe.tierLabel}${
           probe.projectId ? `, project ${probe.projectId}` : ""
         })`,
         modelsCount: Array.isArray(provider.models) ? provider.models.length : 0,
@@ -1930,273 +1933,300 @@ export function createDashboardRouter(storage, liveEvents = null) {
     });
   });
 
-  // --- Gemini CLI (Cloud Code Assist) OAuth — the 9router-style flow, web-safe ---
-  router.get("/providers/oauth/gemini-cli/status", (_req, res) => {
-    return res.json({ ok: true, defaultRedirect: GEMINI_CLI_DEFAULT_REDIRECT });
-  });
+  // --- Cloud Code Assist OAuth (Gemini CLI + Antigravity) — the 9router-style flow, web-safe ---
+  /**
+   * Register status/start/exchange/diagnose routes for one Cloud Code flavor.
+   * @param {{ routeSlug: string, flavor: "gemini_cli" | "antigravity", preset: string, label: string }} cfg
+   */
+  function registerCloudCodeOAuthRoutes(cfg) {
+    const flavor = getCloudCodeFlavor(cfg.flavor);
+    const base = `/providers/oauth/${cfg.routeSlug}`;
+    const findProvider = () =>
+      storage.getProviders().find((p) => p.preset === cfg.preset || p.slug === cfg.preset) || null;
 
-  router.post("/providers/oauth/gemini-cli/start", async (req, res) => {
-    const body = req.body || {};
-    try {
-      const started = startGeminiCliOAuth({
-        callbackUrl: body.callbackUrl || GEMINI_CLI_DEFAULT_REDIRECT,
-        selectAccount: body.selectAccount !== false,
-        ...(typeof body.clientId === "string" && body.clientId.trim()
-          ? { clientId: body.clientId.trim() }
-          : {}),
-        ...(typeof body.clientSecret === "string" && body.clientSecret.trim()
-          ? { clientSecret: body.clientSecret.trim() }
-          : {}),
-        requestHost: typeof req.headers?.host === "string" ? req.headers.host : ""
-      });
+    router.get(`${base}/status`, (_req, res) => {
+      return res.json({ ok: true, defaultRedirect: flavor.defaultRedirect, flavor: flavor.id });
+    });
 
-      // Persist the PKCE record so a different serverless instance can finish the exchange.
+    router.post(`${base}/start`, async (req, res) => {
+      const body = req.body || {};
       try {
-        const rec = peekGeminiCliState(started.state);
-        if (rec) {
-          const enc = storage.encryptSecret(JSON.stringify(rec));
-          const nowMs = Date.now();
-          await storage.update((data) => {
-            const list = Array.isArray(data.pendingGeminiCliPkce) ? data.pendingGeminiCliPkce : [];
-            const pruned = list.filter(
-              (item) => item && item.expiresAt > nowMs && item.state !== started.state
-            );
-            pruned.push({ state: started.state, enc, expiresAt: rec.expiresAt });
-            data.pendingGeminiCliPkce = pruned.slice(-30);
-          });
-        }
-      } catch {
-        // Best-effort persistence; single-instance local dev works without it.
-      }
+        const started = startGeminiCliOAuth({
+          flavor: flavor.id,
+          callbackUrl: body.callbackUrl || flavor.defaultRedirect,
+          selectAccount: body.selectAccount !== false,
+          ...(typeof body.clientId === "string" && body.clientId.trim()
+            ? { clientId: body.clientId.trim() }
+            : {}),
+          ...(typeof body.clientSecret === "string" && body.clientSecret.trim()
+            ? { clientSecret: body.clientSecret.trim() }
+            : {}),
+          requestHost: typeof req.headers?.host === "string" ? req.headers.host : ""
+        });
 
-      return res.json({ ok: true, ...started });
-    } catch (err) {
-      return res.status(Number(err?.status) || 400).json({
-        error: sanitizeSecrets(err?.message || "Failed to start Gemini CLI OAuth")
-      });
-    }
-  });
-
-  router.post("/providers/oauth/gemini-cli/exchange", async (req, res) => {
-    const body = req.body || {};
-    const existingGemini =
-      storage.getProviders().find((p) => p.preset === "gemini" || p.slug === "gemini") || null;
-    const dispatcher = existingGemini ? getProxyDispatcher(existingGemini, storage) : undefined;
-
-    let extracted;
-    try {
-      extracted = extractCodeAndState(body);
-    } catch (err) {
-      return res.status(Number(err?.status) || 400).json({
-        error: sanitizeSecrets(err?.message || "Invalid Gemini CLI callback URL")
-      });
-    }
-
-    // Restore a PKCE record persisted by another instance, then consume it (replay guard).
-    if (extracted.state) {
-      const targetState = extracted.state;
-      const inMemory = Boolean(peekGeminiCliState(targetState));
-      let restoredEnc = "";
-      const hasPersisted =
-        Array.isArray(storage.data?.pendingGeminiCliPkce) &&
-        storage.data.pendingGeminiCliPkce.some((item) => item && item.state === targetState);
-      if (hasPersisted) {
-        await storage.update((data) => {
-          const list = Array.isArray(data.pendingGeminiCliPkce) ? data.pendingGeminiCliPkce : [];
-          const idx = list.findIndex((item) => item && item.state === targetState);
-          if (idx >= 0) {
-            restoredEnc = list[idx].enc || "";
-            list.splice(idx, 1);
-            data.pendingGeminiCliPkce = list;
+        // Persist the PKCE record so a different serverless instance can finish the exchange.
+        try {
+          const rec = peekGeminiCliState(started.state);
+          if (rec) {
+            const enc = storage.encryptSecret(JSON.stringify(rec));
+            const nowMs = Date.now();
+            await storage.update((data) => {
+              const list = Array.isArray(data.pendingGeminiCliPkce) ? data.pendingGeminiCliPkce : [];
+              const pruned = list.filter(
+                (item) => item && item.expiresAt > nowMs && item.state !== started.state
+              );
+              pruned.push({ state: started.state, enc, expiresAt: rec.expiresAt });
+              data.pendingGeminiCliPkce = pruned.slice(-30);
+            });
           }
+        } catch {
+          // Best-effort persistence; single-instance local dev works without it.
+        }
+
+        return res.json({ ok: true, ...started });
+      } catch (err) {
+        return res.status(Number(err?.status) || 400).json({
+          error: sanitizeSecrets(err?.message || `Failed to start ${cfg.label} OAuth`)
         });
       }
-      if (!inMemory && restoredEnc) {
-        try {
-          restoreGeminiCliState(targetState, JSON.parse(storage.decryptSecret(restoredEnc)));
-        } catch {
-          // Ignore malformed encrypted state
-        }
-      }
-    }
-
-    let exchanged;
-    try {
-      exchanged = await exchangeGeminiCliOAuth({
-        code: extracted.code,
-        state: extracted.state,
-        pastedUrl: body.pastedUrl,
-        callbackUrl: body.callbackUrl,
-        ...(dispatcher ? { dispatcher } : {})
-      });
-    } catch (err) {
-      return res.status(Number(err?.status) || 400).json({
-        error: sanitizeSecrets(err?.message || "Gemini CLI OAuth exchange failed")
-      });
-    }
-
-    const now = new Date().toISOString();
-    const oauthMeta = { ...exchanged.oauthMeta };
-    const oauthCredentialsStr = JSON.stringify(exchanged.oauthCredentials);
-    const label =
-      (typeof body.label === "string" && body.label.trim()) ||
-      oauthMeta.email ||
-      "Gemini CLI";
-
-    let savedKeyId = "";
-    const savedProvider = await storage.update((data) => {
-      const target = data.providers.find((p) => p.preset === "gemini" || p.slug === "gemini");
-      if (target) {
-        if (!Array.isArray(target.apiKeys)) target.apiKeys = [];
-        const existingKey = target.apiKeys.find(
-          (k) =>
-            k.authMethod === "gemini_cli" &&
-            oauthMeta.email &&
-            k.oauthMeta?.email === oauthMeta.email
-        );
-        if (existingKey) {
-          existingKey.label = label;
-          existingKey.key = "";
-          existingKey.authMethod = "gemini_cli";
-          existingKey.oauthCredentials = oauthCredentialsStr;
-          existingKey.oauthMeta = oauthMeta;
-          existingKey.enabled = true;
-          existingKey.cooldownUntil = null;
-          delete existingKey.lastError;
-          savedKeyId = existingKey.id;
-        } else {
-          const newKey = {
-            id: nanoid(),
-            label,
-            key: "",
-            authMethod: "gemini_cli",
-            oauthCredentials: oauthCredentialsStr,
-            oauthMeta,
-            enabled: true,
-            cooldownUntil: null
-          };
-          target.apiKeys.push(newKey);
-          savedKeyId = newKey.id;
-        }
-        target.updatedAt = now;
-        return target;
-      }
-
-      const geminiPreset = getPreset("gemini");
-      let slug = "gemini";
-      let suffix = 2;
-      while (data.providers.some((p) => p.slug === slug)) slug = `gemini-${suffix++}`;
-
-      const newKey = {
-        id: nanoid(),
-        label,
-        key: "",
-        authMethod: "gemini_cli",
-        oauthCredentials: oauthCredentialsStr,
-        oauthMeta,
-        enabled: true,
-        cooldownUntil: null
-      };
-      savedKeyId = newKey.id;
-
-      const created = {
-        id: nanoid(),
-        slug,
-        preset: "gemini",
-        name: geminiPreset?.name || "Google Gemini",
-        baseUrl: normalizeBaseUrl(
-          geminiPreset?.baseUrl || "https://generativelanguage.googleapis.com/v1beta/openai"
-        ),
-        formatType: geminiPreset?.formatType || "gemini-openai",
-        apiKeys: [newKey],
-        models: [...(geminiPreset?.models || geminiPreset?.defaultModels || [])],
-        proxyPoolId: null,
-        enabled: true,
-        createdAt: now,
-        updatedAt: now
-      };
-      data.providers.push(created);
-      return created;
     });
 
-    return res.json({
-      ok: true,
-      keyId: savedKeyId,
-      oauthMeta,
-      provider: toPublicProvider(savedProvider)
-    });
-  });
+    router.post(`${base}/exchange`, async (req, res) => {
+      const body = req.body || {};
+      const existing = findProvider();
+      const dispatcher = existing ? getProxyDispatcher(existing, storage) : undefined;
+      const googleOpts = extractGoogleOAuthOptions(req);
 
-  // --- Gemini CLI diagnostics: shows exactly what Google answers during project discovery ---
-  router.post("/providers/oauth/gemini-cli/diagnose", async (req, res) => {
-    const body = req.body || {};
-    const provider = storage.getProviders().find((p) => p.preset === "gemini" || p.slug === "gemini");
-    const keyEntry = (provider?.apiKeys || []).find(
-      (k) => k.enabled !== false && k.authMethod === "gemini_cli" && k.oauthCredentials
-    );
-    if (!keyEntry) {
-      return res.status(404).json({
-        error: "No Gemini CLI connection found. Sign in with 'Đăng nhập Gemini CLI' first."
+      let extracted;
+      try {
+        extracted = extractCodeAndState(body);
+      } catch (err) {
+        return res.status(Number(err?.status) || 400).json({
+          error: sanitizeSecrets(err?.message || `Invalid ${cfg.label} callback URL`)
+        });
+      }
+
+      // Restore a PKCE record persisted by another instance, then consume it (replay guard).
+      if (extracted.state) {
+        const targetState = extracted.state;
+        const inMemory = Boolean(peekGeminiCliState(targetState));
+        let restoredEnc = "";
+        const hasPersisted =
+          Array.isArray(storage.data?.pendingGeminiCliPkce) &&
+          storage.data.pendingGeminiCliPkce.some((item) => item && item.state === targetState);
+        if (hasPersisted) {
+          await storage.update((data) => {
+            const list = Array.isArray(data.pendingGeminiCliPkce) ? data.pendingGeminiCliPkce : [];
+            const idx = list.findIndex((item) => item && item.state === targetState);
+            if (idx >= 0) {
+              restoredEnc = list[idx].enc || "";
+              list.splice(idx, 1);
+              data.pendingGeminiCliPkce = list;
+            }
+          });
+        }
+        if (!inMemory && restoredEnc) {
+          try {
+            restoreGeminiCliState(targetState, JSON.parse(storage.decryptSecret(restoredEnc)));
+          } catch {
+            // Ignore malformed encrypted state
+          }
+        }
+      }
+
+      let exchanged;
+      try {
+        exchanged = await exchangeGeminiCliOAuth({
+          flavor: flavor.id,
+          code: extracted.code,
+          state: extracted.state,
+          pastedUrl: body.pastedUrl,
+          callbackUrl: body.callbackUrl,
+          ...(googleOpts.fetchImpl ? { fetchImpl: googleOpts.fetchImpl } : {}),
+          ...(googleOpts.tokenUrl ? { tokenUrl: googleOpts.tokenUrl } : {}),
+          ...(dispatcher ? { dispatcher } : {})
+        });
+      } catch (err) {
+        return res.status(Number(err?.status) || 400).json({
+          error: sanitizeSecrets(err?.message || `${cfg.label} OAuth exchange failed`)
+        });
+      }
+
+      const now = new Date().toISOString();
+      const oauthMeta = { ...exchanged.oauthMeta };
+      const oauthCredentialsStr = JSON.stringify(exchanged.oauthCredentials);
+      const label =
+        (typeof body.label === "string" && body.label.trim()) || oauthMeta.email || cfg.label;
+
+      let savedKeyId = "";
+      const savedProvider = await storage.update((data) => {
+        const target = data.providers.find((p) => p.preset === cfg.preset || p.slug === cfg.preset);
+        if (target) {
+          if (!Array.isArray(target.apiKeys)) target.apiKeys = [];
+          const existingKey = target.apiKeys.find(
+            (k) =>
+              k.authMethod === flavor.id &&
+              oauthMeta.email &&
+              k.oauthMeta?.email === oauthMeta.email
+          );
+          if (existingKey) {
+            existingKey.label = label;
+            existingKey.key = "";
+            existingKey.authMethod = flavor.id;
+            existingKey.oauthCredentials = oauthCredentialsStr;
+            existingKey.oauthMeta = oauthMeta;
+            existingKey.enabled = true;
+            existingKey.cooldownUntil = null;
+            delete existingKey.lastError;
+            savedKeyId = existingKey.id;
+          } else {
+            const newKey = {
+              id: nanoid(),
+              label,
+              key: "",
+              authMethod: flavor.id,
+              oauthCredentials: oauthCredentialsStr,
+              oauthMeta,
+              enabled: true,
+              cooldownUntil: null
+            };
+            target.apiKeys.push(newKey);
+            savedKeyId = newKey.id;
+          }
+          target.updatedAt = now;
+          return target;
+        }
+
+        const presetDef = getPreset(cfg.preset);
+        let slug = cfg.preset;
+        let suffix = 2;
+        while (data.providers.some((p) => p.slug === slug)) slug = `${cfg.preset}-${suffix++}`;
+
+        const newKey = {
+          id: nanoid(),
+          label,
+          key: "",
+          authMethod: flavor.id,
+          oauthCredentials: oauthCredentialsStr,
+          oauthMeta,
+          enabled: true,
+          cooldownUntil: null
+        };
+        savedKeyId = newKey.id;
+
+        const created = {
+          id: nanoid(),
+          slug,
+          preset: cfg.preset,
+          name: presetDef?.name || cfg.label,
+          baseUrl: normalizeBaseUrl(presetDef?.baseUrl || flavor.generateUrl),
+          formatType: presetDef?.formatType || "gemini-openai",
+          apiKeys: [newKey],
+          models: [...(presetDef?.models || presetDef?.defaultModels || [])],
+          proxyPoolId: null,
+          enabled: true,
+          createdAt: now,
+          updatedAt: now
+        };
+        data.providers.push(created);
+        return created;
       });
-    }
 
-    const dispatcher = getProxyDispatcher(provider, storage);
-    const googleOpts = extractGoogleOAuthOptions(req);
-    const fetchOpts = googleOpts.fetchImpl ? { fetchImpl: googleOpts.fetchImpl } : {};
-    const steps = [];
-    let accessToken = "";
-
-    try {
-      const tokenRes = await getGeminiCliAccessToken(keyEntry.oauthCredentials, {
-        ...fetchOpts,
-        ...(googleOpts.tokenUrl ? { tokenUrlOverride: googleOpts.tokenUrl } : {}),
-        ...(dispatcher ? { dispatcher } : {}),
-        forceRefresh: body.forceRefresh === true
-      });
-      accessToken = tokenRes.accessToken;
-      steps.push({
-        step: "refreshToken",
+      return res.json({
         ok: true,
-        projectIdInCreds: tokenRes.projectId || ""
+        keyId: savedKeyId,
+        oauthMeta,
+        flavor: flavor.id,
+        provider: toPublicProvider(savedProvider)
       });
-    } catch (err) {
-      const message = sanitizeSecrets(err?.message || "Token refresh failed");
-      return res.status(400).json({
-        error: message,
-        steps: [{ step: "refreshToken", ok: false, error: message }]
-      });
-    }
-
-    // loadCodeAssist -> onboardUser -> retrieveUserQuota, replaying the real sign-in flow and
-    // returning Google's raw answers (see diagnoseGeminiCliConnection for the fidelity rules).
-    const requestedTier =
-      typeof body.tierId === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(body.tierId.trim())
-        ? body.tierId.trim()
-        : "";
-    let diagnosis;
-    try {
-      diagnosis = await diagnoseGeminiCliConnection(accessToken, {
-        ...fetchOpts,
-        ...(dispatcher ? { dispatcher } : {}),
-        tierId: requestedTier,
-        forceOnboard: body.forceOnboard === true
-      });
-    } catch (err) {
-      return res.status(Number(err?.status) || 502).json({
-        error: sanitizeSecrets(err?.message || "Gemini CLI diagnostics failed"),
-        steps
-      });
-    }
-
-    return res.json({
-      ok: true,
-      email: keyEntry.oauthMeta?.email || "",
-      savedProjectId: keyEntry.oauthMeta?.projectId || "",
-      savedTier: keyEntry.oauthMeta?.tier || "",
-      discoveredProjectId: diagnosis.projectId,
-      onboardTierId: diagnosis.tierId,
-      steps: [...steps, ...diagnosis.steps]
     });
+
+    // Diagnostics: shows exactly what Google answers during project discovery.
+    router.post(`${base}/diagnose`, async (req, res) => {
+      const body = req.body || {};
+      const provider = findProvider();
+      const keyEntry = (provider?.apiKeys || []).find(
+        (k) => k.enabled !== false && k.authMethod === flavor.id && k.oauthCredentials
+      );
+      if (!keyEntry) {
+        return res.status(404).json({
+          error: `No ${cfg.label} connection found. Sign in with 'Đăng nhập ${cfg.label}' first.`
+        });
+      }
+
+      const dispatcher = getProxyDispatcher(provider, storage);
+      const googleOpts = extractGoogleOAuthOptions(req);
+      const fetchOpts = googleOpts.fetchImpl ? { fetchImpl: googleOpts.fetchImpl } : {};
+      const steps = [];
+      let accessToken = "";
+
+      try {
+        const tokenRes = await getGeminiCliAccessToken(keyEntry.oauthCredentials, {
+          ...fetchOpts,
+          ...(googleOpts.tokenUrl ? { tokenUrlOverride: googleOpts.tokenUrl } : {}),
+          ...(dispatcher ? { dispatcher } : {}),
+          forceRefresh: body.forceRefresh === true
+        });
+        accessToken = tokenRes.accessToken;
+        steps.push({
+          step: "refreshToken",
+          ok: true,
+          projectIdInCreds: tokenRes.projectId || ""
+        });
+      } catch (err) {
+        const message = sanitizeSecrets(err?.message || "Token refresh failed");
+        return res.status(400).json({
+          error: message,
+          steps: [{ step: "refreshToken", ok: false, error: message }]
+        });
+      }
+
+      // loadCodeAssist -> onboardUser -> quota, replaying the real sign-in flow and returning
+      // Google's raw answers (see diagnoseGeminiCliConnection for the fidelity rules).
+      const requestedTier =
+        typeof body.tierId === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(body.tierId.trim())
+          ? body.tierId.trim()
+          : "";
+      let diagnosis;
+      try {
+        diagnosis = await diagnoseGeminiCliConnection(accessToken, {
+          ...fetchOpts,
+          ...(dispatcher ? { dispatcher } : {}),
+          flavor: flavor.id,
+          tierId: requestedTier,
+          forceOnboard: body.forceOnboard === true
+        });
+      } catch (err) {
+        return res.status(Number(err?.status) || 502).json({
+          error: sanitizeSecrets(err?.message || `${cfg.label} diagnostics failed`),
+          steps
+        });
+      }
+
+      return res.json({
+        ok: true,
+        flavor: flavor.id,
+        email: keyEntry.oauthMeta?.email || "",
+        savedProjectId: keyEntry.oauthMeta?.projectId || "",
+        savedTier: keyEntry.oauthMeta?.tier || "",
+        discoveredProjectId: diagnosis.projectId,
+        onboardTierId: diagnosis.tierId,
+        steps: [...steps, ...diagnosis.steps]
+      });
+    });
+  }
+
+  registerCloudCodeOAuthRoutes({
+    routeSlug: "gemini-cli",
+    flavor: "gemini_cli",
+    preset: "gemini",
+    label: "Gemini CLI"
+  });
+  registerCloudCodeOAuthRoutes({
+    routeSlug: "antigravity",
+    flavor: "antigravity",
+    preset: "antigravity",
+    label: "Antigravity"
   });
 
   async function refreshGoogleOAuthConnection(provider, keyEntry, req) {
@@ -4460,9 +4490,10 @@ export function createDashboardRouter(storage, liveEvents = null) {
       // page shows the real tier and remaining buckets instead of only a self-set budget.
       let cloudCodeQuota = null;
       const cliKey = (provider.apiKeys || []).find(
-        (k) => k.enabled !== false && k.authMethod === "gemini_cli" && k.oauthCredentials
+        (k) => k.enabled !== false && getCloudCodeFlavorForKey(k) && k.oauthCredentials
       );
       if (cliKey) {
+        const cliFlavor = getCloudCodeFlavorForKey(cliKey);
         try {
           const dispatcher = getProxyDispatcher(provider, storage);
           const { accessToken } = await getGeminiCliAccessToken(cliKey.oauthCredentials, {
@@ -4471,18 +4502,20 @@ export function createDashboardRouter(storage, liveEvents = null) {
           const metaProject = cliKey.oauthMeta?.projectId || "";
           const [plan, quota] = await Promise.all([
             loadGeminiCliProject(accessToken, {
-              ...(dispatcher ? { dispatcher } : {})
+              ...(dispatcher ? { dispatcher } : {}),
+              flavor: cliFlavor.id
             }).catch(() => null),
             fetchGeminiCliQuota(accessToken, {
               projectId: metaProject,
-              ...(dispatcher ? { dispatcher } : {})
+              ...(dispatcher ? { dispatcher } : {}),
+              flavor: cliFlavor.id
             }).catch(() => null)
           ]);
           if (plan || quota) {
             cloudCodeQuota = {
               tier: plan?.tier || cliKey.oauthMeta?.tier || "",
               tierLabel:
-                plan?.tierLabel || cliKey.oauthMeta?.tierLabel || "Gemini CLI · Connected",
+                plan?.tierLabel || cliKey.oauthMeta?.tierLabel || `${cliFlavor.label} · Connected`,
               projectId: plan?.projectId || metaProject,
               email: cliKey.oauthMeta?.email || "",
               buckets: Array.isArray(quota?.buckets) ? quota.buckets : []

@@ -425,8 +425,12 @@ export async function resolveAuthContextForKey(keyEntry, options = {}) {
       extraHeaders: projectId ? { "x-goog-user-project": projectId } : {}
     };
   }
-  // Gemini CLI / Cloud Code Assist credentials — Bearer only, project rides in the body envelope.
-  if (keyEntry.authMethod === "gemini_cli" && keyEntry.oauthCredentials) {
+  // Gemini CLI / Antigravity (Cloud Code Assist) credentials — Bearer only, project rides in the
+  // body envelope. Both refresh the same way; the client id/secret live in the stored credentials.
+  if (
+    (keyEntry.authMethod === "gemini_cli" || keyEntry.authMethod === "antigravity") &&
+    keyEntry.oauthCredentials
+  ) {
     const { accessToken } = await getGeminiCliAccessToken(keyEntry.oauthCredentials, {
       fetchImpl: options.googleOAuthFetchImpl || options.fetchImpl,
       tokenUrlOverride: options.googleOAuthTokenUrl || options.tokenUrlOverride,

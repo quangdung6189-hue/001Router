@@ -1,11 +1,6 @@
 import { nanoid } from "nanoid";
 import { PRESETS, buildUpstreamUrl, getPreset, isKeyOptionalProvider } from "./presets.js";
-import {
-  GEMINI_CLI_GENERATE_URL,
-  GEMINI_CLI_STREAM_URL,
-  buildGeminiCliHeaders,
-  loadGeminiCliProject
-} from "./geminiCliOAuth.js";
+import { getCloudCodeFlavorForKey, loadGeminiCliProject } from "./geminiCliOAuth.js";
 import { buildCloudCodeRequest } from "./geminiCliTranslator.js";
 import {
   cloudCodeChunkToOpenAI,
@@ -1220,10 +1215,13 @@ export class RouterService {
               this.liveEvents?.markRequestStart(provider.slug);
               markedActive = true;
 
-              // Gemini CLI / Cloud Code Assist keys speak a different wire format: the payload is
-              // wrapped in a Cloud Code envelope and the endpoint is `v1internal:generateContent`.
-              const isGeminiCliKey =
-                keyEntry?.authMethod === "gemini_cli" && !isEmbeddings;
+              // Gemini CLI / Antigravity (Cloud Code Assist) keys speak a different wire format:
+              // the payload is wrapped in a Cloud Code envelope and the endpoint is
+              // `v1internal:generateContent`. The flavor picks host, headers and envelope dialect.
+              const cloudCodeFlavor = isEmbeddings ? null : getCloudCodeFlavorForKey(keyEntry);
+              const isGeminiCliKey = Boolean(cloudCodeFlavor);
+              const cloudCodeFetch =
+                (isGeminiCliKey && this.options?.appLocals?.cloudCodeFetchImpl) || null;
               let effectiveUrl = upstreamUrl;
               let effectiveBody = JSON.stringify(upstreamPayload);
               let effectiveHeaders = headers;
@@ -1239,7 +1237,9 @@ export class RouterService {
                 if (!cloudProject) {
                   try {
                     const plan = await loadGeminiCliProject(resolvedSecret, {
-                      ...(dispatcher ? { dispatcher } : {})
+                      ...(dispatcher ? { dispatcher } : {}),
+                      ...(cloudCodeFetch ? { fetchImpl: cloudCodeFetch } : {}),
+                      flavor: cloudCodeFlavor.id
                     });
                     cloudProject = plan.projectId || "";
                     if (cloudProject && keyEntry?.id) {
@@ -1264,7 +1264,9 @@ export class RouterService {
                 // cannot tell it apart from a broken key.
                 if (!cloudProject) {
                   const msg =
-                    "Gemini CLI account has no Cloud Code Assist project yet. Google did not provision one (onboardUser returned no project). Open Providers -> Google Gemini, sign in again with 'Đăng nhập Gemini CLI', then retry. If it still fails, this Google account is not eligible for Cloud Code Assist.";
+                    cloudCodeFlavor.id === "antigravity"
+                      ? "Antigravity account has no Cloud Code project yet. Google did not provision one (onboardUser returned no project). Sign in again with 'Đăng nhập Antigravity' and run the diagnostics on that card; if it still fails, this Google account is not eligible for Antigravity."
+                      : "Gemini CLI account has no Cloud Code Assist project yet. Google did not provision one (onboardUser returned no project). Open Providers -> Google Gemini, sign in again with 'Đăng nhập Gemini CLI', then retry. If it still fails, this Google account is not eligible for Cloud Code Assist.";
                   clearTimeout(timer);
                   this.liveEvents?.markRequestEnd(provider.slug, {
                     model: `${provider.slug}/${target.upstreamModel}`,
@@ -1287,19 +1289,21 @@ export class RouterService {
                   break;
                 }
 
-                effectiveUrl = isStream ? GEMINI_CLI_STREAM_URL : GEMINI_CLI_GENERATE_URL;
+                effectiveUrl = isStream ? cloudCodeFlavor.streamUrl : cloudCodeFlavor.generateUrl;
                 effectiveBody = JSON.stringify(
-                  buildCloudCodeRequest(target.upstreamModel, savedBody, cloudProject)
+                  buildCloudCodeRequest(target.upstreamModel, savedBody, cloudProject, {
+                    flavor: cloudCodeFlavor
+                  })
                 );
                 effectiveHeaders = {
-                  ...buildGeminiCliHeaders(resolvedSecret, {
+                  ...cloudCodeFlavor.chatHeaders(resolvedSecret, {
                     model: target.upstreamModel
                   }),
                   accept: isStream ? "text/event-stream" : "application/json"
                 };
               }
 
-              let upstreamRes = await upstreamFetch(effectiveUrl, {
+              let upstreamRes = await (cloudCodeFetch || upstreamFetch)(effectiveUrl, {
                 method: "POST",
                 headers: effectiveHeaders,
                 body: effectiveBody,
