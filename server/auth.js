@@ -190,6 +190,9 @@ export function isDashboardAuthenticated(req, secretOrStorage, expectedVersion) 
  */
 export function isDashboardLoginRequired(storage) {
   if (!storage || typeof storage !== "object") return true;
+  if (process.env.VERCEL || process.env.RENDER || process.env.RAILWAY_ENVIRONMENT) {
+    return true;
+  }
   if (!isLoopbackHost(storage.bindHost || "127.0.0.1")) return true;
   const settings = storage.getSettings?.();
   return settings?.requireLogin !== false;

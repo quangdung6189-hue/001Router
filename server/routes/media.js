@@ -963,11 +963,11 @@ export function createMediaRouter(storage, routerService) {
     try {
       const parsedTarget = new URL(targetUrl);
       const ssrf = classifyHostForSSRF(parsedTarget.hostname);
-      if (ssrf.isMetadataOrLinkLocal) {
+      if (ssrf.isMetadataOrLinkLocal || ssrf.isPrivateLan || ssrf.isLoopback) {
         return sendV1Error(
           res,
           400,
-          `SSRF guard: ${ssrf.reason || "forbidden target host"}`
+          `SSRF guard: ${ssrf.reason || "private or loopback target host blocked"}`
         );
       }
     } catch {

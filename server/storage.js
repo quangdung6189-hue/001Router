@@ -240,6 +240,14 @@ export class Storage {
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )
     `);
+    // Lock down Supabase public PostgREST API (ANON/authenticated keys get 0 access)
+    await this.pgPool.query(`
+      DO $$
+      BEGIN
+        ALTER TABLE router001_state ENABLE ROW LEVEL SECURITY;
+      EXCEPTION WHEN insufficient_privilege THEN NULL;
+      END $$;
+    `);
   }
 
   /**
@@ -717,6 +725,9 @@ export class Storage {
    */
   update(mutator) {
     const task = this._writeQueue.then(async () => {
+      if (this.pgPool) {
+        await this.refreshFromPostgres();
+      }
       const result = await mutator(this.data);
       const payload = this._prepareDiskPayload();
       await this._writePayload(payload);

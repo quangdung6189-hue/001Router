@@ -1,12 +1,13 @@
 import express from "express";
 import { nanoid } from "nanoid";
-import { createDashboardAuthMiddleware } from "../auth.js";
+import { createDashboardAuthMiddleware, sanitizeSecrets } from "../auth.js";
 import { PRESETS, getPreset, isKeyOptionalProvider } from "../presets.js";
 import { getCatalogResponse, queryCatalogModels } from "../catalog/index.js";
 import {
   getCatalogSyncStatus,
   syncCatalogFromLiveSources
 } from "../catalog/updater.js";
+import { classifyHostForSSRF } from "../security/redact.js";
 import {
   clearProxyDispatcherCache,
   getPlainProxyUrl,
@@ -192,7 +193,7 @@ export function createCatalogRouter(storage) {
     } catch (err) {
       return res.status(502).json({
         ok: false,
-        error: err?.message || "Failed to sync live model catalog"
+        error: sanitizeSecrets(err?.message || "Failed to sync live model catalog")
       });
     }
   });
@@ -306,6 +307,30 @@ export function createCatalogRouter(storage) {
     return res.json({ pools });
   });
 
+  function validateProxyTargetHost(host, storageInstance) {
+    const ssrf = classifyHostForSSRF(host);
+    if (ssrf.isMetadataOrLinkLocal) {
+      return {
+        ok: false,
+        error: `SSRF guard: proxy blocked (${ssrf.reason || "forbidden host"})`
+      };
+    }
+    const allowPrivate = storageInstance.getSettings().allowPrivateUpstreams;
+    if (ssrf.isPrivateLan && allowPrivate !== true) {
+      return {
+        ok: false,
+        error: `SSRF guard: ${ssrf.reason || "private LAN proxy address blocked"}`
+      };
+    }
+    if (ssrf.isLoopback && allowPrivate === false) {
+      return {
+        ok: false,
+        error: "SSRF guard: loopback proxy blocked by allowPrivateUpstreams=false"
+      };
+    }
+    return { ok: true };
+  }
+
   router.post("/proxy-pools", async (req, res) => {
     const body = req.body || {};
     const name = typeof body.name === "string" ? body.name.trim() : "";
@@ -316,6 +341,10 @@ export function createCatalogRouter(storage) {
     const parsed = parseProxyUrl(body.url);
     if (!parsed.ok) {
       return res.status(400).json({ error: parsed.error || "Invalid proxy URL" });
+    }
+    const ssrfCheck = validateProxyTargetHost(parsed.host, storage);
+    if (!ssrfCheck.ok) {
+      return res.status(400).json({ error: ssrfCheck.error });
     }
 
     const now = new Date().toISOString();
@@ -358,6 +387,10 @@ export function createCatalogRouter(storage) {
         const parsed = parseProxyUrl(incomingUrl);
         if (!parsed.ok) {
           return res.status(400).json({ error: parsed.error || "Invalid proxy URL" });
+        }
+        const ssrfCheck = validateProxyTargetHost(parsed.host, storage);
+        if (!ssrfCheck.ok) {
+          return res.status(400).json({ error: ssrfCheck.error });
         }
         nextUrl = parsed.url;
         nextType = parsed.type;
@@ -424,6 +457,13 @@ export function createCatalogRouter(storage) {
     const pool = getProxyPoolById(storage, req.params.id);
     if (!pool) {
       return res.status(404).json({ error: "Proxy pool not found" });
+    }
+    const parsed = parseProxyUrl(getPlainProxyUrl(pool, storage));
+    if (parsed.ok) {
+      const ssrfCheck = validateProxyTargetHost(parsed.host, storage);
+      if (!ssrfCheck.ok) {
+        return res.status(400).json({ ok: false, message: ssrfCheck.error });
+      }
     }
     const result = await testProxyPoolConnection(pool, storage);
     return res.json(result);

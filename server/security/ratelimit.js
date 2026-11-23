@@ -10,6 +10,17 @@ export const GLOBAL_MAX_FAILURES_PER_WINDOW = 50;
  * @returns {string}
  */
 export function extractClientIp(req) {
+  if (process.env.VERCEL) {
+    const vercelFwd = req?.headers?.["x-vercel-forwarded-for"];
+    const realIp = req?.headers?.["x-real-ip"];
+    const candidate =
+      (typeof vercelFwd === "string" && vercelFwd.split(",")[0].trim()) ||
+      (typeof realIp === "string" && realIp.trim()) ||
+      "";
+    if (candidate) {
+      return candidate.replace(/^::ffff:/, "");
+    }
+  }
   const raw = req?.ip || req?.socket?.remoteAddress || "127.0.0.1";
   return String(raw).replace(/^::ffff:/, "") || "127.0.0.1";
 }

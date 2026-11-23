@@ -115,7 +115,8 @@ export function createV1Router(storage, routerService) {
   });
 
   // Rich model metadata & pricing endpoint (9Router /v1/models/info parity)
-  router.get("/models/info", (_req, res) => {
+  router.get("/models/info", (req, res) => {
+    const routerKey = req.routerKey || null;
     const pricingMap = getMergedPricingMap(PRESETS, storage.getCustomPricing?.() || {});
     const models = [];
     for (const provider of storage.getProviders()) {
@@ -124,10 +125,12 @@ export function createV1Router(storage, routerService) {
       const catById = new Map((presetDef?.modelCatalog || []).map((m) => [m.id, m]));
       for (const modelId of provider.models || []) {
         if (storage.isModelDisabled?.(provider.slug, modelId)) continue;
+        const fullId = `${provider.slug}/${modelId}`;
+        if (routerKey && !isRouterKeyModelAllowed(routerKey, fullId)) continue;
         const cat = catById.get(modelId) || {};
         const price = pricingMap[provider.preset]?.[modelId] || pricingMap[provider.slug]?.[modelId] || null;
         models.push({
-          id: `${provider.slug}/${modelId}`,
+          id: fullId,
           provider: provider.slug,
           preset: provider.preset,
           model: modelId,
@@ -139,11 +142,20 @@ export function createV1Router(storage, routerService) {
         });
       }
     }
+    const visibleAliases = {};
+    for (const [alias, target] of Object.entries(storage.getModelAliases?.() || {})) {
+      if (!routerKey || isRouterKeyModelAllowed(routerKey, alias) || isRouterKeyModelAllowed(routerKey, target)) {
+        visibleAliases[alias] = target;
+      }
+    }
+    const visibleCombos = storage.getCombos().filter(
+      (c) => c.enabled !== false && (!routerKey || isRouterKeyModelAllowed(routerKey, c.name))
+    );
     return res.json({
       object: "list",
       models,
-      aliases: storage.getModelAliases?.() || {},
-      combos: storage.getCombos().filter((c) => c.enabled !== false)
+      aliases: visibleAliases,
+      combos: visibleCombos
     });
   });
 
@@ -204,10 +216,12 @@ export function createV1Router(storage, routerService) {
   });
 
   // Ollama compatibility endpoints (/v1/api/tags & /v1/api/chat)
-  router.get("/api/tags", (_req, res) => {
+  router.get("/api/tags", (req, res) => {
+    const routerKey = req.routerKey || null;
     const models = [];
     for (const combo of storage.getCombos()) {
       if (combo.enabled === false || !combo.name) continue;
+      if (routerKey && !isRouterKeyModelAllowed(routerKey, combo.name)) continue;
       models.push({
         name: combo.name,
         model: combo.name,
@@ -219,9 +233,11 @@ export function createV1Router(storage, routerService) {
       if (provider.enabled === false) continue;
       for (const m of provider.models || []) {
         if (storage.isModelDisabled?.(provider.slug, m)) continue;
+        const fullId = `${provider.slug}/${m}`;
+        if (routerKey && !isRouterKeyModelAllowed(routerKey, fullId)) continue;
         models.push({
-          name: `${provider.slug}/${m}`,
-          model: `${provider.slug}/${m}`,
+          name: fullId,
+          model: fullId,
           modified_at: provider.updatedAt || new Date().toISOString(),
           size: 0
         });

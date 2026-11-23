@@ -218,8 +218,17 @@ export async function createApp(options = {}) {
   });
 
   // Public Agent Skills endpoints (readable directly by AI agents without browser session)
+  function buildSafeRequestOrigin(req) {
+    const rawHost = String(req.get("host") || "").trim();
+    const safeHost = /^[a-zA-Z0-9.-]+(?::\d{1,5})?$/.test(rawHost)
+      ? rawHost
+      : `localhost:${port}`;
+    const proto = req.secure || req.headers?.["x-forwarded-proto"] === "https" ? "https" : "http";
+    return `${proto}://${safeHost}`;
+  }
+
   app.get("/api/skills", (req, res) => {
-    const origin = `${req.protocol}://${req.get("host") || `localhost:${port}`}`;
+    const origin = buildSafeRequestOrigin(req);
     return res.json({
       origin,
       skills: AGENT_SKILLS.map((s) => ({
@@ -230,7 +239,7 @@ export async function createApp(options = {}) {
   });
 
   app.get("/api/skills/:id/SKILL.md", (req, res) => {
-    const origin = `${req.protocol}://${req.get("host") || `localhost:${port}`}`;
+    const origin = buildSafeRequestOrigin(req);
     const md = renderSkillMarkdown(req.params.id, origin);
     if (!md) {
       return res.status(404).type("text/plain").send("Skill not found");

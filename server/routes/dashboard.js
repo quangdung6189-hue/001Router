@@ -45,6 +45,7 @@ import {
   extractClientIp
 } from "../security/ratelimit.js";
 import {
+  classifyHostForSSRF,
   maskProxyUrl,
   stripPrototypePollution,
   validateProviderBaseUrl
@@ -3446,13 +3447,40 @@ export function createDashboardRouter(storage, liveEvents = null) {
 
   // --- Headroom External Proxy Health Probe ---
 
+  function validateHeadroomUrl(rawUrl, allowPrivateUpstreams = false) {
+    let parsed;
+    try {
+      parsed = new URL(String(rawUrl || "").trim());
+    } catch {
+      return { valid: false, error: "Invalid headroomUrl" };
+    }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return { valid: false, error: "headroomUrl must start with http:// or https://" };
+    }
+    if (parsed.username || parsed.password) {
+      return { valid: false, error: "headroomUrl must not embed credentials" };
+    }
+    const ssrf = classifyHostForSSRF(parsed.hostname);
+    if (ssrf.isMetadataOrLinkLocal) {
+      return { valid: false, error: `SSRF guard: ${ssrf.reason || "forbidden headroomUrl host"}` };
+    }
+    if (ssrf.isPrivateLan && allowPrivateUpstreams !== true) {
+      return { valid: false, error: `SSRF guard: ${ssrf.reason || "private headroomUrl host blocked"}` };
+    }
+    return { valid: true, url: parsed.toString().replace(/\/+$/, "") };
+  }
+
   router.get("/headroom/status", async (req, res) => {
     const settings = storage.getSettings();
-    const url =
+    const rawUrl =
       (typeof req.query.url === "string" && req.query.url.trim()) ||
       settings.headroomUrl ||
       "http://localhost:8787";
-    const status = await checkHeadroomStatus(url, req.app?.locals?.headroomFetchImpl);
+    const check = validateHeadroomUrl(rawUrl, settings.allowPrivateUpstreams);
+    if (!check.valid) {
+      return res.status(400).json({ running: false, online: false, error: check.error });
+    }
+    const status = await checkHeadroomStatus(check.url, req.app?.locals?.headroomFetchImpl);
     return res.json(status);
   });
 
@@ -3529,7 +3557,16 @@ export function createDashboardRouter(storage, liveEvents = null) {
       patch.tokenSaverMaxChars = Math.floor(val);
     }
     if (body.requireKey !== undefined) {
-      patch.requireKey = Boolean(body.requireKey);
+      const nextReqKey = Boolean(body.requireKey);
+      const isPublicDeployment =
+        Boolean(process.env.VERCEL || process.env.RENDER || process.env.RAILWAY_ENVIRONMENT) ||
+        !isLoopbackHost(storage.bindHost || "127.0.0.1");
+      if (!nextReqKey && isPublicDeployment) {
+        return res.status(400).json({
+          error: "Router API key enforcement cannot be disabled on public deployments"
+        });
+      }
+      patch.requireKey = nextReqKey;
     }
     if (body.cavemanEnabled !== undefined) {
       patch.cavemanEnabled = Boolean(body.cavemanEnabled);
@@ -3570,10 +3607,19 @@ export function createDashboardRouter(storage, liveEvents = null) {
     }
     if (body.headroomUrl !== undefined) {
       const rawUrl = typeof body.headroomUrl === "string" ? body.headroomUrl.trim() : "";
-      if (rawUrl && !/^https?:\/\//i.test(rawUrl)) {
-        return res.status(400).json({ error: "headroomUrl must start with http:// or https://" });
+      if (rawUrl) {
+        const allowPriv =
+          body.allowPrivateUpstreams !== undefined
+            ? Boolean(body.allowPrivateUpstreams)
+            : storage.getSettings().allowPrivateUpstreams;
+        const check = validateHeadroomUrl(rawUrl, allowPriv);
+        if (!check.valid) {
+          return res.status(400).json({ error: check.error });
+        }
+        patch.headroomUrl = check.url;
+      } else {
+        patch.headroomUrl = "http://localhost:8787";
       }
-      patch.headroomUrl = rawUrl || "http://localhost:8787";
     }
     if (body.headroomTimeoutMs !== undefined) {
       const val = Number(body.headroomTimeoutMs);
@@ -3619,9 +3665,12 @@ export function createDashboardRouter(storage, liveEvents = null) {
     }
     if (body.requireLogin !== undefined) {
       const nextReq = Boolean(body.requireLogin);
-      if (!nextReq && !isLoopbackHost(storage.bindHost || "127.0.0.1")) {
+      const isPublicDeployment =
+        Boolean(process.env.VERCEL || process.env.RENDER || process.env.RAILWAY_ENVIRONMENT) ||
+        !isLoopbackHost(storage.bindHost || "127.0.0.1");
+      if (!nextReq && isPublicDeployment) {
         return res.status(400).json({
-          error: "Dashboard login cannot be disabled when bound to a non-loopback address"
+          error: "Dashboard login cannot be disabled when bound to a non-loopback or cloud address"
         });
       }
       patch.requireLogin = nextReq;

@@ -157,6 +157,25 @@ export async function runSecurityScan(options = {}) {
     }
   }
 
+  if (rawDb && typeof rawDb.googleOAuthClientEnc === "string" && rawDb.googleOAuthClientEnc.trim()) {
+    if (!isEncrypted(rawDb.googleOAuthClientEnc)) {
+      plaintextOAuthCredentials += 1;
+    } else {
+      encryptedOAuthCredentials += 1;
+    }
+  }
+  if (rawDb && Array.isArray(rawDb.pendingGooglePkce)) {
+    for (const item of rawDb.pendingGooglePkce) {
+      if (typeof item?.enc === "string" && item.enc.trim()) {
+        if (!isEncrypted(item.enc)) {
+          plaintextOAuthCredentials += 1;
+        } else {
+          encryptedOAuthCredentials += 1;
+        }
+      }
+    }
+  }
+
   const encryptionAtRest =
     hasMasterKey &&
     plaintextProviderKeys === 0 &&

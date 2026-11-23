@@ -806,4 +806,127 @@ describe("001Router Section 9.8 Security Hardening Test Suite", () => {
     assert.ok(Array.isArray(scanData.checks));
     assert.ok(scanData.checks.every((c) => c.status === "PASS"));
   });
+
+  it("13. blocks simulated attacker probes (unauthenticated scraping, proxy/headroom/fetch SSRF, key enumeration, host header injection, cloud auth lock)", async () => {
+    // 1. Unauthenticated scraping attempts across all sensitive endpoints must return 401
+    for (const ep of [
+      "/api/providers",
+      "/api/keys",
+      "/api/keys/reveal-initial",
+      "/api/export",
+      "/api/logs",
+      "/api/console-logs",
+      "/api/proxy-pools",
+      "/api/settings",
+      "/api/security/status"
+    ]) {
+      const r = await fetch(`${baseUrl}${ep}`);
+      assert.equal(r.status, 401, `Unauthenticated ${ep} must be rejected with 401`);
+    }
+
+    // 2. Host Header Injection on public /api/skills must sanitize malicious Host headers
+    const hostInjRes = await fetch(`${baseUrl}/api/skills/001router/SKILL.md`, {
+      headers: { host: "attacker.example/..@127.0.0.1" }
+    });
+    assert.equal(hostInjRes.status, 200);
+    const mdText = await hostInjRes.text();
+    assert.ok(!mdText.includes("evil.example"), "Must reject invalid characters in Host header");
+
+    // 3. SSRF blocking on Proxy Pools & Headroom URL & /v1/web/fetch
+    const proxySsrf1 = await apiFetch("/api/proxy-pools", {
+      method: "POST",
+      body: { name: "Meta Probe", url: "http://169.254.169.254:80" }
+    });
+    assert.equal(proxySsrf1.status, 400);
+
+    const proxySsrf2 = await apiFetch("/api/proxy-pools", {
+      method: "POST",
+      body: { name: "LAN Probe", url: "http://10.0.0.1:8080" }
+    });
+    assert.equal(proxySsrf2.status, 400);
+
+    const hrSsrf1 = await apiFetch(
+      "/api/headroom/status?url=" + encodeURIComponent("http://169.254.169.254/latest/meta-data")
+    );
+    assert.equal(hrSsrf1.status, 400);
+
+    const hrSsrf2 = await apiFetch("/api/settings", {
+      method: "PUT",
+      body: { headroomUrl: "http://192.168.1.1:8787" }
+    });
+    assert.equal(hrSsrf2.status, 400);
+
+    // 4. Restricted /v1 router key cannot enumerate disallowed models via /v1/models/info or /v1/api/tags or probe localhost via /v1/web/fetch
+    const newKeyRes = await apiFetch("/api/keys", {
+      method: "POST",
+      body: { name: "Restricted Probe Key" }
+    });
+    assert.equal(newKeyRes.status, 201);
+    const createdKey = (await newKeyRes.json()).key;
+    const patchRes = await apiFetch(`/api/keys/${createdKey.id}`, {
+      method: "PATCH",
+      body: { access: { restricted: true, allow: ["enc-openai/allowed-only"] } }
+    });
+    assert.equal(patchRes.status, 200);
+
+    const infoRes = await fetch(`${baseUrl}/v1/models/info`, {
+      headers: { authorization: `Bearer ${createdKey.key}` }
+    });
+    assert.equal(infoRes.status, 200);
+    const infoJson = await infoRes.json();
+    assert.ok(
+      infoJson.models.every((m) => m.id === "enc-openai/allowed-only"),
+      "Restricted key must not see disallowed models in /v1/models/info"
+    );
+
+    const tagsRes = await fetch(`${baseUrl}/v1/api/tags`, {
+      headers: { authorization: `Bearer ${createdKey.key}` }
+    });
+    assert.equal(tagsRes.status, 200);
+    const tagsJson = await tagsRes.json();
+    assert.ok(
+      tagsJson.models.every((m) => m.name === "enc-openai/allowed-only"),
+      "Restricted key must not see disallowed models in /v1/api/tags"
+    );
+
+    const fetchSsrfLoopback = await fetch(`${baseUrl}/v1/web/fetch`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${createdKey.key}`
+      },
+      body: JSON.stringify({ url: "http://127.0.0.1:20128/api/me" })
+    });
+    assert.equal(fetchSsrfLoopback.status, 400);
+
+    const fetchSsrfLan = await fetch(`${baseUrl}/v1/web/fetch`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${createdKey.key}`
+      },
+      body: JSON.stringify({ url: "http://192.168.0.1/admin" })
+    });
+    assert.equal(fetchSsrfLan.status, 400);
+
+    // 5. Public cloud deployments (Vercel) refuse disabling dashboard login or router API key enforcement
+    const prevVercel = process.env.VERCEL;
+    process.env.VERCEL = "1";
+    try {
+      const disableLoginRes = await apiFetch("/api/settings", {
+        method: "PUT",
+        body: { requireLogin: false }
+      });
+      assert.equal(disableLoginRes.status, 400);
+
+      const disableKeyRes = await apiFetch("/api/settings", {
+        method: "PUT",
+        body: { requireKey: false }
+      });
+      assert.equal(disableKeyRes.status, 400);
+    } finally {
+      if (prevVercel === undefined) delete process.env.VERCEL;
+      else process.env.VERCEL = prevVercel;
+    }
+  });
 });
