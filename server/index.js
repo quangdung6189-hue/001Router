@@ -438,6 +438,18 @@ if (isDirectRun) {
         "and move data/.master.key out of the data folder."
     );
   }
+  // Request logs are persisted on a short coalesced timer; flush them before exiting.
+  let shuttingDown = false;
+  const flushAndExit = (code) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    Promise.resolve(app.storage.flushDeferred?.())
+      .catch((err) => console.error("[shutdown] failed to flush pending writes:", err?.message || err))
+      .finally(() => process.exit(code));
+  };
+  process.once("SIGINT", () => flushAndExit(0));
+  process.once("SIGTERM", () => flushAndExit(0));
+
   app.listen(port, host, () => {
     console.log(`001Router listening on http://${host}:${port}`);
     if (initialKey && initialKey.key) {

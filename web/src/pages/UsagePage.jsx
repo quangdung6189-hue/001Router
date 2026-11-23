@@ -283,11 +283,23 @@ export function UsagePage() {
   // batch reliably and NEVER clear previous history on reconnect.
   useEffect(() => {
     let closed = false;
+    let sseOpen = false;
+    // Coalesce bursts: many requests arriving together trigger ONE aggregate refresh.
+    let refreshTimer = null;
+    const scheduleUsageRefresh = () => {
+      if (refreshTimer) return;
+      refreshTimer = setTimeout(() => {
+        refreshTimer = null;
+        if (!closed) loadUsage({ silent: true });
+      }, 800);
+    };
     const es = new EventSource('/api/usage/stream', { withCredentials: true });
     es.onopen = () => {
+      sseOpen = true;
       if (!closed) setSseLive(true);
     };
     es.onerror = () => {
+      sseOpen = false;
       if (!closed) setSseLive(false);
     };
     es.onmessage = (evt) => {
@@ -297,9 +309,7 @@ export function UsagePage() {
         if (msg.activeRequests) setActiveRequests(msg.activeRequests);
         if (Array.isArray(msg.recentRequests) && msg.recentRequests.length > 0) {
           const arrived = ingestRecentBatch(msg.recentRequests, { animateNew: true });
-          if (arrived.length > 0) {
-            loadUsage({ silent: true });
-          }
+          if (arrived.length > 0) scheduleUsageRefresh();
         }
         if (msg.errorProvider !== undefined) setErrorProvider(msg.errorProvider);
       } catch {
@@ -308,7 +318,8 @@ export function UsagePage() {
     };
 
     const pollLive = async () => {
-      if (closed || (typeof document !== 'undefined' && document.visibilityState === 'hidden')) {
+      // Polling is only the fallback for when SSE is down (e.g. serverless multi-instance).
+      if (closed || sseOpen || (typeof document !== 'undefined' && document.visibilityState === 'hidden')) {
         return;
       }
       try {
@@ -319,9 +330,7 @@ export function UsagePage() {
         if (snap.errorProvider !== undefined) setErrorProvider(snap.errorProvider);
         if (Array.isArray(snap.recentRequests) && snap.recentRequests.length > 0) {
           const arrived = ingestRecentBatch(snap.recentRequests, { animateNew: true });
-          if (arrived.length > 0) {
-            loadUsage({ silent: true });
-          }
+          if (arrived.length > 0) scheduleUsageRefresh();
         }
       } catch {
         // transient network hiccup — keep existing history intact
@@ -333,6 +342,7 @@ export function UsagePage() {
       closed = true;
       es.close();
       clearInterval(pollTimer);
+      if (refreshTimer) clearTimeout(refreshTimer);
       setSseLive(false);
     };
   }, [ingestRecentBatch, loadUsage]);

@@ -16,6 +16,9 @@ import {
 import { redactSecrets } from "./security/redact.js";
 
 export const MAX_LOGS = 5000;
+/** Debounce / max-wait for coalesced hot-path persistence (request logs, cooldown clears). */
+export const DEFERRED_PERSIST_MS = 250;
+export const DEFERRED_PERSIST_MAX_MS = 2000;
 export const DEFAULT_PORT = 20128;
 
 const DEFAULT_DATA_DIR = process.env.VERCEL
@@ -194,6 +197,10 @@ export class Storage {
     this._initialRouterKey = null;
     this._lastSecurityScan = null;
     this._writeQueue = Promise.resolve();
+    // Coalesced background persistence for hot-path writes (request logs, cooldown clears).
+    this._deferredTimer = null;
+    this._deferredFirstAt = 0;
+    this._deferredWaiters = [];
     this._pgUpdatedAt = 0;
     this._pgSyncInFlight = null;
   }
@@ -756,6 +763,49 @@ export class Storage {
     return task;
   }
 
+  /**
+   * Apply a mutation to in-memory state immediately and persist it on a coalesced timer
+   * (DEFERRED_PERSIST_MS debounce, DEFERRED_PERSIST_MAX_MS max wait). Used on the request hot
+   * path so a proxied call never waits for a full re-encrypt + JSON.stringify + file write.
+   * Postgres (multi-instance) keeps the strict refresh-mutate-write path via update().
+   * @template T
+   * @param {(data: any) => T} mutator synchronous mutator
+   * @returns {Promise<T>} resolves right away with the mutator result
+   */
+  updateDeferred(mutator) {
+    if (this.pgPool) return this.update(mutator);
+    const result = mutator(this.data);
+    this._scheduleDeferredPersist();
+    return Promise.resolve(result);
+  }
+
+  _scheduleDeferredPersist() {
+    const now = Date.now();
+    if (!this._deferredFirstAt) this._deferredFirstAt = now;
+    if (this._deferredTimer) clearTimeout(this._deferredTimer);
+    const waited = now - this._deferredFirstAt;
+    const delay = waited >= DEFERRED_PERSIST_MAX_MS ? 0 : DEFERRED_PERSIST_MS;
+    this._deferredTimer = setTimeout(() => {
+      this.flushDeferred().catch(() => {});
+    }, delay);
+    // Do not keep the process (or test runner) alive just for a pending log write.
+    this._deferredTimer.unref?.();
+  }
+
+  /**
+   * Write any pending deferred mutations now. Safe to call repeatedly.
+   * @returns {Promise<void>}
+   */
+  flushDeferred() {
+    if (this._deferredTimer) {
+      clearTimeout(this._deferredTimer);
+      this._deferredTimer = null;
+    }
+    if (!this._deferredFirstAt) return this._writeQueue;
+    this._deferredFirstAt = 0;
+    return this._persist();
+  }
+
   encryptSecret(plaintext) {
     return encryptSecret(plaintext, this.masterKey);
   }
@@ -998,7 +1048,7 @@ export class Storage {
    * @param {string | null} [usedKeyId]
    */
   async recordRequestLog(entry, usedKeyId = null) {
-    return this.update((data) => {
+    return this.updateDeferred((data) => {
       const secrets = [];
       for (const p of data.providers || []) {
         for (const k of p.apiKeys || []) {
@@ -1091,7 +1141,14 @@ export class Storage {
   }
 
   async clearProviderKeyCooldown(providerId, keyId) {
-    return this.update((data) => {
+    // Hot path: called after every successful upstream call. Skip the DB write entirely when
+    // the key has no cooldown/error to clear (the overwhelmingly common case).
+    const current = this.getProviderById(providerId);
+    const currentKey = (current?.apiKeys || []).find((k) => k.id === keyId);
+    if (!this.pgPool && (!currentKey || (!currentKey.cooldownUntil && !currentKey.lastError))) {
+      return;
+    }
+    return this.updateDeferred((data) => {
       const provider = data.providers.find((p) => p.id === providerId);
       if (!provider) return;
       const keyEntry = (provider.apiKeys || []).find((k) => k.id === keyId);

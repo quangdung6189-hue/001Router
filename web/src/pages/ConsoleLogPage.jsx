@@ -124,7 +124,10 @@ export function ConsoleLogPage() {
 
   useEffect(() => {
     if (!live) return;
-    const timer = setInterval(() => fetchLogs(true), 3000);
+    const timer = setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      fetchLogs(true);
+    }, 3000);
     return () => clearInterval(timer);
   }, [live, fetchLogs]);
 

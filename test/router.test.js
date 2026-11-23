@@ -1533,6 +1533,9 @@ describe("001Router Backend & Gateway Test Suite", () => {
         })
       )
     );
+    // Request logs are visible in memory immediately and coalesced to disk on a short timer.
+    assert.ok(app.storage.data.logs.some((l) => l.id === "concurrent-14"));
+    await app.storage.flushDeferred();
     const dbText = await fs.readFile(path.join(tmpDir, "db.json"), "utf8");
     const parsedDb = JSON.parse(dbText);
     for (let i = 0; i < 15; i++) {
