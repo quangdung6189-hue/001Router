@@ -17,5 +17,8 @@ function getApp() {
 
 export default async function handler(req, res) {
   const app = await getApp();
+  if (app?.storage?.pgPool) {
+    await app.storage.refreshFromPostgres();
+  }
   return app(req, res);
 }

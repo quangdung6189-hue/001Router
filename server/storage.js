@@ -154,6 +154,41 @@ export class Storage {
     this._initialRouterKey = null;
     this._lastSecurityScan = null;
     this._writeQueue = Promise.resolve();
+    this._pgUpdatedAt = 0;
+    this._pgSyncInFlight = null;
+  }
+
+  async refreshFromPostgres() {
+    if (!this.pgPool) return;
+    if (this._pgSyncInFlight) return this._pgSyncInFlight;
+    this._pgSyncInFlight = (async () => {
+      try {
+        const res = await this.pgPool.query(
+          "SELECT payload, EXTRACT(EPOCH FROM updated_at) AS ts FROM router001_state WHERE id = 'primary' LIMIT 1"
+        );
+        const row = res.rows[0];
+        if (!row?.payload) return;
+        const remoteTs = Number(row.ts) || 0;
+        if (remoteTs && remoteTs === this._pgUpdatedAt && this.data) {
+          return;
+        }
+        const parsed = JSON.parse(row.payload);
+        if (parsed && typeof parsed === "object") {
+          this.data = parsed;
+          this._pgUpdatedAt = remoteTs;
+          try {
+            this._isDefaultPassword = await bcrypt.compare("1234", parsed.passwordHash || "");
+          } catch {
+            this._isDefaultPassword = false;
+          }
+        }
+      } catch {
+        // Keep existing in-memory state if transient DB read fails
+      } finally {
+        this._pgSyncInFlight = null;
+      }
+    })();
+    return this._pgSyncInFlight;
   }
 
   async _ensurePgTable() {
@@ -545,48 +580,48 @@ export class Storage {
       ...data,
       providers: Array.isArray(data.providers)
         ? data.providers.map((p) => ({
-            ...p,
-            apiKeys: Array.isArray(p.apiKeys)
-              ? p.apiKeys.map((k) => {
-                  const cloned = {
-                    ...k,
-                    key:
-                      typeof k.key === "string" && k.key
-                        ? encryptSecret(k.key, this.masterKey)
-                        : ""
-                  };
-                  if (typeof k.serviceAccountJson === "string" && k.serviceAccountJson) {
-                    cloned.serviceAccountJson = encryptSecret(
-                      k.serviceAccountJson,
-                      this.masterKey
-                    );
-                  }
-                  if (typeof k.oauthCredentials === "string" && k.oauthCredentials) {
-                    cloned.oauthCredentials = encryptSecret(
-                      k.oauthCredentials,
-                      this.masterKey
-                    );
-                  }
-                  return cloned;
-                })
-              : []
-          }))
+          ...p,
+          apiKeys: Array.isArray(p.apiKeys)
+            ? p.apiKeys.map((k) => {
+              const cloned = {
+                ...k,
+                key:
+                  typeof k.key === "string" && k.key
+                    ? encryptSecret(k.key, this.masterKey)
+                    : ""
+              };
+              if (typeof k.serviceAccountJson === "string" && k.serviceAccountJson) {
+                cloned.serviceAccountJson = encryptSecret(
+                  k.serviceAccountJson,
+                  this.masterKey
+                );
+              }
+              if (typeof k.oauthCredentials === "string" && k.oauthCredentials) {
+                cloned.oauthCredentials = encryptSecret(
+                  k.oauthCredentials,
+                  this.masterKey
+                );
+              }
+              return cloned;
+            })
+            : []
+        }))
         : [],
       proxyPools: Array.isArray(data.proxyPools)
         ? data.proxyPools.map((pool) => ({
-            ...pool,
-            url:
-              typeof pool.url === "string" && pool.url
-                ? encryptSecret(pool.url, this.masterKey)
-                : ""
-          }))
+          ...pool,
+          url:
+            typeof pool.url === "string" && pool.url
+              ? encryptSecret(pool.url, this.masterKey)
+              : ""
+        }))
         : [],
       keys: Array.isArray(data.keys)
         ? data.keys.map((k) => {
-            const copy = { ...k };
-            delete copy.key;
-            return copy;
-          })
+          const copy = { ...k };
+          delete copy.key;
+          return copy;
+        })
         : []
     };
 
@@ -630,7 +665,7 @@ export class Storage {
       const payload = this._prepareDiskPayload();
       await this._writePayload(payload);
     });
-    this._writeQueue = task.catch(() => {});
+    this._writeQueue = task.catch(() => { });
     return task;
   }
 
@@ -647,7 +682,7 @@ export class Storage {
       await this._writePayload(payload);
       return result;
     });
-    this._writeQueue = task.catch(() => {});
+    this._writeQueue = task.catch(() => { });
     return task;
   }
 
@@ -660,6 +695,19 @@ export class Storage {
   }
 
   getSessionSecret() {
+    if (typeof process.env.SESSION_SECRET === "string" && process.env.SESSION_SECRET.trim()) {
+      return process.env.SESSION_SECRET.trim();
+    }
+    if (
+      typeof process.env.ROUTER001_MASTER_KEY === "string" &&
+      process.env.ROUTER001_MASTER_KEY.trim() &&
+      this.masterKey
+    ) {
+      return crypto
+        .createHmac("sha256", this.masterKey)
+        .update("001router-session-secret-v1")
+        .digest("hex");
+    }
     return this.data?.sessionSecret || "";
   }
 
