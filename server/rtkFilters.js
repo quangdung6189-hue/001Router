@@ -45,9 +45,9 @@ export const RTK_FILTER_CATALOG = [
   { id: "tree", label: "tree", desc: "Trims summary lines & caps deep directory trees" },
   { id: "ls", label: "ls", desc: "Strips permissions/dates/noise dirs; keeps name + size" },
   { id: "search-list", label: "search-list", desc: "Compacts IDE glob search file lists by directory" },
-  { id: "read-numbered", label: "read-numbered", desc: "Head+tail slices large line-numbered file reads" },
+  { id: "read-numbered", label: "read-numbered", desc: "Trims padded line-number gutters (never drops lines)" },
   { id: "dedup-log", label: "dedup-log", desc: "Collapses repeated consecutive log & blank lines" },
-  { id: "smart-truncate", label: "smart-truncate", desc: "Preserves top 120 + bottom 60 lines on giant blobs" }
+  { id: "smart-truncate", label: "smart-truncate", desc: "Only above Max Chars: keeps 60% head + 35% tail" }
 ];
 
 // --- 1. git-diff ---
@@ -487,12 +487,17 @@ filterSearchList.filterName = "search-list";
 // --- 10. read-numbered ---
 export const READ_NUMBERED_LINE_RE = /^\s*\d+\|/;
 export function filterReadNumbered(input) {
-  const lines = input.split("\n");
-  if (lines.length < RTK_CONSTANTS.SMART_TRUNCATE_MIN_LINES) return input;
-  const head = lines.slice(0, RTK_CONSTANTS.SMART_TRUNCATE_HEAD);
-  const tail = lines.slice(lines.length - RTK_CONSTANTS.SMART_TRUNCATE_TAIL);
-  const cut = lines.length - head.length - tail.length;
-  return [...head, `... +${cut} lines truncated (file continues)`, ...tail].join("\n");
+  // Only strip the left padding of the line-number gutter ("   42|code" -> "42|code").
+  // Never drop lines: agents rely on seeing the whole file they asked to read. Oversized reads
+  // are clamped later by compressText's Max Chars budget (60% head / 35% tail).
+  return input
+    .split("\n")
+    .map((line) => {
+      let i = 0;
+      while (i < line.length && (line.charCodeAt(i) === 32 || line.charCodeAt(i) === 9)) i++;
+      return i > 0 && READ_NUMBERED_LINE_RE.test(line) ? line.slice(i) : line;
+    })
+    .join("\n");
 }
 filterReadNumbered.filterName = "read-numbered";
 
@@ -540,12 +545,10 @@ filterDedupLog.filterName = "dedup-log";
 
 // --- 12. smart-truncate ---
 export function filterSmartTruncate(input) {
-  const lines = input.split("\n");
-  if (lines.length < RTK_CONSTANTS.SMART_TRUNCATE_MIN_LINES) return input;
-  const head = lines.slice(0, RTK_CONSTANTS.SMART_TRUNCATE_HEAD);
-  const tail = lines.slice(lines.length - RTK_CONSTANTS.SMART_TRUNCATE_TAIL);
-  const cut = lines.length - head.length - tail.length;
-  return [...head, `... +${cut} lines truncated`, ...tail].join("\n");
+  // Intentionally a no-op at the RTK stage. Cutting by line count dropped the middle of any
+  // 250+ line output even when it fit under Max Chars. The real clamp is character-budget based
+  // and lives in compressText (tokenSaver.js), which only runs when Max Chars is exceeded.
+  return input;
 }
 filterSmartTruncate.filterName = "smart-truncate";
 
@@ -613,8 +616,7 @@ export function autoDetectRtkFilter(text) {
   if (RE_TREE_GLYPH.test(head)) return filterTree;
   if (RE_LS_TOTAL.test(head) || (head.match(/^[-dlbcps][rwx-]{9}/gm) || []).length >= 3) return filterLs;
   if (SEARCH_LIST_HEADER_RE.test(head)) return filterSearchList;
-  if (lines.length >= RTK_CONSTANTS.SMART_TRUNCATE_MIN_LINES && isLineNumbered(lines)) return filterReadNumbered;
-  if (text.split("\n").length >= RTK_CONSTANTS.SMART_TRUNCATE_MIN_LINES) return filterSmartTruncate;
+  if (isLineNumbered(lines)) return filterReadNumbered;
   return null;
 }
 
