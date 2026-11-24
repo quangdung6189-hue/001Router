@@ -298,21 +298,61 @@ export function QuotaPage() {
                   </button>
                 </div>
 
-                {item.cloudCodeQuota ? (
-                  <div className="rounded-xl border border-[#E56A4A]/35 bg-[#E56A4A]/8 p-3">
-                    <CloudCodeQuota
-                      tierLabel={item.cloudCodeQuota.tierLabel}
-                      email={item.cloudCodeQuota.email}
-                      projectId={item.cloudCodeQuota.projectId}
-                      windows={item.cloudCodeQuota.windows || []}
-                      models={item.cloudCodeQuota.models || []}
-                      buckets={item.cloudCodeQuota.buckets || []}
-                      perModelHidden={item.cloudCodeQuota.perModelHidden === true}
-                      accent="#E56A4A"
-                      providerSlug={item.slug}
-                    />
-                  </div>
-                ) : null}
+                {/* One card per Google account (key): each has its own plan and quota windows. */}
+                {(Array.isArray(item.cloudCodeAccounts) && item.cloudCodeAccounts.length
+                  ? item.cloudCodeAccounts
+                  : item.cloudCodeQuota
+                    ? [item.cloudCodeQuota]
+                    : []
+                ).map((acc, idx, all) => {
+                  const cooling = acc.cooldownUntil && acc.cooldownUntil > Date.now();
+                  return (
+                    <div
+                      key={acc.keyId || acc.email || idx}
+                      className="rounded-xl border border-[#E56A4A]/35 bg-[#E56A4A]/8 p-3"
+                    >
+                      {all.length > 1 ? (
+                        <div className="mb-2 text-[10px] font-semibold uppercase tracking-wide text-[var(--text-muted)]">
+                          Tài khoản {idx + 1}/{all.length}
+                        </div>
+                      ) : null}
+                      <CloudCodeQuota
+                        tierLabel={acc.tierLabel}
+                        email={acc.email || acc.label}
+                        projectId={acc.projectId}
+                        windows={acc.windows || []}
+                        models={acc.models || []}
+                        buckets={acc.buckets || []}
+                        perModelHidden={acc.perModelHidden === true}
+                        checkedAt={acc.live === false ? acc.checkedAt : undefined}
+                        accent="#E56A4A"
+                        providerSlug={item.slug}
+                        extra={
+                          <>
+                            {acc.today ? (
+                              <span className="text-[10.5px] text-[var(--text-secondary)]">
+                                hôm nay {acc.today.requests} request
+                                {acc.today.errors ? (
+                                  <span className="text-red-500"> · {acc.today.errors} lỗi</span>
+                                ) : null}
+                              </span>
+                            ) : null}
+                            {cooling ? (
+                              <span className="rounded-full border border-amber-500/35 bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-amber-500">
+                                Cooldown
+                              </span>
+                            ) : null}
+                          </>
+                        }
+                      />
+                      {acc.error ? (
+                        <p className="mt-2 text-[10.5px] text-red-400">
+                          Không đọc được quota trực tiếp ({acc.error}) — đang hiện số liệu lưu lần trước.
+                        </p>
+                      ) : null}
+                    </div>
+                  );
+                })}
 
                 <div className="space-y-3 border-t border-[var(--border-subtle)] pt-3">
                   <ProgressRow

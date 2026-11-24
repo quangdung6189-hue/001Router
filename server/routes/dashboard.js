@@ -4500,7 +4500,8 @@ export function createDashboardRouter(storage, liveEvents = null) {
 
   // --- Quota & Budget Tracker ---
 
-  router.get("/quota", async (_req, res) => {
+  router.get("/quota", async (req, res) => {
+    const cloudFetch = req.app?.locals?.googleOAuthFetchImpl || null;
     const now = Date.now();
     const nowIso = new Date(now).toISOString();
     const todayPrefix = nowIso.slice(0, 10);
@@ -4520,11 +4521,22 @@ export function createDashboardRouter(storage, liveEvents = null) {
       return bucket;
     };
 
+    /** Today's upstream attempts per provider key (`attemptTrail`), so each account shows its own. */
+    const todayByKey = new Map();
     for (const log of storage.getLogs()) {
       if (!log || typeof log.timestamp !== "string" || !log.providerSlug) continue;
       const inMonth = log.timestamp.startsWith(monthPrefix);
       const inToday = log.timestamp.startsWith(todayPrefix);
       if (!inMonth && !inToday) continue;
+      if (inToday && Array.isArray(log.attemptTrail)) {
+        for (const hop of log.attemptTrail) {
+          if (!hop?.keyId) continue;
+          const k = todayByKey.get(hop.keyId) || { requests: 0, errors: 0 };
+          k.requests += 1;
+          if (!(hop.status >= 200 && hop.status < 400)) k.errors += 1;
+          todayByKey.set(hop.keyId, k);
+        }
+      }
 
       const bucket = getBucket(log.providerSlug);
       const tokens = (Number(log.promptTokens) || 0) + (Number(log.completionTokens) || 0);
@@ -4568,43 +4580,66 @@ export function createDashboardRouter(storage, liveEvents = null) {
       };
       const storedBudget = quotas[provider.id] || {};
 
-      // Live plan/quota for Gemini CLI accounts — read straight from Cloud Code Assist so the
-      // page shows the real tier and remaining buckets instead of only a self-set budget.
-      let cloudCodeQuota = null;
-      const cliKey = (provider.apiKeys || []).find(
+      // Live plan/quota for every Gemini CLI / Antigravity account of this provider — each key is
+      // its own Google account with its own plan and windows, so each gets its own entry.
+      const cliKeys = (provider.apiKeys || []).filter(
         (k) => k.enabled !== false && getCloudCodeFlavorForKey(k) && k.oauthCredentials
       );
-      if (cliKey) {
-        const cliFlavor = getCloudCodeFlavorForKey(cliKey);
-        try {
-          const dispatcher = getProxyDispatcher(provider, storage);
-          const { accessToken } = await getGeminiCliAccessToken(cliKey.oauthCredentials, {
-            ...(dispatcher ? { dispatcher } : {})
-          });
-          const metaProject = cliKey.oauthMeta?.projectId || "";
-          const usage = await fetchCloudCodeUsage(accessToken, {
-            projectId: metaProject,
-            ...(dispatcher ? { dispatcher } : {}),
-            flavor: cliFlavor.id
-          });
-          if (usage.planOk || usage.quotaOk) {
-            cloudCodeQuota = {
-              flavor: cliFlavor.id,
-              tier: usage.tier || cliKey.oauthMeta?.tier || "",
-              tierLabel:
-                usage.tierLabel || cliKey.oauthMeta?.tierLabel || `${cliFlavor.label} · Connected`,
-              projectId: usage.projectId || metaProject,
-              email: cliKey.oauthMeta?.email || "",
+      const dispatcher = cliKeys.length ? getProxyDispatcher(provider, storage) : null;
+      const cloudCodeAccounts = await Promise.all(
+        cliKeys.map(async (cliKey) => {
+          const cliFlavor = getCloudCodeFlavorForKey(cliKey);
+          const prev = cliKey.oauthMeta || {};
+          const keyToday = todayByKey.get(cliKey.id) || { requests: 0, errors: 0 };
+          // Stored values (from sign-in / last refresh) when the live read fails.
+          const account = {
+            keyId: cliKey.id,
+            label: cliKey.label || cliKey.name || "",
+            flavor: cliFlavor.id,
+            email: prev.email || "",
+            tier: prev.tier || "",
+            tierLabel: prev.tierLabel || `${cliFlavor.label} · Connected`,
+            projectId: prev.projectId || "",
+            buckets: Array.isArray(prev.quotaBuckets) ? prev.quotaBuckets : [],
+            windows: Array.isArray(prev.quotaWindows) ? prev.quotaWindows : [],
+            perModelHidden: prev.perModelHidden === true,
+            models: Array.isArray(prev.availableModels) ? prev.availableModels : [],
+            defaultModelId: prev.defaultModelId || "",
+            checkedAt: prev.checkedAt || "",
+            cooldownUntil: cliKey.cooldownUntil && cliKey.cooldownUntil > now ? cliKey.cooldownUntil : 0,
+            today: keyToday,
+            live: false,
+            error: ""
+          };
+          try {
+            const { accessToken } = await getGeminiCliAccessToken(cliKey.oauthCredentials, {
+              ...(dispatcher ? { dispatcher } : {}),
+              ...(cloudFetch ? { fetchImpl: cloudFetch } : {})
+            });
+            const usage = await fetchCloudCodeUsage(accessToken, {
+              projectId: account.projectId,
+              ...(dispatcher ? { dispatcher } : {}),
+              ...(cloudFetch ? { fetchImpl: cloudFetch } : {}),
+              flavor: cliFlavor.id
+            });
+            if (!usage.planOk && !usage.quotaOk) {
+              account.error = "Google did not return plan or quota for this account.";
+              return account;
+            }
+            Object.assign(account, {
+              tier: usage.tier || account.tier,
+              tierLabel: usage.tierLabel || account.tierLabel,
+              projectId: usage.projectId || account.projectId,
               buckets: usage.buckets,
               windows: usage.windows,
               perModelHidden: usage.perModelHidden,
-              models: usage.models,
-              defaultModelId: usage.defaultModelId
-            };
+              ...(usage.catalogOk ? { models: usage.models, defaultModelId: usage.defaultModelId } : {}),
+              checkedAt: new Date().toISOString(),
+              live: true
+            });
 
             // Keep the stored plan / catalog in step with this live read, so the Providers page and
             // the router see the same plan. Written only when something changed (or every hour).
-            const prev = cliKey.oauthMeta || {};
             const idsOf = (list) => (Array.isArray(list) ? list.map((m) => m?.id).join(",") : "");
             const staleMs = Date.now() - (Date.parse(prev.checkedAt || "") || 0);
             const changed =
@@ -4612,7 +4647,7 @@ export function createDashboardRouter(storage, liveEvents = null) {
               (usage.catalogOk && idsOf(usage.models) !== idsOf(prev.availableModels)) ||
               staleMs > 60 * 60 * 1000;
             if (changed) {
-              const checkedAt = new Date().toISOString();
+              const checkedAt = account.checkedAt;
               await storage
                 .update((data) => {
                   const p = data.providers.find((x) => x.id === provider.id);
@@ -4623,11 +4658,14 @@ export function createDashboardRouter(storage, liveEvents = null) {
                 })
                 .catch(() => {});
             }
+          } catch (err) {
+            // Best-effort: one account failing never breaks the others or the quota list.
+            account.error = sanitizeSecrets(String(err?.message || "live read failed").slice(0, 200), []);
           }
-        } catch {
-          // Best-effort: never break the quota list because one upstream probe failed.
-        }
-      }
+          return account;
+        })
+      );
+      const cloudCodeQuota = cloudCodeAccounts.find((a) => a.live) || cloudCodeAccounts[0] || null;
 
       return {
         providerId: provider.id,
@@ -4645,7 +4683,7 @@ export function createDashboardRouter(storage, liveEvents = null) {
           dailyRequestLimit: storedBudget.dailyRequestLimit ?? null,
           monthlyTokenLimit: storedBudget.monthlyTokenLimit ?? null
         },
-        ...(cloudCodeQuota ? { cloudCodeQuota } : {})
+        ...(cloudCodeQuota ? { cloudCodeQuota, cloudCodeAccounts } : {})
       };
       })
     );

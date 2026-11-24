@@ -1329,4 +1329,68 @@ describe("Antigravity routes + /v1 chat", () => {
       delete app.locals.cloudCodeFetchImpl;
     }
   });
+
+  it("19. /api/quota shows every account of the provider with its own plan, windows and usage", async () => {
+    // A second Google account on the same Antigravity provider.
+    await app.locals.storage.update((data) => {
+      const p = data.providers.find((x) => x.preset === "antigravity");
+      const first = p.apiKeys[0];
+      const creds = JSON.parse(first.oauthCredentials);
+      p.apiKeys.push({
+        ...first,
+        id: "ag-second-key",
+        label: "second",
+        oauthCredentials: JSON.stringify({ ...creds, refreshToken: "1//second-refresh" }),
+        oauthMeta: {
+          email: "second@example.com",
+          tier: "free",
+          tierLabel: "Antigravity Free",
+          projectId: "ag-project-2",
+          quotaWindows: [{ id: "gemini_weekly", family: "gemini", window: "weekly", label: "Gemini (Weekly)", remainingFraction: 0.3, resetTime: "" }],
+          checkedAt: "2026-11-20T00:00:00.000Z"
+        }
+      });
+    });
+    const tokenOf = (init) => String(init?.headers?.authorization || init?.headers?.Authorization || "");
+    app.locals.googleOAuthFetchImpl = makeGoogle({
+      ...GOOGLE_OK,
+      token: (body) =>
+        json(200, {
+          access_token: String(body).includes("second") ? "ya29.second" : "ya29.ag-access-token",
+          expires_in: 3600
+        }),
+      // The second account cannot be read live: its stored numbers are shown instead.
+      loadCodeAssist: (_b, init) => (tokenOf(init).includes("second") ? json(403, {}) : LOAD_PAID),
+      fetchAvailableModels: (_b, init) => (tokenOf(init).includes("second") ? json(403, {}) : GOOGLE_OK.fetchAvailableModels),
+      retrieveUserQuotaSummary: (_b, init) =>
+        tokenOf(init).includes("second") ? json(403, {}) : GOOGLE_OK.retrieveUserQuotaSummary
+    }).fetchImpl;
+    try {
+      const res = await apiFetch("/api/quota");
+      assert.equal(res.status, 200);
+      const item = (await res.json()).items.find((i) => i.preset === "antigravity");
+      assert.equal(item.cloudCodeAccounts.length, 2);
+      const [one, two] = item.cloudCodeAccounts;
+
+      assert.equal(one.email, "ag@example.com");
+      assert.equal(one.live, true);
+      assert.match(one.tierLabel, /Google AI Pro/);
+      assert.equal(one.windows.find((w) => w.id === "gemini_weekly").remainingFraction, 0.6);
+      assert.equal(typeof one.today.requests, "number");
+
+      assert.equal(two.keyId, "ag-second-key");
+      assert.equal(two.email, "second@example.com");
+      assert.equal(two.live, false);
+      assert.match(two.error, /plan or quota/);
+      assert.equal(two.windows[0].remainingFraction, 0.3, "stored windows of THIS account, not the first one");
+      assert.equal(two.projectId, "ag-project-2");
+      assert.equal(JSON.stringify(item).includes("refresh"), false, "no tokens in the answer");
+    } finally {
+      app.locals.googleOAuthFetchImpl = makeGoogle(GOOGLE_OK).fetchImpl;
+      await app.locals.storage.update((data) => {
+        const p = data.providers.find((x) => x.preset === "antigravity");
+        p.apiKeys = p.apiKeys.filter((k) => k.id !== "ag-second-key");
+      });
+    }
+  });
 });
