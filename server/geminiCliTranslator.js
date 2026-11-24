@@ -55,101 +55,438 @@ function contentToParts(content) {
 }
 
 /**
- * Strip JSON-Schema keywords Gemini's functionDeclarations reject.
- *
- * Gemini's proto schema is narrower than JSON Schema: it rejects `exclusiveMinimum` /
- * `exclusiveMaximum` / `additionalProperties` / `$schema` / `$id` and has no `anyOf` branch for
- * null unions. It also accepts `items` only as a single object (tuple-style `items: [...]` is
- * rejected), so tuple arrays are collapsed into one merged item schema.
- *
- * @param {any} schema
+ * Schema fields Gemini's function-declaration `Schema` proto accepts. Anything else (`format`,
+ * `title`, `default`, `examples`, `minLength`, `additionalProperties`, `x-*`, …) is rejected with
+ * 400 "Unknown name … Cannot find field", and Antigravity's Claude models (VALIDATED mode) reject
+ * `default` / `examples` too, so schema nodes keep only these.
+ */
+const GEMINI_SCHEMA_FIELDS = new Set([
+  "type",
+  "description",
+  "enum",
+  "properties",
+  "required",
+  "items",
+  "nullable",
+  "minimum",
+  "maximum",
+  "pattern"
+]);
+
+/** Gemini rejects an OBJECT schema without properties ("should be non-empty for OBJECT type"). */
+const EMPTY_OBJECT_PLACEHOLDER = Object.freeze({
+  type: "string",
+  description: "Brief explanation of why you are calling this tool"
+});
+
+const MAX_SCHEMA_DEPTH = 32;
+
+/** @param {any} value */
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+/**
+ * Inline local `#/$defs/X` / `#/definitions/X` references (Gemini has no `$ref`).
+ * Unknown or too-deep references become an empty schema, which normalizes to a string.
+ * @param {any} node
+ * @param {Record<string, any>} defs
+ * @param {number} depth
  * @returns {any}
  */
-function cleanSchema(schema) {
-  if (!schema || typeof schema !== "object") return { type: "object", properties: {} };
+function resolveLocalRefs(node, defs, depth) {
+  if (Array.isArray(node)) return node.map((child) => resolveLocalRefs(child, defs, depth));
+  if (!isPlainObject(node)) return node;
+  if (typeof node.$ref === "string") {
+    const name = node.$ref.match(/^#\/(?:\$defs|definitions)\/(.+)$/)?.[1];
+    const target = name ? defs[name] : undefined;
+    const { $ref: _ref, ...rest } = node;
+    if (!isPlainObject(target) || depth >= 8) return rest;
+    return resolveLocalRefs({ ...target, ...rest }, defs, depth + 1);
+  }
+  const out = {};
+  for (const [key, value] of Object.entries(node)) {
+    out[key] = key === "$defs" || key === "definitions" ? value : resolveLocalRefs(value, defs, depth);
+  }
+  return out;
+}
 
-  const walk = (node) => {
-    if (Array.isArray(node)) {
-      for (const child of node) walk(child);
-      return node;
+/**
+ * Pick the most structured branch of a union (object > array > typed scalar), as the
+ * reference router does — Gemini cannot express unions.
+ * @param {any[]} branches
+ * @returns {any}
+ */
+function pickUnionBranch(branches) {
+  let best = branches[0];
+  let bestScore = -1;
+  for (const branch of branches) {
+    const score =
+      branch.type === "object" || branch.properties
+        ? 3
+        : branch.type === "array" || branch.items
+          ? 2
+          : branch.type
+            ? 1
+            : 0;
+    if (score > bestScore) {
+      bestScore = score;
+      best = branch;
     }
-    if (!node || typeof node !== "object") return node;
+  }
+  return best;
+}
 
-    delete node.$schema;
-    delete node.$id;
-    delete node.$defs;
-    delete node.definitions;
-    delete node.additionalProperties;
-    delete node.exclusiveMinimum;
-    delete node.exclusiveMaximum;
-    delete node.patternProperties;
-    delete node.dependencies;
-    delete node.unevaluatedProperties;
-    delete node.propertyNames;
-    delete node.$ref;
+/**
+ * Normalize one schema node into the subset Gemini accepts. Property NAMES are never filtered —
+ * only schema keywords are (a parameter called `title` or `format` stays).
+ * @param {any} input
+ * @param {number} depth
+ * @returns {Record<string, any>}
+ */
+function normalizeSchemaNode(input, depth) {
+  if (depth > MAX_SCHEMA_DEPTH) return { type: "string" };
+  let node = isPlainObject(input) ? { ...input } : {};
 
-    if (Array.isArray(node.required) && node.required.length === 0) delete node.required;
-
-    // `const` has no Gemini equivalent — surface it as a single-value enum instead of dropping it.
-    if (node.const !== undefined) {
-      node.enum = [node.const];
-      delete node.const;
-    }
-
-    // Gemini cannot express null unions; keep the non-null branch only.
-    if (Array.isArray(node.anyOf) || Array.isArray(node.oneOf)) {
-      const key = Array.isArray(node.anyOf) ? "anyOf" : "oneOf";
-      const branches = node[key].filter((n) => n && n.type !== "null");
-      delete node.anyOf;
-      delete node.oneOf;
-      if (branches.length === 1) {
-        Object.assign(node, branches[0]);
-        walk(node);
-        return node;
+  if (Array.isArray(node.allOf)) {
+    for (const member of node.allOf) {
+      if (!isPlainObject(member)) continue;
+      if (isPlainObject(member.properties)) {
+        node.properties = { ...(isPlainObject(node.properties) ? node.properties : {}), ...member.properties };
       }
-      if (branches.length > 1) node.anyOf = branches;
+      if (Array.isArray(member.required)) {
+        node.required = [...new Set([...(Array.isArray(node.required) ? node.required : []), ...member.required])];
+      }
+      if (!node.type && member.type) node.type = member.type;
+      if (!node.description && typeof member.description === "string") node.description = member.description;
     }
+    delete node.allOf;
+  }
 
-    // Gemini rejects tuple arrays — collapse to the merged shape of the members.
-    if (Array.isArray(node.items)) {
+  for (const key of ["anyOf", "oneOf"]) {
+    if (!Array.isArray(node[key])) continue;
+    const branches = node[key].filter((b) => isPlainObject(b) && b.type !== "null");
+    delete node[key];
+    if (branches.length) {
+      const { description } = node;
+      node = { ...node, ...pickUnionBranch(branches) };
+      if (typeof description === "string" && description) node.description = description;
+      return normalizeSchemaNode(node, depth + 1);
+    }
+  }
+
+  if (node.const !== undefined) {
+    if (!Array.isArray(node.enum)) node.enum = [node.const];
+    delete node.const;
+  }
+
+  if (Array.isArray(node.type)) {
+    const types = node.type.filter((t) => typeof t === "string" && t !== "null");
+    node.type =
+      types.length === 0
+        ? "string"
+        : types.length === 1
+          ? types[0]
+          : node.properties && types.includes("object")
+            ? "object"
+            : node.items && types.includes("array")
+              ? "array"
+              : types.includes("string")
+                ? "string"
+                : types[0];
+  }
+  if (node.type === "null") node.type = "string";
+
+  // Tuples (`prefixItems` or `items: [...]`) collapse into one merged item schema.
+  const tuple = Array.isArray(node.prefixItems) ? node.prefixItems : Array.isArray(node.items) ? node.items : null;
+  if (tuple) {
+    const members = tuple.filter(isPlainObject);
+    const objects = members.filter((m) => m.type === "object" || m.properties);
+    if (objects.length) {
       const merged = { type: "object", properties: {} };
-      let mergedType = "";
-      for (const child of node.items) {
-        if (!child || typeof child !== "object") continue;
-        if (child.type && !mergedType) mergedType = child.type;
-        if (child.properties) Object.assign(merged.properties, child.properties);
-        if (Array.isArray(child.required)) merged.required = child.required;
-        if (child.items) merged.items = child.items;
-      }
-      node.items = mergedType && mergedType !== "object" ? { type: mergedType } : merged;
+      for (const member of objects) Object.assign(merged.properties, member.properties || {});
+      node.items = merged;
+    } else {
+      node.items = members[0] ? { type: members[0].type || "string" } : { type: "string" };
     }
+    delete node.prefixItems;
+  }
 
-    if (node.properties && typeof node.properties === "object") {
-      for (const key of Object.keys(node.properties)) {
-        node.properties[key] = walk(node.properties[key]);
+  if (Array.isArray(node.enum)) {
+    // Gemini only takes string enums, on a string schema.
+    const values = [...new Set(node.enum.filter((v) => v !== null && v !== undefined).map((v) => String(v)))];
+    if (values.length) {
+      node.enum = values;
+      node.type = "string";
+    } else {
+      delete node.enum;
+    }
+  }
+
+  if (typeof node.type !== "string" || !node.type) {
+    node.type = node.properties ? "object" : node.items ? "array" : "string";
+  }
+
+  if (node.type === "object") {
+    const properties = {};
+    if (isPlainObject(node.properties)) {
+      for (const [name, child] of Object.entries(node.properties)) {
+        properties[name] = normalizeSchemaNode(child, depth + 1);
       }
     }
-    if (node.items) node.items = walk(node.items);
-    if (Array.isArray(node.anyOf)) node.anyOf = node.anyOf.map(walk);
-    if (Array.isArray(node.enum)) node.enum = node.enum.filter((v) => v !== null);
+    let required = Array.isArray(node.required)
+      ? [...new Set(node.required.filter((r) => typeof r === "string" && Object.hasOwn(properties, r)))]
+      : [];
+    if (!Object.keys(properties).length) {
+      properties.reason = { ...EMPTY_OBJECT_PLACEHOLDER };
+      required = ["reason"];
+    }
+    node.properties = properties;
+    if (required.length) node.required = required;
+    else delete node.required;
+  } else {
+    delete node.properties;
+    delete node.required;
+  }
 
-    return node;
+  if (node.type === "array") {
+    node.items = normalizeSchemaNode(isPlainObject(node.items) ? node.items : { type: "string" }, depth + 1);
+  } else {
+    delete node.items;
+  }
+
+  const out = {};
+  for (const [key, value] of Object.entries(node)) {
+    if (GEMINI_SCHEMA_FIELDS.has(key)) out[key] = value;
+  }
+  if (typeof out.description !== "string") delete out.description;
+  if (typeof out.nullable !== "boolean") delete out.nullable;
+  // Range only on numbers, pattern only on strings (Gemini ties each field to its type).
+  const numeric = out.type === "number" || out.type === "integer";
+  if (!numeric || typeof out.minimum !== "number") delete out.minimum;
+  if (!numeric || typeof out.maximum !== "number") delete out.maximum;
+  if (out.type !== "string" || typeof out.pattern !== "string") delete out.pattern;
+  return out;
+}
+
+/**
+ * Turn a tool's JSON Schema into parameters Gemini's functionDeclarations accept: local `$ref`s
+ * inlined, `allOf` merged, unions / type arrays / tuples / `const` collapsed, enums as strings,
+ * unsupported keywords dropped, and an empty object given a placeholder property.
+ * @param {any} schema
+ * @returns {Record<string, any>}
+ */
+function cleanSchema(schema) {
+  const root = isPlainObject(schema) ? JSON.parse(JSON.stringify(schema)) : {};
+  const defs = {
+    ...(isPlainObject(root.definitions) ? root.definitions : {}),
+    ...(isPlainObject(root.$defs) ? root.$defs : {})
   };
+  const resolved = resolveLocalRefs(root, defs, 0);
+  // Function parameters are always an object (a root union could otherwise pick a scalar branch).
+  const out = normalizeSchemaNode({ ...resolved, type: "object" }, 0);
+  return out.type === "object" ? out : normalizeSchemaNode({ type: "object" }, 0);
+}
 
-  const cleaned = walk(JSON.parse(JSON.stringify(schema)));
-  if (!cleaned || typeof cleaned !== "object") return { type: "object", properties: {} };
-  return cleaned;
+/**
+ * Gemini 4 (Argon, Neon, Carbon, Hydrogen, …) removed the sampling parameters — forwarding
+ * `temperature` / `topP` / `topK` fails the request — and accepts only the low / medium / high
+ * thinking levels. Same test as the reference router.
+ * @param {string} model
+ * @returns {boolean}
+ */
+export function isGemini4Model(model) {
+  return /(?:^|\/)gemini-4(?:$|[-.])/i.test(String(model || ""));
+}
+
+/**
+ * Thought signature the reference router puts on the first functionCall of a replayed Antigravity
+ * model turn. Gemini 3+/4 reject a functionCall without one ("missing thought_signature"), and
+ * OpenAI-format clients never keep Google's signature in their history.
+ */
+const ANTIGRAVITY_THOUGHT_SIGNATURE =
+  "EuwGCukGAXLI2nxwZIq54WWSoL/YN0P3TsDZ7zRnLi8g0S4aVr2HUGxvaHKySuY6HAVzcE0GPGjXrytLIldxthSvfxgUlJh6Qa9Z+Oj5QZBlYdg6HaJ6yuY5R7waE6rdwBsRf7Ft2j3DJ9rMi9qhWFqApewYtPhls3VHtuvND3l8Rm09+lbAXQs6KKWEWrxNLKTBkfpMgXhRERc/TQRMZu1twAablm6/Zk1tsYRvfWKLsNbeKF+CCojJdXJKvnR/8Ouuoa+Y2Ti20hcW7aZIIjZDFYPU//k6Ybmhg69J/imbFai2ckhfLaisqdDkdoIiBJScTOUvYqP6AE9d4MsydSC+UlhIMk4hoP76R8vUSCZRMkjOaDXstf/QoVZKbt94wyRZgAJ1G0BqI8L5ow86kLpA4wJEtxsRGymOE4bKUvApveBakYDNM9APkf+LbtbzWSseGjoZcSlycF9iN8Q2XNYKRrHbv3Lr5Y8JjdH/5y/6SHkNehTEZugaeGnSPSyCTWto1kQgHpxdWmhkLfJGNUGLmue7Mesj4TSms4J33mRpYVhNB/J333FCqIP0hr/E7BkkjEn7yZ4X7SQlh+xKPurapsnHRwiKmtsilmEFrnTE9iQr+pMr6M29qqFNv1tr5yumbaJw8JW9sB15tNsRv+dW6BjNanbsKz7HCgKUBc8tGy+7YuhXzAfViyRefcjK7eZW0Fbyt7AbybJTKz78W8NH7ye6LAwzOebXpeZ4D43fNIt8bKh26qgduSQv/7o+pAflkuqHZ99YWgHQ8h8OkZFi3eOiSYjsjhdZ/czWOdoPI/OnqIldzMPF5YlrKBLFX8VhRKVmqgsmWf5PHGulHhMkVlS+XG2UIseGy69ARa93D78Gsa+1n1kJr7EEB7Rh+27vUMxVYLdz1yMSvE5nalTAlg/ZeG8+XQ0cHuAI3KbQpHW2Q++RdXfm5JzD5WdJZUU+Zn8t8UUn85BH4RxZLeE0qJikgSsKoYVBc6YhiMjhPgkR95ReimY4Z0xCJdRo1gjexOFeODZMpQF6Yxnoic7IrdgsFA3iePTbFnPp3IAM1fAThWhXJUn3QInUOTd5o1qmTmn6REbL15g/JQNl+dqUoPkhleeb2V3kjqp1okmO3wMZbPknR3S1LZNmlS72/iBQUm+n2b/RCn4PjmM2";
+
+/**
+ * Competing-client branding that makes Antigravity answer a fake "429 Resource has been exhausted"
+ * even with quota left. Same rule table as the reference router; applied to Antigravity only.
+ * @type {Array<{ from: string | RegExp, to: string | ((match: string) => string) }>}
+ */
+const ANTIGRAVITY_PROMPT_REWRITES = [
+  { from: "You are a Claude agent, built on Anthropic's Claude Agent SDK.", to: "" },
+  {
+    from: /You are Hermes(?: Agent)?(?:,\s*(?:an intelligent AI assistant|an AI assistant|an AI agent))?(?:,?\s*(?:built|created)\s+by\s+Nous Research)?\./gi,
+    to: "You are an AI assistant."
+  },
+  // Claude Code prepends this line; OpenAI-format proxies of Claude Code pass it through.
+  { from: /^x-anthropic-billing-header:[^\n]*(?:\r?\n)*/gim, to: "" },
+  {
+    from: /opencode/gi,
+    to: (m) => (m === "OpenCode" ? "Antigravity" : m === "OPENCODE" ? "ANTIGRAVITY" : "antigravity")
+  }
+];
+
+/**
+ * Remove the competing-client markers Antigravity flags from a system prompt.
+ * @param {string} text
+ * @returns {string}
+ */
+export function rewriteAntigravitySystemText(text) {
+  let out = String(text ?? "");
+  for (const { from, to } of ANTIGRAVITY_PROMPT_REWRITES) {
+    out = out.replaceAll(from, /** @type {any} */ (to));
+  }
+  return out;
+}
+
+/**
+ * The line a system prompt introduces the assistant with ("You are X, …"), for error notes.
+ * @param {string} text
+ * @returns {string}
+ */
+export function systemPromptIdentity(text) {
+  const s = String(text || "");
+  const intro = s.match(/(?:^|[.!?]\s+|\n)\s*(You are [^\n.!?]{1,120})/)?.[1];
+  const line = (intro || s.split(/\r?\n/).map((l) => l.trim()).find(Boolean) || "").trim();
+  return line.length > 100 ? `${line.slice(0, 99)}…` : line;
+}
+
+/**
+ * Gemini rejects a request whose functionCall ids repeat anywhere in the history, while OpenAI
+ * tool_call ids are only unique within one assistant turn. Hand out the next free id.
+ */
+function createToolCallIdUniquifier() {
+  const used = new Set();
+  return (id) => {
+    if (!id) return "";
+    let candidate = id;
+    let n = 2;
+    while (used.has(candidate)) candidate = `${id}-${n++}`;
+    used.add(candidate);
+    return candidate;
+  };
+}
+
+/**
+ * Cloud Code reads a `$ref` key inside functionResponse.response as a pointer and rejects the
+ * request; tool results that carry a JSON Schema document hit that. Rename the key.
+ * @param {any} value
+ * @param {number} [depth]
+ * @returns {any}
+ */
+function sanitizeFunctionResponsePayload(value, depth = 0) {
+  if (depth > 64) return value;
+  if (Array.isArray(value)) return value.map((v) => sanitizeFunctionResponsePayload(v, depth + 1));
+  if (!isPlainObject(value)) return value;
+  const out = {};
+  for (const [key, child] of Object.entries(value)) {
+    out[key === "$ref" ? "_ref" : key] = sanitizeFunctionResponsePayload(child, depth + 1);
+  }
+  return out;
+}
+
+/** @param {any} part */
+function isEmptyPart(part) {
+  if (!isPlainObject(part)) return true;
+  const keys = Object.keys(part);
+  return keys.length === 0 || (keys.length === 1 && keys[0] === "text" && !String(part.text ?? "").trim());
+}
+
+/**
+ * Make a Gemini history the API accepts (same rules as the reference router):
+ *  - empty parts dropped, adjacent same-role turns merged (parallel tool results become one turn);
+ *  - every functionCall answered in the following user turn (missing answers filled);
+ *  - Gemini 4: functionResponse parts last in their turn;
+ *  - the history starts and ends with a user turn.
+ * @param {any[]} contents
+ * @param {{ gemini4?: boolean }} [options]
+ * @returns {any[]}
+ */
+function normalizeGeminiContents(contents, options = {}) {
+  const out = [];
+  for (const c of contents) {
+    const parts = (Array.isArray(c?.parts) ? c.parts : []).filter((p) => !isEmptyPart(p));
+    if (!parts.length) continue;
+    const last = out.at(-1);
+    if (last && last.role === c.role) last.parts.push(...parts);
+    else out.push({ role: c.role, parts: [...parts] });
+  }
+
+  for (let i = 0; i < out.length; i++) {
+    if (out[i].role !== "model") continue;
+    const calls = out[i].parts.filter((p) => p.functionCall);
+    if (!calls.length) continue;
+    const trailing = i === out.length - 1;
+    let next = out[i + 1];
+    if (!next || next.role !== "user") {
+      next = { role: "user", parts: [] };
+      out.splice(i + 1, 0, next);
+    }
+    const responses = next.parts.filter((p) => p.functionResponse);
+    const answered = new Set(responses.map((p) => p.functionResponse.id).filter(Boolean));
+    let unnamedAnswers = responses.filter((p) => !p.functionResponse.id).length;
+    for (const call of calls) {
+      const { id, name } = call.functionCall;
+      if (id ? answered.has(id) : unnamedAnswers-- > 0) continue;
+      next.parts.push({
+        functionResponse: {
+          ...(id ? { id } : {}),
+          name,
+          response: { result: trailing ? "Continue." : "" }
+        }
+      });
+    }
+  }
+
+  if (options.gemini4) {
+    for (const turn of out) {
+      if (turn.role !== "user" || !turn.parts.some((p) => p.functionResponse)) continue;
+      turn.parts = [
+        ...turn.parts.filter((p) => !p.functionResponse),
+        ...turn.parts.filter((p) => p.functionResponse)
+      ];
+    }
+  }
+
+  if (out.length && out[0].role !== "user") out.unshift({ role: "user", parts: [{ text: "..." }] });
+  if (out.length && out.at(-1).role === "model") out.push({ role: "user", parts: [{ text: "Continue." }] });
+  return out;
+}
+
+/**
+ * Text of an OpenAI tool-message content (a string, or an array of text parts).
+ * @param {any} content
+ * @returns {string}
+ */
+function toolMessageText(content) {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((p) => (typeof p === "string" ? p : typeof p?.text === "string" ? p.text : ""))
+      .join("");
+  }
+  return content === null || content === undefined ? "" : JSON.stringify(content);
 }
 
 /**
  * Convert an OpenAI chat request body into Gemini `contents` + config.
+ *
+ * `options.model` is the upstream model (Gemini 4 drops the sampling parameters);
+ * `options.signature` is put on the first functionCall of every replayed model turn.
+ *
  * @param {any} body
+ * @param {{ model?: string, signature?: string }} [options]
  * @returns {{ contents: any[], systemInstruction?: any, generationConfig: any, tools?: any[] }}
  */
-export function openAIToGeminiContents(body) {
+export function openAIToGeminiContents(body, options = {}) {
   const messages = Array.isArray(body?.messages) ? body.messages : [];
+  const gemini4 = isGemini4Model(options.model || body?.model || "");
+  const signature = typeof options.signature === "string" ? options.signature : "";
   const contents = [];
   const systemTexts = [];
+  const nextCallId = createToolCallIdUniquifier();
+  /** Emitted functionCalls per OpenAI tool_call_id, oldest first, for pairing the results. */
+  const pendingCalls = new Map();
 
   /** @type {Record<string, string>} */
   const toolCallNames = {};
@@ -181,14 +518,29 @@ export function openAIToGeminiContents(body) {
     if (role === "assistant") {
       const parts = contentToParts(msg.content);
       if (Array.isArray(msg.tool_calls)) {
+        let signed = false;
         for (const tc of msg.tool_calls) {
           if (!tc?.function) continue;
-          parts.push({
+          const name = sanitizeFunctionName(tc.function.name);
+          const id = nextCallId(tc.id ? String(tc.id) : "");
+          const part = {
             functionCall: {
-              name: sanitizeFunctionName(tc.function.name),
+              ...(id ? { id } : {}),
+              name,
               args: tryParseJSON(tc.function.arguments || "{}") || {}
             }
-          });
+          };
+          // Only the first call of a parallel batch carries the signature (as Gemini emits it).
+          if (signature && !signed) {
+            part.thoughtSignature = signature;
+            signed = true;
+          }
+          parts.push(part);
+          if (tc.id) {
+            const key = String(tc.id);
+            if (!pendingCalls.has(key)) pendingCalls.set(key, []);
+            pendingCalls.get(key).push({ id, name });
+          }
         }
       }
       if (parts.length) contents.push({ role: "model", parts });
@@ -196,15 +548,22 @@ export function openAIToGeminiContents(body) {
     }
 
     if (role === "tool") {
-      const name = toolCallNames[msg.tool_call_id] || "tool";
-      const parsed = tryParseJSON(msg.content);
+      const key = String(msg.tool_call_id || "");
+      const paired = key ? pendingCalls.get(key)?.shift() : undefined;
+      const name = paired?.name || sanitizeFunctionName(toolCallNames[key] || "tool");
+      const text = toolMessageText(msg.content);
+      const parsed = tryParseJSON(text);
+      const responseId = paired?.id || key;
       contents.push({
         role: "user",
         parts: [
           {
             functionResponse: {
-              name: sanitizeFunctionName(name),
-              response: { result: parsed === null ? String(msg.content ?? "") : parsed }
+              ...(responseId ? { id: responseId } : {}),
+              name,
+              response: {
+                result: parsed === null ? text : sanitizeFunctionResponsePayload(parsed)
+              }
             }
           }
         ]
@@ -213,26 +572,35 @@ export function openAIToGeminiContents(body) {
   }
 
   const generationConfig = {};
-  if (typeof body?.temperature === "number") generationConfig.temperature = body.temperature;
-  if (typeof body?.top_p === "number") generationConfig.topP = body.top_p;
-  if (typeof body?.top_k === "number") generationConfig.topK = body.top_k;
+  if (!gemini4) {
+    if (typeof body?.temperature === "number") generationConfig.temperature = body.temperature;
+    if (typeof body?.top_p === "number") generationConfig.topP = body.top_p;
+    if (typeof body?.top_k === "number") generationConfig.topK = body.top_k;
+  }
   const maxTokens = body?.max_tokens ?? body?.max_completion_tokens;
   if (typeof maxTokens === "number") generationConfig.maxOutputTokens = maxTokens;
 
   let tools;
   if (Array.isArray(body?.tools) && body.tools.length) {
-    const functionDeclarations = body.tools
-      .filter((t) => t?.type === "function" && t.function?.name)
-      .map((t) => ({
-        name: sanitizeFunctionName(t.function.name),
+    const seen = new Set();
+    const functionDeclarations = [];
+    for (const t of body.tools) {
+      if (t?.type !== "function" || !t.function?.name) continue;
+      const name = sanitizeFunctionName(t.function.name);
+      // Two tools that sanitize to the same name fail the whole request.
+      if (seen.has(name)) continue;
+      seen.add(name);
+      functionDeclarations.push({
+        name,
         description: String(t.function.description || ""),
         parameters: cleanSchema(t.function.parameters)
-      }));
+      });
+    }
     if (functionDeclarations.length) tools = [{ functionDeclarations }];
   }
 
   return {
-    contents,
+    contents: normalizeGeminiContents(contents, { gemini4 }),
     ...(systemTexts.length
       ? { systemInstruction: { role: "user", parts: [{ text: systemTexts.join("\n\n") }] } }
       : {}),
@@ -337,8 +705,10 @@ export function resolveUpstreamModel(model, body, flavor, opts = {}) {
   if (flavor?.id === "antigravity") {
     if (!/^gemini-/i.test(upstream)) return { model: upstream, thinking: null, outputFloor: 0 };
     const nameTier = upstream.match(/-([a-z]+)$/i)?.[1]?.toLowerCase() || "";
-    const level = suffixLevel || nameTier;
+    let level = suffixLevel || nameTier;
     if (!GEMINI_THINKING_LEVELS.has(level)) return { model: upstream, thinking: null, outputFloor: 0 };
+    // Gemini 4 rejects thinkingLevel "minimal" with HTTP 400; its lowest level is "low".
+    if (level === "minimal" && isGemini4Model(upstream)) level = "low";
     return {
       model: upstream,
       thinking: { thinkingLevel: level, includeThoughts: level !== "minimal" },
@@ -375,7 +745,9 @@ function uuidFromSeed(seed) {
  *  - gemini_cli: `userAgent: "gemini-cli"`, `requestId: "req-<uuid>"`;
  *  - antigravity: `userAgent: "antigravity"`, `requestId: "agent/<conv>/<ts>/<traj>/<step>"`,
  *    friendly model ids mapped to their upstream ids, Gemini thinking as `thinkingLevel`, output
- *    tokens capped, and no `requestType` (sending one makes Google answer a detail-free 429).
+ *    tokens capped, no `requestType` (sending one makes Google answer a detail-free 429), replayed
+ *    tool calls signed, and the system prompt cleared of competing-client markers (those make
+ *    Google answer a fake "429 Resource has been exhausted" too).
  *
  * @param {string} model
  * @param {any} body OpenAI chat body
@@ -393,7 +765,15 @@ export function buildCloudCodeRequest(model, body, projectId, options = {}) {
     flavor,
     { exact: options.exactModel === true }
   );
-  const gemini = openAIToGeminiContents(body);
+  const gemini = openAIToGeminiContents(body, {
+    model: upstreamModel,
+    ...(isAntigravity ? { signature: ANTIGRAVITY_THOUGHT_SIGNATURE } : {})
+  });
+  if (isAntigravity && gemini.systemInstruction) {
+    const text = rewriteAntigravitySystemText(gemini.systemInstruction.parts[0].text).trim();
+    if (text) gemini.systemInstruction = { role: "user", parts: [{ text }] };
+    else delete gemini.systemInstruction;
+  }
 
   const generationConfig = { ...(gemini.generationConfig || {}) };
   if (thinking) {
@@ -466,9 +846,11 @@ export function candidateToOpenAIParts(candidate) {
     if (!part || typeof part !== "object") continue;
     if (typeof part.text === "string" && !part.thought) text += part.text;
     if (part.functionCall?.name) {
+      // Keep Google's id when it sends one, so the result pairs with the same call next turn.
+      const upstreamId = typeof part.functionCall.id === "string" ? part.functionCall.id.trim() : "";
       toolCalls.push({
         index: index++,
-        id: `call_${crypto.randomBytes(8).toString("hex")}`,
+        id: upstreamId || `call_${crypto.randomBytes(8).toString("hex")}`,
         type: "function",
         function: {
           name: part.functionCall.name,
@@ -495,6 +877,87 @@ export function unwrapCloudCodeResponse(data) {
     return data.response;
   }
   return data;
+}
+
+/**
+ * Fold a `streamGenerateContent` body into one Cloud Code response, so a non-streaming client can
+ * be served from the streaming RPC (the one the Antigravity IDE itself uses for chat). Adjacent
+ * text parts of the same kind are joined; function calls, finish reason and usage are kept.
+ * A body that is already one JSON object is returned parsed.
+ *
+ * @param {string} text SSE (`data: {...}` lines) or JSON
+ * @returns {any | null} `{ response: { candidates: [...], usageMetadata? } }`, `{ error }`, or null
+ */
+export function aggregateCloudCodeStream(text) {
+  const raw = String(text || "").trim();
+  if (!raw) return null;
+
+  let frames = null;
+  if (raw.startsWith("{") || raw.startsWith("[")) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return parsed;
+      frames = parsed;
+    } catch {
+      // Not one JSON document: read it as SSE below.
+    }
+  }
+  if (!frames) {
+    frames = [];
+    for (const line of raw.split(/\r?\n/)) {
+      const m = line.match(/^data:\s?(.*)$/);
+      const data = m ? m[1].trim() : "";
+      if (!data || data === "[DONE]") continue;
+      try {
+        frames.push(JSON.parse(data));
+      } catch {
+        // Skip a malformed frame; the rest still make a response.
+      }
+    }
+  }
+  if (!frames.length) return null;
+
+  const parts = [];
+  let finishReason = "";
+  let usageMetadata = null;
+  let error = null;
+  for (const frame of frames) {
+    if (frame?.error) {
+      error = frame.error;
+      continue;
+    }
+    const payload = unwrapCloudCodeResponse(frame);
+    const candidate = Array.isArray(payload?.candidates) ? payload.candidates[0] : null;
+    for (const part of Array.isArray(candidate?.content?.parts) ? candidate.content.parts : []) {
+      if (!isPlainObject(part)) continue;
+      const last = parts.at(-1);
+      const joinable =
+        typeof part.text === "string" &&
+        !part.functionCall &&
+        !part.thoughtSignature &&
+        last &&
+        typeof last.text === "string" &&
+        !last.functionCall &&
+        Boolean(last.thought) === Boolean(part.thought);
+      if (joinable) last.text += part.text;
+      else parts.push({ ...part });
+    }
+    if (candidate?.finishReason) finishReason = candidate.finishReason;
+    if (payload?.usageMetadata) usageMetadata = payload.usageMetadata;
+  }
+  if (error && !parts.length) return { error };
+
+  return {
+    response: {
+      candidates: [
+        {
+          content: { role: "model", parts },
+          ...(finishReason ? { finishReason } : {})
+        }
+      ],
+      ...(usageMetadata ? { usageMetadata } : {})
+    }
+  };
 }
 
 /**

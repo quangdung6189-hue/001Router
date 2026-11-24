@@ -2,7 +2,12 @@ import crypto from "node:crypto";
 import { upstreamFetch } from "./proxy.js";
 import { extractCodeAndState } from "./oauthFlows.js";
 import { isLoopbackHost } from "./security/headers.js";
-import { buildCloudCodeRequest, resolveUpstreamModel } from "./geminiCliTranslator.js";
+import {
+  aggregateCloudCodeStream,
+  buildCloudCodeRequest,
+  resolveUpstreamModel,
+  systemPromptIdentity
+} from "./geminiCliTranslator.js";
 import {
   classifyHostForSSRF,
   redactSecrets,
@@ -133,6 +138,7 @@ export const ANTIGRAVITY_MODEL_ALIASES = Object.freeze({
  *   quotaKind: "buckets" | "models",
  *   generateUrl: string,
  *   streamUrl: string,
+ *   chatAlwaysStream: boolean,
  *   envelopeUserAgent: string,
  *   maxOutputTokens: number,
  *   quotaSummaryUrl: string,
@@ -161,6 +167,7 @@ const CLOUD_CODE_FLAVORS = {
     quotaHeaders: (token) => buildGeminiCliHeaders(token),
     generateUrl: GEMINI_CLI_GENERATE_URL,
     streamUrl: GEMINI_CLI_STREAM_URL,
+    chatAlwaysStream: false,
     envelopeUserAgent: "gemini-cli",
     maxOutputTokens: 0,
     discoveryHeaders: (token) => buildGeminiCliDiscoveryHeaders(token),
@@ -189,6 +196,9 @@ const CLOUD_CODE_FLAVORS = {
     }),
     generateUrl: `${ANTIGRAVITY_CHAT_BASE}:generateContent`,
     streamUrl: `${ANTIGRAVITY_CHAT_BASE}:streamGenerateContent?alt=sse`,
+    // The IDE's agent chat only uses the streaming RPC; non-streaming clients are served by
+    // folding the stream (aggregateCloudCodeStream) instead of calling generateContent.
+    chatAlwaysStream: true,
     envelopeUserAgent: "antigravity",
     maxOutputTokens: ANTIGRAVITY_MAX_OUTPUT_TOKENS,
     // The Antigravity IDE sends no X-Goog-Api-Client / Client-Metadata on discovery.
@@ -675,9 +685,10 @@ export async function onboardGeminiCliUser(accessToken, tierId = "legacy-tier", 
  * @param {any} body
  * @param {string} token
  * @param {any} [dispatcher]
+ * @param {(text: string) => any} [parse] body parser (default JSON; chat streams are folded)
  * @returns {Promise<{ step: string, ok: boolean, status?: number, response?: any, error?: string }>}
  */
-async function probeCloudCode(fetchImpl, step, url, headers, body, token, dispatcher) {
+async function probeCloudCode(fetchImpl, step, url, headers, body, token, dispatcher, parse = JSON.parse) {
   try {
     const res = await fetchImpl(url, {
       method: "POST",
@@ -688,7 +699,7 @@ async function probeCloudCode(fetchImpl, step, url, headers, body, token, dispat
     const text = redactSecrets(await res.text().catch(() => ""), [token]);
     let response;
     try {
-      response = JSON.parse(text);
+      response = parse(text) ?? { _raw: text.slice(0, 800) };
     } catch {
       response = { _raw: text.slice(0, 800) };
     }
@@ -862,16 +873,19 @@ export async function diagnoseGeminiCliConnection(accessToken, options = {}) {
       variants.push({ probe: "C", label: "plan default model", envelope: planDefault });
     }
 
+    // Same RPC the router uses for chat (Antigravity: the streaming one, folded here).
+    const chatStream = flavor.chatAlwaysStream === true;
     const probes = [];
     for (const v of variants) {
       const r = await probeCloudCode(
         fetchImpl,
         "chatProbe",
-        flavor.generateUrl,
-        flavor.chatHeaders(token),
+        chatStream ? flavor.streamUrl : flavor.generateUrl,
+        { ...flavor.chatHeaders(token), accept: chatStream ? "text/event-stream" : "application/json" },
         v.envelope,
         token,
-        dispatcher
+        dispatcher,
+        chatStream ? aggregateCloudCodeStream : JSON.parse
       );
       const reply = (r.response?.response?.candidates?.[0]?.content?.parts || [])
         .filter((part) => typeof part?.text === "string" && !part.thought)
@@ -1393,6 +1407,67 @@ function withTimeout(promise, ms) {
   ]).finally(() => clearTimeout(timer));
 }
 
+const CAPACITY_RE = /capacity|high traffic|overloaded/i;
+
+/**
+ * One tiny chat to `model` with no system prompt and no tools, sent exactly the way the router
+ * sends chat (same RPC, headers and thinking config). Whether it passes tells "Google refuses this
+ * request" apart from "Google refuses this account / client / network".
+ *
+ * @param {string} accessToken
+ * @param {{
+ *   projectId?: string,
+ *   model?: string,
+ *   flavor?: string,
+ *   thinking?: Record<string, any> | null,
+ *   fetchImpl?: typeof globalThis.fetch,
+ *   dispatcher?: any
+ * }} [options] `thinking`: the thinking config the failed request carried (null = none)
+ * @returns {Promise<{ ok: boolean, status: number, error: string } | null>} null when it could not run
+ */
+export async function runCloudCodeBareProbe(accessToken, options = {}) {
+  const { projectId = "", model = "", fetchImpl = upstreamFetch, dispatcher } = options;
+  const flavor = getCloudCodeFlavor(options.flavor);
+  const token = String(accessToken || "").trim();
+  if (!token || !projectId || !model) return null;
+
+  const envelope = buildCloudCodeRequest(
+    model,
+    { messages: [{ role: "user", content: "Reply with the single word OK." }] },
+    projectId,
+    { flavor, exactModel: true }
+  );
+  if (options.thinking !== undefined) {
+    if (options.thinking) envelope.request.generationConfig.thinkingConfig = options.thinking;
+    else delete envelope.request.generationConfig.thinkingConfig;
+  }
+  const stream = flavor.chatAlwaysStream === true;
+  try {
+    const res = await fetchImpl(stream ? flavor.streamUrl : flavor.generateUrl, {
+      method: "POST",
+      headers: { ...flavor.chatHeaders(token), accept: stream ? "text/event-stream" : "application/json" },
+      body: JSON.stringify(envelope),
+      ...(dispatcher ? { dispatcher } : {})
+    });
+    const text = await res.text().catch(() => "");
+    if (res.ok) return { ok: true, status: res.status, error: "" };
+    let message = "";
+    try {
+      const parsed = JSON.parse(text);
+      message = (Array.isArray(parsed) ? parsed[0] : parsed)?.error?.message || "";
+    } catch {
+      message = text;
+    }
+    return {
+      ok: false,
+      status: res.status,
+      error: redactSecrets(String(message || "").replace(/\s+/g, " ").trim().slice(0, 200), [token])
+    };
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Explain a Cloud Code 429 in words the user can act on.
  *
@@ -1401,8 +1476,11 @@ function withTimeout(promise, ms) {
  * quota) and the weekly / 5-hour windows, and decide in this order:
  *  - "model":   the model is not on the account's plan (Google answers those with 429, not 404);
  *  - "quota":   the model's quota (paid plans) or its family window is at 0%;
- *  - "request": quota is left, so Google refused this request — blamed on the system prompt only
- *               when one was sent, otherwise on the account / client / network.
+ *  - quota left: with `isolate`, one bare test chat to the same model settles it —
+ *    "account" when Google refuses that too (the account / client / network is being limited),
+ *    "request" when it passes (Google refuses what this request carries, usually the system
+ *    prompt of another app). Without a test, "request" blames the system prompt only when one
+ *    was sent.
  *
  * @param {{
  *   errText?: string,
@@ -1412,12 +1490,17 @@ function withTimeout(promise, ms) {
  *   flavor?: string,
  *   tier?: string,
  *   hasSystemPrompt?: boolean,
+ *   systemText?: string,
+ *   hasTools?: boolean,
+ *   thinking?: Record<string, any> | null,
+ *   isolate?: boolean | { ok: boolean, status: number, error: string },
  *   fetchImpl?: typeof globalThis.fetch,
  *   dispatcher?: any,
  *   nowMs?: number,
- *   timeoutMs?: number
- * }} options
- * @returns {Promise<{ cause: "model" | "quota" | "capacity" | "request" | "unknown", resetAtMs: number | null, note: string, windows: any[], catalog: { models: any[], defaultModelId: string } }>}
+ *   timeoutMs?: number,
+ *   probeTimeoutMs?: number
+ * }} options `isolate`: true runs the bare test chat; a previous test result is reused as is.
+ * @returns {Promise<{ cause: "model" | "quota" | "capacity" | "request" | "account" | "unknown", resetAtMs: number | null, note: string, windows: any[], catalog: { models: any[], defaultModelId: string }, probe?: { ok: boolean, status: number, error: string } | null, probeFresh?: boolean }>}
  */
 export async function explainCloudCode429(options = {}) {
   const {
@@ -1427,7 +1510,11 @@ export async function explainCloudCode429(options = {}) {
     model = "",
     tier = "",
     hasSystemPrompt = false,
-    timeoutMs = 4000
+    systemText = "",
+    hasTools = false,
+    isolate = false,
+    timeoutMs = 4000,
+    probeTimeoutMs = 12_000
   } = options;
   const noCatalog = { models: [], defaultModelId: "" };
   const nowMs = options.nowMs ?? Date.now();
@@ -1435,7 +1522,7 @@ export async function explainCloudCode429(options = {}) {
   const parsed = parseCloudCodeRateLimit(errText, nowMs);
   const fmt = (ms) => new Date(ms).toISOString().replace(/\.\d{3}Z$/, "Z");
 
-  if (/capacity|high traffic|overloaded/i.test(`${parsed.reason} ${parsed.message}`)) {
+  if (CAPACITY_RE.test(`${parsed.reason} ${parsed.message}`)) {
     return {
       cause: "capacity",
       resetAtMs: null,
@@ -1525,14 +1612,63 @@ export async function explainCloudCode429(options = {}) {
     ...familyWindows.map((w) => `${w.label} ${Math.round(w.remainingFraction * 100)}%`),
     ...(modelQuota ? [`${model} ${Math.round(modelQuota.remainingFraction * 100)}%`] : [])
   ].join(", ");
+  const identity = hasSystemPrompt ? systemPromptIdentity(systemText) : "";
+  const quotaLeft = `Google still reports quota left (${left}), so this is not your quota running out`;
+
+  // Settle "this request" vs "this account" with one bare chat to the same model.
+  let probe = null;
+  let probeFresh = false;
+  if (isolate && typeof isolate === "object") {
+    probe = isolate;
+  } else if (isolate === true) {
+    probe = await withTimeout(
+      runCloudCodeBareProbe(accessToken, { ...common, model, thinking: options.thinking }),
+      probeTimeoutMs
+    );
+    probeFresh = Boolean(probe);
+  }
+  const base = { resetAtMs: null, windows, catalog, probe, probeFresh };
+
+  if (probe && !probe.ok && probe.status === 429) {
+    if (CAPACITY_RE.test(probe.error)) {
+      return {
+        ...base,
+        cause: "capacity",
+        note: `${quotaLeft}: Google has no free capacity for '${model}' right now (a server-side limit). Retry in a minute or use another model.`
+      };
+    }
+    return {
+      ...base,
+      cause: "account",
+      note: `${quotaLeft}, yet Google also refused a bare test request to '${model}' (no system prompt, no tools) with 429. So it is not about this request: Google is refusing '${model}' for this account, client or network right now. Code cannot change that: retry later, run 001Router on your own machine (home IP) with the same account, or use another account or provider.`
+    };
+  }
+  if (probe?.ok) {
+    const what = hasSystemPrompt
+      ? `Most likely the system prompt: Antigravity answers prompts that identify another app with a fake "quota" 429${
+          identity ? ` (this one starts "${identity}")` : ""
+        }. 001Router already strips the markers known to trigger it (Claude Agent SDK line, Claude Code billing line, OpenCode, Hermes); remove or rename that app's own name / persona in its system prompt, or route that app to another provider.`
+      : hasTools
+        ? "This request had no system prompt but carried tools: try it without them, or with fewer."
+        : "Try a shorter conversation, or another model from the plan.";
+    return {
+      ...base,
+      cause: "request",
+      note: `${quotaLeft}, and a bare test request to '${model}' on this account just worked: Google is refusing what this request carries, not the account. ${what}`
+    };
+  }
+  const probeFailed =
+    probe && !probe.ok
+      ? ` A bare test request to '${model}' failed as well (HTTP ${probe.status}${probe.error ? `: ${probe.error}` : ""}).`
+      : "";
   return {
+    ...base,
     cause: "request",
-    resetAtMs: null,
-    windows,
-    catalog,
     note: hasSystemPrompt
-      ? `Google still reports quota left (${left}), so this is not your quota running out: Google refused this particular request. Known trigger: a system prompt that identifies another client (e.g. Claude Code's "x-anthropic-billing-header" line, "Claude Agent SDK", "OpenCode"). Try the same model with no system prompt.`
-      : `Google still reports quota left (${left}), so this is not your quota running out, and this request had no system prompt: Google is refusing '${model}' for this account, client or network. Run 'Chẩn đoán kết nối' on the Antigravity card (it tries 3 variants) or use another model from the plan.`
+      ? `${quotaLeft}: Google refused this particular request. Known trigger: a system prompt that identifies another client (e.g. Claude Code's "x-anthropic-billing-header" line, "Claude Agent SDK", "OpenCode")${
+          identity ? `; this one starts "${identity}"` : ""
+        }. Try the same model with no system prompt.${probeFailed}`
+      : `${quotaLeft}, and this request had no system prompt: Google is refusing '${model}' for this account, client or network. Run 'Chẩn đoán kết nối' on the Antigravity card (it tries 3 variants) or use another model from the plan.${probeFailed}`
   };
 }
 

@@ -20,7 +20,14 @@ import {
   resolveCatalogModel,
   startGeminiCliOAuth
 } from "../server/geminiCliOAuth.js";
-import { buildCloudCodeRequest } from "../server/geminiCliTranslator.js";
+import {
+  aggregateCloudCodeStream,
+  buildCloudCodeRequest,
+  cloudCodeToOpenAIResponse,
+  isGemini4Model,
+  rewriteAntigravitySystemText,
+  systemPromptIdentity
+} from "../server/geminiCliTranslator.js";
 
 const AG_UA = /^antigravity\/hub\/\d+\.\d+\.\d+ /;
 const AGENT_REQUEST_ID = /^agent\/[0-9a-f-]{36}\/\d+\/[0-9a-f-]{36}\/\d+$/;
@@ -33,6 +40,27 @@ function json(status, body) {
     json: async () => body
   };
 }
+
+/** SSE body of a `streamGenerateContent` answer, one `data:` line per frame. */
+function sseText(frames) {
+  return frames.map((f) => `data: ${JSON.stringify(f)}\r\n\r\n`).join("");
+}
+
+/** makeGoogle-style answer of the streaming chat RPC. */
+function sse(frames) {
+  return { ok: true, status: 200, text: async () => sseText(frames) };
+}
+
+/** Stream frames of a short text answer. */
+const OK_FRAMES = [
+  { response: { candidates: [{ content: { role: "model", parts: [{ text: "O" }] } }] } },
+  {
+    response: {
+      candidates: [{ content: { role: "model", parts: [{ text: "K" }] }, finishReason: "STOP" }],
+      usageMetadata: { promptTokenCount: 4, candidatesTokenCount: 1 }
+    }
+  }
+];
 
 /** Fake Google: routes by RPC name (`loadCodeAssist`, …), `token` and `userinfo`. */
 function makeGoogle(routes) {
@@ -95,7 +123,9 @@ const GOOGLE_OK = {
     response: {
       candidates: [{ content: { role: "model", parts: [{ text: "OK" }] }, finishReason: "STOP" }]
     }
-  })
+  }),
+  // Antigravity chat (and its diagnostics) use the streaming RPC, like the IDE.
+  streamGenerateContent: sse(OK_FRAMES)
 };
 
 /** loadCodeAssist answer of a paid (Google AI Pro) account. */
@@ -354,6 +384,79 @@ describe("Antigravity flavor — OAuth + discovery", () => {
     assert.match(verdict.note, /claude-sonnet-5-5/);
     assert.deepEqual(verdict.catalog.models.map((m) => m.id), ["claude-sonnet-5-5", "no-quota-model"]);
   });
+
+  it("5g. quota left: the bare test chat decides account vs request (and capacity), or is reused", async () => {
+    /** Quota reads answer "quota left"; the test chat answers `probeAnswer`. */
+    const host = (probeAnswer) => {
+      const sent = [];
+      const google = makeGoogle({
+        ...GOOGLE_OK,
+        retrieveUserQuotaSummary: json(200, {
+          groups: [{ displayName: "Gemini", buckets: [{ window: "weekly", remainingFraction: 0.9 }] }]
+        }),
+        fetchAvailableModels: json(200, { models: { "gemini-4-neon-low": { quotaInfo: { remainingFraction: 1 } } } }),
+        streamGenerateContent: (body) => {
+          sent.push(body);
+          return probeAnswer;
+        }
+      });
+      return { fetchImpl: google.fetchImpl, sent, calls: google.calls };
+    };
+    const base = {
+      flavor: "antigravity",
+      accessToken: "ya29.x",
+      projectId: "ag-project-1",
+      model: "gemini-4-neon-low",
+      errText: "{}",
+      hasSystemPrompt: true,
+      systemText: "You are FlaggedApp, a terminal agent. Follow the rules.",
+      // Deliberately not what the model name implies: the test chat must copy what was sent.
+      thinking: { thinkingLevel: "high", includeThoughts: true }
+    };
+    const refused = json(429, { error: { code: 429, message: "Resource has been exhausted (e.g. check quota)." } });
+
+    const account = host(refused);
+    const a = await explainCloudCode429({ ...base, isolate: true, fetchImpl: account.fetchImpl });
+    assert.equal(a.cause, "account");
+    assert.equal(a.probeFresh, true);
+    assert.deepEqual(a.probe, { ok: false, status: 429, error: "Resource has been exhausted (e.g. check quota)." });
+    assert.match(a.note, /Gemini \(Weekly\) 90%/);
+    assert.match(a.note, /refused a bare test request to 'gemini-4-neon-low'/);
+    // The test chat: same model + thinking, nothing of the request's own, on the streaming RPC.
+    assert.equal(account.sent.length, 1);
+    assert.equal(account.sent[0].model, "gemini-4-neon-low");
+    assert.deepEqual(account.sent[0].request.generationConfig.thinkingConfig, base.thinking);
+    const noThinking = host(refused);
+    await explainCloudCode429({ ...base, thinking: null, isolate: true, fetchImpl: noThinking.fetchImpl });
+    assert.equal(noThinking.sent[0].request.generationConfig.thinkingConfig, undefined);
+    assert.equal(account.sent[0].request.systemInstruction, undefined);
+    assert.equal(account.sent[0].project, "ag-project-1");
+    assert.match(account.calls.find((c) => c.rpc === "streamGenerateContent").url, /\?alt=sse$/);
+
+    const works = host(sse(OK_FRAMES));
+    const r = await explainCloudCode429({ ...base, isolate: true, fetchImpl: works.fetchImpl });
+    assert.equal(r.cause, "request");
+    assert.match(r.note, /just worked/);
+    assert.match(r.note, /this one starts "You are FlaggedApp, a terminal agent"/);
+
+    const busy = host(json(429, { error: { code: 429, message: "High traffic: no capacity for this model." } }));
+    assert.equal((await explainCloudCode429({ ...base, isolate: true, fetchImpl: busy.fetchImpl })).cause, "capacity");
+
+    // A cached result is reused: no second test chat.
+    const cached = host(sse(OK_FRAMES));
+    const again = await explainCloudCode429({ ...base, isolate: a.probe, fetchImpl: cached.fetchImpl });
+    assert.equal(again.cause, "account");
+    assert.equal(again.probeFresh, false);
+    assert.equal(cached.sent.length, 0);
+
+    // No test asked for: the old wording, the prompt named as the known trigger.
+    const plain = host(sse(OK_FRAMES));
+    const p = await explainCloudCode429({ ...base, fetchImpl: plain.fetchImpl });
+    assert.equal(p.cause, "request");
+    assert.match(p.note, /system prompt that identifies another client/);
+    assert.match(p.note, /this one starts "You are FlaggedApp, a terminal agent"/);
+    assert.equal(plain.sent.length, 0);
+  });
 });
 
 describe("Antigravity flavor — chat envelope", () => {
@@ -443,6 +546,235 @@ describe("Antigravity flavor — chat envelope", () => {
       assert.equal(env.model, "gemini-2.5-pro");
       assert.equal(env.request.generationConfig.thinkingConfig, undefined);
     }
+  });
+
+  it("8b. competing-client markers are removed from Antigravity system prompts only", () => {
+    const header = "x-anthropic-billing-header: cc_version=2.1.275.f15; cc_entrypoint=cli;";
+    assert.equal(
+      rewriteAntigravitySystemText(`${header}\n\nYou are Claude Code, Anthropic's official CLI for Claude.`),
+      "You are Claude Code, Anthropic's official CLI for Claude."
+    );
+    assert.equal(
+      rewriteAntigravitySystemText(`Preamble\n${header}\nRest`),
+      "Preamble\nRest"
+    );
+    assert.equal(
+      rewriteAntigravitySystemText("You are a Claude agent, built on Anthropic's Claude Agent SDK. Be brief."),
+      " Be brief."
+    );
+    assert.equal(
+      rewriteAntigravitySystemText("You are Hermes Agent, an intelligent AI assistant created by Nous Research. Help."),
+      "You are an AI assistant. Help."
+    );
+    assert.equal(
+      rewriteAntigravitySystemText("OpenCode / opencode / OPENCODE"),
+      "Antigravity / antigravity / ANTIGRAVITY"
+    );
+    assert.equal(rewriteAntigravitySystemText("You are a helpful assistant."), "You are a helpful assistant.");
+
+    const flagged = {
+      messages: [
+        { role: "system", content: `${header}\nYou are opencode.` },
+        { role: "user", content: "hi" }
+      ]
+    };
+    const ag = buildCloudCodeRequest("gemini-3.8-flash-low", flagged, "p", { flavor: getCloudCodeFlavor("antigravity") });
+    assert.equal(ag.request.systemInstruction.parts[0].text, "You are antigravity.");
+    assert.equal(ag.request.systemInstruction.role, "user");
+    // Gemini CLI is a different backend: its prompt is sent untouched.
+    const cli = buildCloudCodeRequest("gemini-2.5-pro", flagged, "p", { flavor: getCloudCodeFlavor("gemini_cli") });
+    assert.equal(cli.request.systemInstruction.parts[0].text, `${header}\nYou are opencode.`);
+
+    assert.equal(systemPromptIdentity("Rules first.\nYou are Kilo Code, a highly skilled engineer. Go."), "You are Kilo Code, a highly skilled engineer");
+    assert.equal(systemPromptIdentity("Answer in English."), "Answer in English.");
+    assert.equal(systemPromptIdentity(`You are ${"x".repeat(200)}`).length, 100);
+  });
+
+  it("8c. Gemini 4 gets no sampling params and no 'minimal' level; Gemini 3 keeps them", () => {
+    const flavor = getCloudCodeFlavor("antigravity");
+    const sampled = { messages: [{ role: "user", content: "hi" }], temperature: 0.7, top_p: 0.9, top_k: 40 };
+    assert.equal(isGemini4Model("gemini-4-neon-low"), true);
+    assert.equal(isGemini4Model("gemini-3.8-flash-low"), false);
+    assert.equal(isGemini4Model("gemini-40-x"), false);
+
+    const g4 = buildCloudCodeRequest("gemini-4-neon-low", sampled, "p", { flavor, exactModel: true });
+    for (const k of ["temperature", "topP", "topK"]) assert.equal(k in g4.request.generationConfig, false, k);
+    assert.equal(g4.request.generationConfig.thinkingConfig.thinkingLevel, "low");
+
+    const g3 = buildCloudCodeRequest("gemini-3.8-flash-low", sampled, "p", { flavor, exactModel: true });
+    assert.equal(g3.request.generationConfig.temperature, 0.7);
+    assert.equal(g3.request.generationConfig.topP, 0.9);
+
+    const minimal4 = buildCloudCodeRequest("gemini-4-argon-minimal", sampled, "p", { flavor, exactModel: true });
+    assert.equal(minimal4.request.generationConfig.thinkingConfig.thinkingLevel, "low");
+    const minimal3 = buildCloudCodeRequest("gemini-3.8-flash-minimal", sampled, "p", { flavor, exactModel: true });
+    assert.equal(minimal3.request.generationConfig.thinkingConfig.thinkingLevel, "minimal");
+  });
+
+  it("8d. tool history: ids pair calls with results, the first call is signed, parallel results share a turn", () => {
+    const flavor = getCloudCodeFlavor("antigravity");
+    const history = {
+      messages: [
+        { role: "user", content: "list and read" },
+        {
+          role: "assistant",
+          content: "",
+          tool_calls: [
+            { id: "call_a", type: "function", function: { name: "list_dir", arguments: '{"path":"."}' } },
+            { id: "call_b", type: "function", function: { name: "read_file", arguments: '{"path":"a"}' } }
+          ]
+        },
+        { role: "tool", tool_call_id: "call_a", content: '{"files":["a"],"$ref":"#/x"}' },
+        { role: "tool", tool_call_id: "call_b", content: [{ type: "text", text: "body of a" }] },
+        { role: "user", content: "and again" },
+        // OpenAI ids are only unique per turn: the same id again must not collide upstream.
+        { role: "assistant", tool_calls: [{ id: "call_a", type: "function", function: { name: "list_dir", arguments: "{}" } }] },
+        { role: "tool", tool_call_id: "call_a", content: "second listing" }
+      ]
+    };
+    const env = buildCloudCodeRequest("gemini-4-neon-low", history, "p", { flavor, exactModel: true });
+    const turns = env.request.contents;
+    assert.deepEqual(turns.map((t) => t.role), ["user", "model", "user", "model", "user"]);
+
+    const [callA, callB] = turns[1].parts.filter((p) => p.functionCall);
+    assert.equal(callA.functionCall.id, "call_a");
+    assert.equal(callB.functionCall.id, "call_b");
+    assert.ok(callA.thoughtSignature, "Gemini 3+/4 reject an unsigned replayed call");
+    assert.equal(callB.thoughtSignature, undefined, "only the first call of a batch is signed");
+
+    // Both results in one user turn, followed by the user's text; Gemini 4 wants responses last.
+    const answers = turns[2].parts;
+    assert.deepEqual(answers.map((p) => (p.functionResponse ? p.functionResponse.id : "text")), ["text", "call_a", "call_b"]);
+    assert.deepEqual(answers[1].functionResponse.response, { result: { files: ["a"], _ref: "#/x" } });
+    assert.deepEqual(answers[2].functionResponse.response, { result: "body of a" });
+    assert.equal(answers[2].functionResponse.name, "read_file");
+
+    const repeat = turns[3].parts.find((p) => p.functionCall);
+    assert.equal(repeat.functionCall.id, "call_a-2");
+    assert.equal(turns[4].parts[0].functionResponse.id, "call_a-2");
+
+    // Gemini CLI: ids too, but no Antigravity signature.
+    const cli = buildCloudCodeRequest("gemini-2.5-pro", history, "p", { flavor: getCloudCodeFlavor("gemini_cli") });
+    const cliCall = cli.request.contents[1].parts.find((p) => p.functionCall);
+    assert.equal(cliCall.functionCall.id, "call_a");
+    assert.equal(cliCall.thoughtSignature, undefined);
+  });
+
+  it("8e. a call without a result is answered, and the history starts and ends with the user", () => {
+    const env = buildCloudCodeRequest(
+      "gemini-3.8-flash-low",
+      {
+        messages: [
+          { role: "assistant", content: "Hello, how can I help?" },
+          { role: "user", content: "run it" },
+          { role: "assistant", tool_calls: [{ id: "c1", type: "function", function: { name: "run", arguments: "{}" } }] },
+          { role: "user", content: "never mind" },
+          { role: "assistant", content: "ok" }
+        ]
+      },
+      "p",
+      { flavor: getCloudCodeFlavor("antigravity"), exactModel: true }
+    );
+    const turns = env.request.contents;
+    assert.equal(turns[0].role, "user");
+    assert.equal(turns.at(-1).role, "user");
+    const afterCall = turns[turns.findIndex((t) => t.parts.some((p) => p.functionCall)) + 1];
+    assert.ok(afterCall.parts.some((p) => p.functionResponse?.id === "c1"), "missing result filled in");
+    for (const t of turns) {
+      for (const p of t.parts) assert.ok(!(Object.keys(p).length === 1 && p.text === ""), "no empty text part");
+    }
+  });
+
+  it("8f. tool schemas keep only what Gemini accepts, without touching parameter names", () => {
+    const env = buildCloudCodeRequest(
+      "gemini-3.8-flash-low",
+      {
+        messages: [{ role: "user", content: "hi" }],
+        tools: [
+          {
+            type: "function",
+            function: {
+              name: "make_page",
+              parameters: {
+                type: "object",
+                $defs: { Size: { type: "string", enum: ["s", "m"] } },
+                properties: {
+                  title: { type: "string", title: "Title", minLength: 1, default: "x", "x-ui": "big" },
+                  format: { type: ["string", "null"], format: "uri", examples: ["https://a"] },
+                  size: { $ref: "#/$defs/Size" },
+                  count: { type: "integer", enum: [1, 2], minimum: 1, maximum: 9 },
+                  pages: { type: "integer", minimum: 1, maximum: 9, pattern: "^\\d+$" },
+                  glob: { type: "string", pattern: "^\\*\\*/" },
+                  tags: { type: "array", uniqueItems: true },
+                  meta: { allOf: [{ properties: { a: { type: "string" } }, required: ["a"] }] },
+                  options: { type: "object", additionalProperties: true }
+                },
+                required: ["title", "missing"]
+              }
+            }
+          },
+          { type: "function", function: { name: "now" } },
+          { type: "function", function: { name: "now", parameters: { type: "object" } } }
+        ]
+      },
+      "p",
+      { flavor: getCloudCodeFlavor("antigravity"), exactModel: true }
+    );
+    const decls = env.request.tools[0].functionDeclarations;
+    assert.deepEqual(decls.map((d) => d.name), ["make_page", "now"], "duplicate names dropped");
+    const { properties: props, required } = decls[0].parameters;
+    assert.deepEqual(Object.keys(props), ["title", "format", "size", "count", "pages", "glob", "tags", "meta", "options"]);
+    assert.deepEqual(props.title, { type: "string" });
+    assert.deepEqual(props.format, { type: "string" });
+    assert.deepEqual(props.size, { type: "string", enum: ["s", "m"] });
+    // Gemini enums are strings only; a range no longer applies to them.
+    assert.deepEqual(props.count, { type: "string", enum: ["1", "2"] });
+    assert.deepEqual(props.pages, { type: "integer", minimum: 1, maximum: 9 });
+    assert.deepEqual(props.glob, { type: "string", pattern: "^\\*\\*/" });
+    assert.deepEqual(props.tags, { type: "array", items: { type: "string" } });
+    assert.deepEqual(props.meta, { type: "object", properties: { a: { type: "string" } }, required: ["a"] });
+    assert.deepEqual(Object.keys(props.options.properties), ["reason"], "empty object gets a placeholder");
+    assert.deepEqual(required, ["title"]);
+    assert.deepEqual(decls[1].parameters.required, ["reason"], "no-arg tool gets the placeholder too");
+    assert.doesNotMatch(JSON.stringify(decls), /\$ref|\$defs|minLength|default|examples|uniqueItems|additionalProperties|x-ui|"format":"uri"/);
+  });
+
+  it("8g. a streamed answer folds into one response: text joined, calls and usage kept", () => {
+    const folded = aggregateCloudCodeStream(
+      sseText([
+        { response: { candidates: [{ content: { parts: [{ text: "thinking", thought: true }] } }] } },
+        { response: { candidates: [{ content: { parts: [{ text: "Hel" }] } }] } },
+        { response: { candidates: [{ content: { parts: [{ text: "lo" }] } }] } },
+        {
+          response: {
+            candidates: [
+              {
+                content: { parts: [{ functionCall: { id: "toolu_1", name: "run", args: { a: 1 } }, thoughtSignature: "sig" }] },
+                finishReason: "STOP"
+              }
+            ],
+            usageMetadata: { promptTokenCount: 9, candidatesTokenCount: 4 }
+          }
+        }
+      ]) + "data: [DONE]\n\n"
+    );
+    const parts = folded.response.candidates[0].content.parts;
+    assert.equal(parts.length, 3);
+    assert.equal(parts[1].text, "Hello");
+    assert.equal(folded.response.candidates[0].finishReason, "STOP");
+    assert.equal(folded.response.usageMetadata.promptTokenCount, 9);
+
+    const out = cloudCodeToOpenAIResponse(folded, "m");
+    assert.equal(out.choices[0].message.content, "Hello");
+    assert.equal(out.choices[0].message.tool_calls[0].id, "toolu_1", "Google's call id is kept");
+    assert.equal(out.choices[0].finish_reason, "tool_calls");
+
+    // A plain JSON body, an error frame and an empty body.
+    assert.equal(aggregateCloudCodeStream('{"response":{"candidates":[]}}').response.candidates.length, 0);
+    assert.deepEqual(aggregateCloudCodeStream(sseText([{ error: { code: 429, message: "x" } }])), {
+      error: { code: 429, message: "x" }
+    });
+    assert.equal(aggregateCloudCodeStream(""), null);
   });
 });
 
@@ -558,14 +890,18 @@ describe("Antigravity routes + /v1 chat", () => {
     const upstream = [];
     app.locals.cloudCodeFetchImpl = async (url, init = {}) => {
       upstream.push({ url: String(url), headers: init.headers, body: JSON.parse(init.body) });
+      // The streaming RPC answers in frames; a non-streaming client gets them folded into one reply.
       return new Response(
-        JSON.stringify({
-          response: {
-            candidates: [{ content: { role: "model", parts: [{ text: "xin chào" }] }, finishReason: "STOP" }],
-            usageMetadata: { promptTokenCount: 3, candidatesTokenCount: 2 }
+        sseText([
+          { response: { candidates: [{ content: { role: "model", parts: [{ text: "xin " }] } }] } },
+          {
+            response: {
+              candidates: [{ content: { role: "model", parts: [{ text: "chào" }] }, finishReason: "STOP" }],
+              usageMetadata: { promptTokenCount: 3, candidatesTokenCount: 2 }
+            }
           }
-        }),
-        { status: 200, headers: { "content-type": "application/json" } }
+        ]),
+        { status: 200, headers: { "content-type": "text/event-stream" } }
       );
     };
 
@@ -581,11 +917,19 @@ describe("Antigravity routes + /v1 chat", () => {
       const text = await res.text();
       assert.equal(res.status, 200, text);
       const out = JSON.parse(text);
+      assert.equal(out.object, "chat.completion");
       assert.equal(out.choices[0].message.content, "xin chào");
+      assert.equal(out.usage.prompt_tokens, 3);
+      assert.equal(out.usage.completion_tokens, 2);
 
       assert.equal(upstream.length, 1);
       const call = upstream[0];
-      assert.equal(call.url, "https://daily-cloudcode-pa.googleapis.com/v1internal:generateContent");
+      // The IDE's agent chat only uses the streaming RPC, so the router does too.
+      assert.equal(
+        call.url,
+        "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse"
+      );
+      assert.equal(call.headers.accept, "text/event-stream");
       assert.match(call.headers["user-agent"], AG_UA);
       assert.equal(call.headers.authorization, "Bearer ya29.ag-access-token");
       assert.equal(call.body.userAgent, "antigravity");
@@ -646,9 +990,9 @@ describe("Antigravity routes + /v1 chat", () => {
     const seen = [];
     const google = makeGoogle({
       ...GOOGLE_OK,
-      generateContent: (body) => {
+      streamGenerateContent: (body) => {
         seen.push(body);
-        return GOOGLE_OK.generateContent;
+        return GOOGLE_OK.streamGenerateContent;
       }
     });
     app.locals.googleOAuthFetchImpl = google.fetchImpl;
@@ -715,9 +1059,16 @@ describe("Antigravity routes + /v1 chat", () => {
     });
   }
 
-  /** Fake daily host: Gemini chat answers 429, Claude 200; quota endpoints answer the given data. */
-  function chat429(summary, liveModels = PLAN) {
+  /** Default refusal of the fake host: every Gemini chat (Claude answers). */
+  const refuseGemini = (body) => !String(body.model).startsWith("claude");
+
+  /**
+   * Fake daily host: chat answers 429 when `refuse(body)` says so and 200 (a stream) otherwise;
+   * quota endpoints answer the given data. `chats` keeps every chat body sent.
+   */
+  function chat429(summary, liveModels = PLAN, refuse = refuseGemini) {
     const calls = [];
+    const chats = [];
     const impl = async (url, init = {}) => {
       const u = String(url);
       calls.push(u);
@@ -730,15 +1081,14 @@ describe("Antigravity routes + /v1 chat", () => {
         );
         return new Response(JSON.stringify({ models }), { status: 200 });
       }
-      if (u.includes(":generateContent")) {
-        const model = JSON.parse(init.body).model;
-        if (model.startsWith("claude")) {
-          return new Response(
-            JSON.stringify({
-              response: { candidates: [{ content: { parts: [{ text: "claude ok" }] }, finishReason: "STOP" }] }
-            }),
-            { status: 200, headers: { "content-type": "application/json" } }
-          );
+      if (/:(?:stream)?[gG]enerateContent/.test(u)) {
+        const body = JSON.parse(init.body);
+        chats.push(body);
+        if (!refuse(body)) {
+          return new Response(sseText(OK_FRAMES), {
+            status: 200,
+            headers: { "content-type": "text/event-stream" }
+          });
         }
         return new Response(
           JSON.stringify({
@@ -749,14 +1099,23 @@ describe("Antigravity routes + /v1 chat", () => {
       }
       throw new Error(`unexpected fetch ${u}`);
     };
-    return { impl, calls };
+    return { impl, calls, chats };
   }
 
-  const chat = (model) =>
+  /** Forget per-model cooldowns, strikes and bare-test results between tests. */
+  function resetCloudCodeState() {
+    const svc = app.locals.routerService;
+    svc.modelCooldowns.clear();
+    svc.modelCooldownNotes.clear();
+    svc.cloudCodeStrikes.clear();
+    svc.cloudCodeProbes.clear();
+  }
+
+  const chat = (model, messages = [{ role: "user", content: "hi" }]) =>
     fetch(`${baseUrl}/v1/chat/completions`, {
       method: "POST",
       headers: { authorization: `Bearer ${routerKey}`, "content-type": "application/json" },
-      body: JSON.stringify({ model: `antigravity/${model}`, messages: [{ role: "user", content: "hi" }] })
+      body: JSON.stringify({ model: `antigravity/${model}`, messages })
     });
 
   it("14. a bare 429 with the Gemini window empty says so, and only that model cools down", async () => {
@@ -788,13 +1147,15 @@ describe("Antigravity routes + /v1 chat", () => {
       // Another family on the same account still works: the key itself is not cooled down.
       const claude = await chat("claude-sonnet-5-5");
       assert.equal(claude.status, 200, await claude.text());
+      // The window was empty, so no bare test chat was needed.
+      assert.equal(fake.chats.filter((b) => b.model.startsWith("gemini")).length, 1);
     } finally {
       delete app.locals.cloudCodeFetchImpl;
-      app.locals.router?.modelCooldowns?.clear?.();
+      resetCloudCodeState();
     }
   });
 
-  it("15. a bare 429 while quota is left blames the request and does not cool down", async () => {
+  it("15. quota left: a bare test chat that is refused too blames the account and pauses the model", async () => {
     const fake = chat429({
       groups: [
         { displayName: "Gemini 4 Argon", buckets: [{ window: "weekly", remainingFraction: 0.1 }] },
@@ -809,14 +1170,37 @@ describe("Antigravity routes + /v1 chat", () => {
       assert.match(text, /not your quota/);
       assert.match(text, /Gemini \(Weekly\) 80%/);
       assert.doesNotMatch(text, /Argon/, "Argon is a separate pool");
-      // No system prompt was sent, so the prompt is not blamed.
-      assert.match(text, /had no system prompt/);
+      assert.match(text, /refused a bare test request to 'gemini-3\.8-flash-low'/);
+      assert.match(text, /this account, client or network/);
+      assert.match(text, /Paused this model on this account for 15 minutes/);
       assert.doesNotMatch(text, /x-anthropic-billing-header/);
 
+      // The test chat is the same model, sent the same way, with nothing of the request's own.
+      assert.equal(fake.chats.length, 2);
+      const [sent, bare] = fake.chats;
+      assert.equal(bare.model, sent.model);
+      assert.deepEqual(bare.request.generationConfig.thinkingConfig, sent.request.generationConfig.thinkingConfig);
+      assert.equal(bare.request.systemInstruction, undefined);
+      assert.equal(bare.request.tools, undefined);
+      const bareUrl = fake.calls.filter((u) => u.includes("GenerateContent"))[1];
+      assert.match(bareUrl, /:streamGenerateContent\?alt=sse$/);
+
+      // Paused for 15 minutes (not the plain 60 s cooldown), only this model.
+      const pauses = [...app.locals.routerService.modelCooldowns.values()];
+      assert.equal(pauses.length, 1);
+      assert.ok(pauses[0] > Date.now() + 14 * 60_000, "paused for ~15 min");
+
+      // Paused: answered locally with the reason, Google is not called again.
+      const before = fake.calls.length;
       const again = await chat("gemini-3.8-flash-low");
-      assert.doesNotMatch(await again.text(), /in cooldown/, "nothing to wait for");
+      const againText = await again.text();
+      assert.equal(again.status, 429);
+      assert.match(againText, /in cooldown/);
+      assert.match(againText, /bare test request/);
+      assert.equal(fake.calls.length, before);
     } finally {
       delete app.locals.cloudCodeFetchImpl;
+      resetCloudCodeState();
     }
   });
 
@@ -824,46 +1208,93 @@ describe("Antigravity routes + /v1 chat", () => {
     groups: [{ displayName: "Gemini", buckets: [{ window: "weekly", remainingFraction: 0.8 }] }]
   };
 
-  it("15b. with a system prompt, a 429 while quota is left names the prompt as a known trigger", async () => {
-    app.locals.cloudCodeFetchImpl = chat429(QUOTA_LEFT).impl;
+  /** A host that only refuses chats whose system prompt names "FlaggedApp" (bare chats pass). */
+  const refuseFlagged = (body) =>
+    JSON.stringify(body.request?.systemInstruction || "").includes("FlaggedApp");
+  const FLAGGED = [
+    { role: "system", content: "You are FlaggedApp, an autonomous coding agent.\nUse the tools." },
+    { role: "user", content: "hi" }
+  ];
+
+  it("15b. quota left + a bare test chat that works: the note blames the request and quotes the prompt", async () => {
+    const fake = chat429(QUOTA_LEFT, PLAN, refuseFlagged);
+    app.locals.cloudCodeFetchImpl = fake.impl;
     try {
-      const res = await fetch(`${baseUrl}/v1/chat/completions`, {
-        method: "POST",
-        headers: { authorization: `Bearer ${routerKey}`, "content-type": "application/json" },
-        body: JSON.stringify({
-          model: "antigravity/gemini-3.8-flash-high",
-          messages: [
-            { role: "system", content: "You are a Claude agent, built on Anthropic's Claude Agent SDK." },
-            { role: "user", content: "hi" }
-          ]
-        })
-      });
+      const res = await chat("gemini-3.8-flash-high", FLAGGED);
       const text = await res.text();
       assert.equal(res.status, 429, text);
-      assert.match(text, /system prompt that identifies another client/);
+      assert.match(text, /bare test request to 'gemini-3\.8-flash-high' on this account just worked/);
+      assert.match(text, /not the account/);
+      assert.match(text, /this one starts \\"You are FlaggedApp, an autonomous coding agent\\"/);
+      assert.doesNotMatch(text, /Paused/, "one refusal does not pause a model the account can use");
+
+      // The same request again: the test result is reused, not run a second time.
+      const chatsBefore = fake.chats.length;
+      const again = await (await chat("gemini-3.8-flash-high", FLAGGED)).text();
+      assert.match(again, /just worked/);
+      assert.equal(fake.chats.length, chatsBefore + 1, "only the request itself, no second test chat");
+
+      // A request without the flagged prompt goes through on the same model.
+      const plain = await chat("gemini-3.8-flash-high");
+      assert.equal(plain.status, 200, await plain.text());
     } finally {
       delete app.locals.cloudCodeFetchImpl;
+      resetCloudCodeState();
     }
   });
 
-  it("16. three 429s in a row while quota is left pause that model for 15 minutes", async () => {
-    const fake = chat429(QUOTA_LEFT);
+  it("16. three refused requests in a row while the account works pause that model for 15 minutes", async () => {
+    const fake = chat429(QUOTA_LEFT, PLAN, refuseFlagged);
     app.locals.cloudCodeFetchImpl = fake.impl;
     try {
-      const a = await (await chat("gemini-3.8-flash-medium")).text();
-      const b = await (await chat("gemini-3.8-flash-medium")).text();
+      const a = await (await chat("gemini-3.8-flash-medium", FLAGGED)).text();
+      const b = await (await chat("gemini-3.8-flash-medium", FLAGGED)).text();
       assert.doesNotMatch(a + b, /Paused/);
-      const c = await (await chat("gemini-3.8-flash-medium")).text();
-      assert.match(c, /Paused this model on this account for 15 minutes/);
+      const c = await (await chat("gemini-3.8-flash-medium", FLAGGED)).text();
+      assert.match(c, /Paused this model on this account for 15 minutes after 3 refusals/);
+      // 3 requests + 1 bare test chat (cached for the next two).
+      assert.equal(fake.chats.length, 4);
 
       const before = fake.calls.length;
-      const d = await chat("gemini-3.8-flash-medium");
+      const d = await chat("gemini-3.8-flash-medium", FLAGGED);
       const dText = await d.text();
       assert.equal(d.status, 429);
       assert.match(dText, /in cooldown/);
       assert.equal(fake.calls.length, before, "paused: Google is not called");
     } finally {
       delete app.locals.cloudCodeFetchImpl;
+      resetCloudCodeState();
+    }
+  });
+
+  it("16b. the system prompt Google sees has the competing-client markers removed", async () => {
+    const fake = chat429(QUOTA_LEFT, PLAN, () => false);
+    app.locals.cloudCodeFetchImpl = fake.impl;
+    try {
+      const res = await chat("gemini-3.8-flash-medium", [
+        {
+          role: "system",
+          content:
+            "x-anthropic-billing-header: cc_version=2.1.275.f15; cc_entrypoint=cli;\nYou are a Claude agent, built on Anthropic's Claude Agent SDK."
+        },
+        { role: "user", content: "hi" }
+      ]);
+      assert.equal(res.status, 200, await res.text());
+      // Nothing but markers: no system instruction is sent at all.
+      assert.equal(fake.chats[0].request.systemInstruction, undefined);
+
+      const oc = await chat("gemini-3.8-flash-medium", [
+        { role: "system", content: "You are opencode, an interactive CLI tool. See https://opencode.ai" },
+        { role: "user", content: "hi" }
+      ]);
+      assert.equal(oc.status, 200, await oc.text());
+      assert.equal(
+        fake.chats[1].request.systemInstruction.parts[0].text,
+        "You are antigravity, an interactive CLI tool. See https://antigravity.ai"
+      );
+    } finally {
+      delete app.locals.cloudCodeFetchImpl;
+      resetCloudCodeState();
     }
   });
 

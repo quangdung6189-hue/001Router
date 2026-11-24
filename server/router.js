@@ -11,8 +11,9 @@ import {
   resolveCatalogModel,
   syncProviderModelsWithCatalog
 } from "./geminiCliOAuth.js";
-import { buildCloudCodeRequest } from "./geminiCliTranslator.js";
 import {
+  aggregateCloudCodeStream,
+  buildCloudCodeRequest,
   cloudCodeChunkToOpenAI,
   cloudCodeToOpenAIResponse,
   unwrapCloudCodeResponse
@@ -79,6 +80,12 @@ const CLOUD_CODE_CATALOG_RECHECK_MS = 60 * 60 * 1000;
 const CLOUD_CODE_STRIKE_LIMIT = 3;
 const CLOUD_CODE_STRIKE_WINDOW_MS = 60_000;
 const CLOUD_CODE_STRIKE_PAUSE_MS = 15 * 60_000;
+/**
+ * A 429 while quota is left triggers one bare test chat to the same model (explainCloudCode429
+ * `isolate`); its result is reused for this long per key+model instead of testing again.
+ */
+const CLOUD_CODE_PROBE_TTL_MS = 10 * 60_000;
+const CLOUD_CODE_PROBE_CACHE_MAX = 500;
 
 /**
  * Parse a direct `"providerSlug/upstreamModel"` target on the first `/`.
@@ -604,6 +611,8 @@ export class RouterService {
     this.modelCooldownNotes = new Map();
     /** Same key as modelCooldowns -> { count, since } of Cloud Code 429s while quota was left. */
     this.cloudCodeStrikes = new Map();
+    /** Same key as modelCooldowns -> { at, probe } result of the bare test chat after such a 429. */
+    this.cloudCodeProbes = new Map();
     /** @type {Map<string, { idx: number, count: number }>} */
     this.stickyCursors = new Map();
     /** @type {Map<string, number>} */
@@ -1347,6 +1356,8 @@ export class RouterService {
               let effectiveUrl = upstreamUrl;
               /** Project + upstream model actually sent, for explaining a Cloud Code 429. */
               let cloudCodeCtx = null;
+              /** A non-streaming client served from the streaming Cloud Code RPC. */
+              let cloudCodeFoldStream = false;
               let effectiveBody = JSON.stringify(upstreamPayload);
               let effectiveHeaders = headers;
               if (isGeminiCliKey) {
@@ -1469,7 +1480,11 @@ export class RouterService {
                   }
                 }
 
-                effectiveUrl = isStream ? cloudCodeFlavor.streamUrl : cloudCodeFlavor.generateUrl;
+                // Antigravity chat always uses the streaming RPC (as its IDE does); a non-streaming
+                // client gets the folded stream (see the 2xx branch below).
+                cloudCodeFoldStream = !isStream && cloudCodeFlavor.chatAlwaysStream === true;
+                const upstreamStream = isStream || cloudCodeFoldStream;
+                effectiveUrl = upstreamStream ? cloudCodeFlavor.streamUrl : cloudCodeFlavor.generateUrl;
                 const envelope = buildCloudCodeRequest(
                   catalogModel || target.upstreamModel,
                   savedBody,
@@ -1479,14 +1494,18 @@ export class RouterService {
                 cloudCodeCtx = {
                   projectId: cloudProject,
                   model: envelope.model,
-                  hasSystemPrompt: Boolean(envelope.request?.systemInstruction)
+                  hasSystemPrompt: Boolean(envelope.request?.systemInstruction),
+                  // What was actually sent (after the competing-client rewrite), for the 429 note.
+                  systemText: String(envelope.request?.systemInstruction?.parts?.[0]?.text || "").slice(0, 4000),
+                  hasTools: Boolean(envelope.request?.tools?.length),
+                  thinking: envelope.request?.generationConfig?.thinkingConfig || null
                 };
                 effectiveBody = JSON.stringify(envelope);
                 effectiveHeaders = {
                   ...cloudCodeFlavor.chatHeaders(resolvedSecret, {
                     model: target.upstreamModel
                   }),
-                  accept: isStream ? "text/event-stream" : "application/json"
+                  accept: upstreamStream ? "text/event-stream" : "application/json"
                 };
               }
 
@@ -1526,7 +1545,12 @@ export class RouterService {
                 const secrets = this._allSecretKeys();
                 if (resolvedSecret) secrets.push(resolvedSecret);
                 // Cloud Code 429s are often a bare "Resource has been exhausted"; read the live
-                // quota so the message says whether it is the quota or this request.
+                // quota so the message says whether it is the quota or this request. While quota
+                // is left, one bare test chat (cached per key+model) tells request from account.
+                const probeKey = keyEntry.id
+                  ? this._modelCooldownKey(provider.id, keyEntry.id, target.upstreamModel)
+                  : "";
+                const cachedProbe = probeKey ? this.cloudCodeProbes.get(probeKey) : null;
                 const cloudCodeVerdict =
                   isGeminiCliKey && upstreamRes.status === 429
                     ? await explainCloudCode429({
@@ -1537,18 +1561,37 @@ export class RouterService {
                         flavor: cloudCodeFlavor.id,
                         tier: keyEntry?.oauthMeta?.tier || "",
                         hasSystemPrompt: cloudCodeCtx?.hasSystemPrompt === true,
+                        systemText: cloudCodeCtx?.systemText || "",
+                        hasTools: cloudCodeCtx?.hasTools === true,
+                        thinking: cloudCodeCtx?.thinking ?? null,
+                        isolate:
+                          cachedProbe && Date.now() - cachedProbe.at < CLOUD_CODE_PROBE_TTL_MS
+                            ? cachedProbe.probe
+                            : Boolean(probeKey && !clientAborted),
                         ...(cloudCodeFetch ? { fetchImpl: cloudCodeFetch } : {}),
                         ...(dispatcher ? { dispatcher } : {})
                       }).catch(() => null)
                     : null;
+                if (cloudCodeVerdict?.probeFresh && probeKey) {
+                  this.cloudCodeProbes.delete(probeKey);
+                  this.cloudCodeProbes.set(probeKey, { at: Date.now(), probe: cloudCodeVerdict.probe });
+                  while (this.cloudCodeProbes.size > CLOUD_CODE_PROBE_CACHE_MAX) {
+                    this.cloudCodeProbes.delete(this.cloudCodeProbes.keys().next().value);
+                  }
+                }
                 // The live read found the model missing from the plan: keep that catalog so the
                 // next request is refused locally with the real model list.
                 if (cloudCodeVerdict?.cause === "model" && !keyEntry.isAnonymous) {
                   await this._storeCloudCodeCatalog(provider.id, keyEntry.id, cloudCodeVerdict.catalog);
                 }
-                // Strike breaker for 429s while quota is left (see CLOUD_CODE_STRIKE_LIMIT).
+                // Strike breaker for 429s while quota is left (see CLOUD_CODE_STRIKE_LIMIT). When
+                // even a bare test chat is refused, pausing right away spares Google more calls.
                 let strikePause = false;
-                if (cloudCodeVerdict?.cause === "request" && keyEntry.id) {
+                if (cloudCodeVerdict?.cause === "account" && keyEntry.id) {
+                  strikePause = true;
+                  this.cloudCodeStrikes.delete(probeKey);
+                  cloudCodeVerdict.note += " Paused this model on this account for 15 minutes.";
+                } else if (cloudCodeVerdict?.cause === "request" && keyEntry.id) {
                   const sk = this._modelCooldownKey(provider.id, keyEntry.id, target.upstreamModel);
                   const now = Date.now();
                   const prev = this.cloudCodeStrikes.get(sk);
@@ -1662,15 +1705,32 @@ export class RouterService {
                 const jsonText = await upstreamRes.text();
                 clearTimeout(timer);
                 let upstreamJson;
+                let invalidBodyMsg = "Upstream returned invalid JSON";
                 try {
-                  upstreamJson = JSON.parse(jsonText);
+                  if (cloudCodeFoldStream) {
+                    // Non-streaming client, streaming RPC: fold the SSE frames into one response.
+                    upstreamJson = aggregateCloudCodeStream(jsonText);
+                    if (upstreamJson?.error) {
+                      invalidBodyMsg = `upstream ${provider.slug} stream error: ${sanitizeSecrets(
+                        String(upstreamJson.error.message || upstreamJson.error.status || "unknown").slice(0, 300),
+                        [...this._allSecretKeys(), ...(resolvedSecret ? [resolvedSecret] : [])]
+                      )}`;
+                      throw new Error(invalidBodyMsg);
+                    }
+                    if (!upstreamJson) {
+                      invalidBodyMsg = "Upstream stream ended without a response";
+                      throw new Error(invalidBodyMsg);
+                    }
+                  } else {
+                    upstreamJson = JSON.parse(jsonText);
+                  }
                 } catch {
                   const attemptLatency = Date.now() - attemptStart;
                   this.liveEvents?.markRequestEnd(provider.slug, {
                     model: `${provider.slug}/${target.upstreamModel}`,
                     status: 502,
                     latencyMs: attemptLatency,
-                    error: "Upstream returned invalid JSON"
+                    error: invalidBodyMsg
                   });
                   markedActive = false;
                   attemptTrail.push({
@@ -1680,10 +1740,10 @@ export class RouterService {
                     keyId: keyEntry.id,
                     status: 502,
                     latencyMs: attemptLatency,
-                    error: "Upstream returned invalid JSON"
+                    error: invalidBodyMsg
                   });
                   lastErrorStatus = 502;
-                  lastErrorMessage = "Upstream returned invalid JSON";
+                  lastErrorMessage = invalidBodyMsg;
                   break;
                 }
 
@@ -1751,6 +1811,9 @@ export class RouterService {
                     this._modelCooldownKey(provider.id, keyEntry.id, target.upstreamModel)
                   );
                   this.cloudCodeStrikes.delete(
+                    this._modelCooldownKey(provider.id, keyEntry.id, target.upstreamModel)
+                  );
+                  this.cloudCodeProbes.delete(
                     this._modelCooldownKey(provider.id, keyEntry.id, target.upstreamModel)
                   );
                 }
@@ -2005,6 +2068,9 @@ export class RouterService {
                     this._modelCooldownKey(provider.id, keyEntry.id, target.upstreamModel)
                   );
                   this.cloudCodeStrikes.delete(
+                    this._modelCooldownKey(provider.id, keyEntry.id, target.upstreamModel)
+                  );
+                  this.cloudCodeProbes.delete(
                     this._modelCooldownKey(provider.id, keyEntry.id, target.upstreamModel)
                   );
                 }

@@ -49,6 +49,11 @@ Each provider has:
    - Retries/falls back across combo targets (and across available keys within a provider) on HTTP `429`, `5xx`, timeout, network error, or quota/billing error (`401`/`402`/`403` when quota/auth fails on a key puts that key into 60s cooldown and tries next key/target).
    - For `429` or `401`: put the failing API key on a **60-second cooldown** (`Date.now() + 60_000`) and try another active key in the same provider before moving to the next combo target.
    - **Streaming rule**: Fallback is ONLY allowed **before the first byte/chunk is sent** to the downstream client. Once SSE headers/data are flushed, abort cleanly on upstream failure.
+   - **Antigravity (Cloud Code) keys**:
+     - Chat always uses `v1internal:streamGenerateContent?alt=sse` (the RPC the Antigravity IDE uses); a non-streaming client receives the folded stream as one `chat.completion`.
+     - The system prompt sent to Google has competing-client markers removed (Claude Code's `x-anthropic-billing-header` line, the Claude Agent SDK line, `opencode` → `antigravity`, the Hermes identity): Google answers those with a fake `429 Resource has been exhausted`. Gemini CLI keys are left untouched.
+     - Gemini 4 models get no `temperature` / `top_p` / `top_k` and no `minimal` thinking level.
+     - A `429` while the live quota still has room triggers one bare test chat to the same model (no system prompt, no tools; result cached 10 min per key+model). Refused too → the error says Google is limiting the account / client / network and the model pauses for 15 min. Passed → the error blames this request and quotes the system prompt's first "You are …" line; three such refusals within 60 s pause the model for 15 min.
 
 ---
 
