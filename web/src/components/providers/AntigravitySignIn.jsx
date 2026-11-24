@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
-import { BadgeCheck, CheckCircle2, ExternalLink, RefreshCw, Terminal } from 'lucide-react';
+import { CheckCircle2, ExternalLink, RefreshCw, Terminal } from 'lucide-react';
 import { CopyButton } from '../CopyButton';
+import { CloudCodeQuota, formatReset, pctOf, windowLabel } from './CloudCodeQuota';
 
 const AG = {
   name: 'Antigravity',
@@ -19,64 +20,9 @@ const AG = {
     'Đây là client không chính thức: Google có thể chặn hoặc hạn chế tài khoản dùng nó qua công cụ bên thứ ba. Nên dùng tài khoản phụ để thử.',
 };
 
-const FAMILY_LABELS = {
-  gemini_argon: 'Gemini 4 Argon',
-  gemini: 'Gemini',
-  claude_gpt: 'Claude & GPT',
-};
-
-function windowLabel(w) {
-  const family = FAMILY_LABELS[w?.family] || w?.label || 'Quota';
-  return `${family} · ${w?.window === 'weekly' ? 'tuần' : '5 giờ'}`;
-}
-
-function pctOf(fraction) {
-  return Math.max(0, Math.min(100, Math.round((Number(fraction) || 0) * 100)));
-}
-
-/** "24/11 15:30 (còn 3 giờ 12 phút)" — empty when the time is missing or invalid. */
-function formatReset(resetTime, nowMs = Date.now()) {
-  const ms = Date.parse(resetTime || '');
-  if (!Number.isFinite(ms)) return '';
-  const when = new Date(ms).toLocaleString('vi-VN', {
-    day: '2-digit',
-    month: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-  });
-  const left = ms - nowMs;
-  if (left <= 0) return when;
-  const mins = Math.round(left / 60000);
-  const days = Math.floor(mins / 1440);
-  const hours = Math.floor((mins % 1440) / 60);
-  const rest = mins % 60;
-  const parts = days ? [`${days} ngày`, `${hours} giờ`] : hours ? [`${hours} giờ`, `${rest} phút`] : [`${rest} phút`];
-  return `${when} (còn ${parts.join(' ')})`;
-}
-
-function QuotaBar({ label, fraction, resetTime }) {
-  const pct = pctOf(fraction);
-  const tone = pct >= 50 ? 'bg-emerald-500' : pct >= 20 ? 'bg-amber-500' : 'bg-red-500';
-  const reset = formatReset(resetTime);
-  return (
-    <div className="space-y-0.5">
-      <div className="flex items-center justify-between gap-2 text-[10.5px]">
-        <span className="truncate text-[var(--text-primary)]">{label}</span>
-        <span className="shrink-0 font-semibold text-[var(--text-secondary)]">{pct}%</span>
-      </div>
-      <div className="h-1.5 overflow-hidden rounded-full bg-[var(--bg-subtle)]">
-        <div className={`h-full rounded-full ${tone}`} style={{ width: `${pct}%` }} />
-      </div>
-      {reset ? (
-        <div className="text-[10px] text-[var(--text-muted)]">Reset: {reset}</div>
-      ) : null}
-    </div>
-  );
-}
-
 /**
- * Connected Cloud Code accounts: plan, project and the live quota stored on the key.
- * On the Antigravity free tier only the weekly / 5-hour windows are meaningful.
+ * Connected Antigravity accounts: plan, quota windows and the models on the plan.
+ * On the free tier only the weekly / 5-hour windows are meaningful.
  */
 function ConnectedAccounts({ accounts, accent, busy, onRefresh }) {
   const nowMs = Date.now();
@@ -105,94 +51,36 @@ function ConnectedAccounts({ accounts, accent, busy, onRefresh }) {
 
       {accounts.map((acc) => {
         const meta = acc.oauthMeta || {};
-        const windows = Array.isArray(meta.quotaWindows) ? meta.quotaWindows : [];
-        const buckets = Array.isArray(meta.quotaBuckets) ? meta.quotaBuckets : [];
         const cooling = Boolean(acc.cooldownUntil) && acc.cooldownUntil > nowMs;
         return (
           <div
             key={acc.id || meta.email}
-            className="space-y-2 rounded-md border border-[var(--border-subtle)] bg-[var(--bg-subtle)] p-2.5"
+            className="rounded-md border border-[var(--border-subtle)] bg-[var(--bg-subtle)] p-2.5"
           >
-            <div className="flex flex-wrap items-start justify-between gap-2">
-              <div className="min-w-0">
-                <div className="flex items-center gap-1.5">
-                  <BadgeCheck className="h-3.5 w-3.5 shrink-0" style={{ color: accent }} aria-hidden="true" />
-                  <span className="truncate text-xs font-semibold text-[var(--text-primary)]">
-                    {meta.email || acc.label || 'Google Account'}
+            <CloudCodeQuota
+              tierLabel={meta.tierLabel}
+              email={meta.email || acc.label}
+              projectId={meta.projectId}
+              windows={Array.isArray(meta.quotaWindows) ? meta.quotaWindows : []}
+              models={Array.isArray(meta.availableModels) ? meta.availableModels : []}
+              buckets={Array.isArray(meta.quotaBuckets) ? meta.quotaBuckets : []}
+              perModelHidden={meta.perModelHidden === true}
+              checkedAt={meta.checkedAt}
+              accent={accent}
+              extra={
+                acc.enabled === false ? (
+                  <span className="rounded-full bg-white/10 px-1.5 py-0.5 text-[10px] text-[var(--text-muted)]">
+                    Tắt
                   </span>
-                  {acc.enabled === false ? (
-                    <span className="rounded-full bg-white/10 px-1.5 py-0.5 text-[10px] text-[var(--text-muted)]">
-                      Tắt
-                    </span>
-                  ) : cooling ? (
-                    <span className="rounded-full border border-amber-500/35 bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-amber-400">
-                      Cooldown
-                    </span>
-                  ) : null}
-                </div>
-                {meta.projectId ? (
-                  <code className="mt-0.5 block truncate pl-5 text-[10px] text-[var(--text-muted)]">
-                    {meta.projectId}
-                  </code>
-                ) : (
-                  <p className="mt-0.5 pl-5 text-[10px] text-red-400">
-                    Chưa có project Cloud Code — chạy chẩn đoán bên dưới.
-                  </p>
-                )}
-              </div>
-              <span
-                className="rounded-full border px-2 py-0.5 text-[10.5px] font-semibold"
-                style={{ color: accent, borderColor: `${accent}66`, backgroundColor: `${accent}1f` }}
-              >
-                {meta.tierLabel || 'Chưa đọc được gói'}
-              </span>
-            </div>
-
-            {windows.length ? (
-              <div className="grid gap-2 sm:grid-cols-2">
-                {windows.map((w) => (
-                  <QuotaBar
-                    key={w.id}
-                    label={windowLabel(w)}
-                    fraction={w.remainingFraction}
-                    resetTime={w.resetTime}
-                  />
-                ))}
-              </div>
-            ) : (
-              <p className="text-[10.5px] text-[var(--text-muted)]">
-                Chưa có quota tuần / 5 giờ — bấm “Làm mới gói & quota”.
-              </p>
-            )}
-
-            {buckets.length ? (
-              <details>
-                <summary className="cursor-pointer text-[10.5px] font-medium text-[var(--text-secondary)]">
-                  Quota theo model ({buckets.length})
-                </summary>
-                <div className="mt-1.5 grid gap-2 sm:grid-cols-2">
-                  {buckets.map((b) => (
-                    <QuotaBar
-                      key={b.modelId}
-                      label={b.modelId}
-                      fraction={b.remainingFraction}
-                      resetTime={b.resetTime}
-                    />
-                  ))}
-                </div>
-              </details>
-            ) : meta.perModelHidden ? (
-              <p className="text-[10.5px] leading-relaxed text-[var(--text-muted)]">
-                Gói miễn phí: con số theo từng model Google trả về không phải giới hạn thật nên được ẩn —
-                giới hạn thật là quota tuần / 5 giờ ở trên.
-              </p>
-            ) : null}
-
-            {meta.checkedAt ? (
-              <div className="text-[10px] text-[var(--text-muted)]">
-                Cập nhật: {formatReset(meta.checkedAt, Number.POSITIVE_INFINITY) || meta.checkedAt}
-              </div>
-            ) : null}
+                ) : cooling ? (
+                  <span className="rounded-full border border-amber-500/35 bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-amber-400">
+                    Cooldown
+                  </span>
+                ) : !meta.projectId ? (
+                  <span className="text-[10px] text-red-400">Chưa có project Cloud Code — chạy chẩn đoán.</span>
+                ) : null
+              }
+            />
           </div>
         );
       })}
@@ -201,8 +89,10 @@ function ConnectedAccounts({ accounts, accent, busy, onRefresh }) {
 }
 
 /**
- * Plain-language verdict of a diagnostics run: is it the account, the quota, or the request?
- * @returns {{ tone: 'success' | 'error' | 'info', text: string } | null}
+ * Plain-language verdict of a diagnostics run, read from the probe matrix:
+ * A = the model as the router sends it, B = same model without thinking config,
+ * C = the plan's default model, bare.
+ * @returns {{ tone: 'success' | 'error', text: string } | null}
  */
 function diagnosisVerdict(d) {
   if (!d || d.error) return null;
@@ -220,17 +110,49 @@ function diagnosisVerdict(d) {
       text: 'Google chưa cấp project Cloud Code cho tài khoản này nên chưa thể chat.',
     };
   }
-  const probe = steps.find((s) => s.step === 'chatProbe');
-  if (!probe) return null;
+  const probes = steps.find((s) => s.step === 'chatProbe')?.probes || [];
+  if (!probes.length) return null;
+  const by = Object.fromEntries(probes.map((p) => [p.probe, p]));
+  const { A, B, C } = by;
   const windows = steps.find((s) => s.step === 'retrieveUserQuotaSummary')?.windows || [];
   const empty = windows.filter((w) => Number(w.remainingFraction) <= 0);
-  if (probe.ok) {
+  const catalog = steps.find((s) => s.step === 'fetchAvailableModels')?.catalog || [];
+  const planList = catalog.length
+    ? ` Model trong gói: ${catalog.slice(0, 8).join(', ')}${catalog.length > 8 ? ', …' : ''}.`
+    : '';
+
+  if (probes.every((p) => p.ok)) {
     return {
       tone: 'success',
-      text: `Chat thử ${probe.model} (không system prompt, không tools) THÀNH CÔNG — tài khoản và quota dùng được. Nếu công cụ của bạn vẫn bị 429 thì Google đang từ chối nội dung request của công cụ đó, thường là system prompt nhận diện client khác (Claude Code, OpenCode, Claude Agent SDK…).`,
+      text: `Cả ${probes.length} request thử đều chạy (${probes
+        .map((p) => p.model)
+        .join(', ')}) — tài khoản, quota và định dạng request đều ổn. Nếu công cụ của bạn vẫn bị 429 thì do nội dung request của công cụ đó (system prompt / tools) hoặc nó gọi model không có trong gói.`,
     };
   }
-  if (probe.status === 429) {
+  if (A && !A.ok) {
+    if (A.inCatalog === false) {
+      return {
+        tone: 'error',
+        text: `${A.model} KHÔNG có trong gói của tài khoản này — Google trả 429 cho model ngoài gói.${
+          C?.ok ? ` Model ${C.model} trong gói chạy được.` : ''
+        }${planList} Hãy gọi một model trong danh sách.`,
+      };
+    }
+    if (B?.ok) {
+      return {
+        tone: 'error',
+        text: `${A.model} chỉ lỗi khi kèm cấu hình thinking (${JSON.stringify(A.thinking)}); bỏ cấu hình đó thì chạy. Gửi kết quả này để chỉnh lại định dạng request.`,
+      };
+    }
+    if (C?.ok) {
+      return {
+        tone: 'error',
+        text: `${A.model} bị Google từ chối (HTTP ${A.status ?? '—'}) nhưng ${C.model} trong gói chạy được → dùng model khác trong gói.${planList}`,
+      };
+    }
+  }
+  const failed = probes.filter((p) => !p.ok);
+  if (failed.length && failed.every((p) => p.status === 429)) {
     if (empty.length) {
       const resets = empty.map((w) => formatReset(w.resetTime)).filter(Boolean);
       return {
@@ -240,18 +162,20 @@ function diagnosisVerdict(d) {
         }. Chờ reset hoặc dùng model nhóm khác (Gemini ↔ Claude & GPT).`,
       };
     }
-    if (windows.length) {
-      return {
-        tone: 'error',
-        text: `Google từ chối cả request tối giản dù quota vẫn còn (${windows
-          .map((w) => `${windowLabel(w)} ${pctOf(w.remainingFraction)}%`)
-          .join(', ')}). Tài khoản hoặc client đang bị Google hạn chế — code không sửa được, thử tài khoản khác.`,
-      };
-    }
-    return { tone: 'error', text: 'Chat thử bị 429 và không đọc được quota tuần / 5 giờ.' };
+    return {
+      tone: 'error',
+      text: `Google từ chối mọi request thử (${failed.map((p) => p.model).join(', ')}) dù quota vẫn còn${
+        windows.length
+          ? ` (${windows.map((w) => `${windowLabel(w)} ${pctOf(w.remainingFraction)}%`).join(', ')})`
+          : ''
+      }. Đây là giới hạn phía Google cho tài khoản / client / IP này — code không sửa được. Thử chạy 001Router trên máy (IP nhà) với cùng tài khoản, hoặc dùng tài khoản khác.`,
+    };
   }
-  const msg = probe.response?.error?.message || probe.error || '';
-  return { tone: 'error', text: `Chat thử lỗi HTTP ${probe.status ?? '—'}${msg ? `: ${msg}` : ''}` };
+  const first = failed[0];
+  return {
+    tone: 'error',
+    text: `Chat thử ${first.model} lỗi HTTP ${first.status ?? '—'}${first.error ? `: ${first.error}` : ''}`,
+  };
 }
 
 /**

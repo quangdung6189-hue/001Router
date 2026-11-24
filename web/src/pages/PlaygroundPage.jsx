@@ -72,7 +72,12 @@ export function PlaygroundPage() {
       setKeys(loadedKeys);
       setProviders(loadedProvs);
       setCombos(loadedCombos);
-      setRequireKey(settingsRes?.settings?.requireKey !== false);
+      // `effective` reflects public deployments, where a key is required whatever the stored setting.
+      setRequireKey(
+        typeof settingsRes?.effective?.requireKey === 'boolean'
+          ? settingsRes.effective.requireKey
+          : settingsRes?.settings?.requireKey !== false
+      );
 
       setSelectedKey((prev) => {
         if (prev) return prev;

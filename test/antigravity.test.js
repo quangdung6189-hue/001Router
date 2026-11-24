@@ -14,8 +14,10 @@ import {
   fetchGeminiCliQuota,
   getCloudCodeFlavor,
   getCloudCodeFlavorForKey,
+  parseAntigravityModelCatalog,
   parseAntigravityQuotaSummary,
   parseCloudCodeRateLimit,
+  resolveCatalogModel,
   startGeminiCliOAuth
 } from "../server/geminiCliOAuth.js";
 import { buildCloudCodeRequest } from "../server/geminiCliTranslator.js";
@@ -294,11 +296,63 @@ describe("Antigravity flavor — OAuth + discovery", () => {
     });
     assert.equal(unreadable.cause, "unknown");
     assert.match(unreadable.note, /Chẩn đoán kết nối/);
-    assert.equal(called, 1);
+    assert.equal(called, 2, "quota summary + per-model catalog, read in parallel");
 
     // Gemini CLI has no summary endpoint: nothing is fetched.
     const cli = await explainCloudCode429({ flavor: "gemini_cli", accessToken: "ya29.x", errText: "{}" });
     assert.deepEqual([cli.cause, cli.note], ["unknown", ""]);
+  });
+
+  it("5d. model catalog: agent order, image / tab / internal split, default model", () => {
+    const { models, defaultModelId } = parseAntigravityModelCatalog({
+      models: {
+        "gemini-2.5-flash": { quotaInfo: { remainingFraction: 1 } },
+        "gemini-4-neon-medium": { displayName: "Gemini 4 Neon (Medium)", quotaInfo: { remainingFraction: 0.99, resetTime: "R" } },
+        "claude-sonnet-5-5-medium": { quotaInfo: {} },
+        "gemini-3.1-flash-image": { quotaInfo: { remainingFraction: 1 } },
+        tab_flash_lite_preview: { quotaInfo: { remainingFraction: 1 } },
+        chat_20706: {},
+        "internal-x": { isInternal: true }
+      },
+      defaultAgentModelId: "gemini-4-neon-medium",
+      agentModelSorts: [{ groups: [{ modelIds: ["claude-sonnet-5-5-medium", "gemini-4-neon-medium"] }] }]
+    });
+    assert.deepEqual(
+      models.map((m) => [m.id, m.kind, m.remainingFraction]),
+      [
+        ["claude-sonnet-5-5-medium", "chat", 0],
+        ["gemini-4-neon-medium", "chat", 0.99],
+        ["gemini-2.5-flash", "other", 1],
+        ["gemini-3.1-flash-image", "image", 1]
+      ]
+    );
+    assert.equal(models[1].label, "Gemini 4 Neon (Medium)");
+    assert.equal(defaultModelId, "gemini-4-neon-medium");
+    assert.deepEqual(parseAntigravityModelCatalog(null), { models: [], defaultModelId: "" });
+  });
+
+  it("5e. requested ids resolve onto the plan: exact, alias, effort tier, default tier", () => {
+    const plan = ["gemini-3.8-flash-medium", "gemini-3.8-flash-high", "gemini-4-neon-medium", "claude-sonnet-5-5"].map((id) => ({ id }));
+    assert.equal(resolveCatalogModel("claude-sonnet-5-5", plan), "claude-sonnet-5-5", "a plan id is never re-aliased");
+    assert.equal(resolveCatalogModel("gemini-3.8-flash", plan), "gemini-3.8-flash-medium");
+    assert.equal(resolveCatalogModel("gemini-3.8-flash", plan, { reasoning_effort: "high" }), "gemini-3.8-flash-high");
+    assert.equal(resolveCatalogModel("gemini-4-neon", plan), "gemini-4-neon-medium");
+    assert.equal(resolveCatalogModel("gemini-4-argon-medium", plan), "");
+    assert.equal(resolveCatalogModel("anything", []), "");
+  });
+
+  it("5f. a 429 for a model missing from the live catalog is blamed on the plan, not the quota", async () => {
+    const verdict = await explainCloudCode429({
+      flavor: "antigravity",
+      accessToken: "ya29.x",
+      model: "gemini-3.8-flash-medium",
+      errText: "{}",
+      fetchImpl: makeGoogle(GOOGLE_OK).fetchImpl
+    });
+    assert.equal(verdict.cause, "model");
+    assert.match(verdict.note, /not on this account's plan/);
+    assert.match(verdict.note, /claude-sonnet-5-5/);
+    assert.deepEqual(verdict.catalog.models.map((m) => m.id), ["claude-sonnet-5-5", "no-quota-model"]);
   });
 });
 
@@ -320,10 +374,8 @@ describe("Antigravity flavor — chat envelope", () => {
     assert.match(env.requestId, AGENT_REQUEST_ID);
     // "(high)" is an effort tag, not part of the model name: sent verbatim Google answers 404.
     assert.equal(env.model, "claude-sonnet-5-5-high");
-    assert.deepEqual(env.request.generationConfig.thinkingConfig, {
-      thinkingBudget: 24576,
-      includeThoughts: true
-    });
+    // Claude via Antigravity carries its tier in the name; the reference client sends no thinking config.
+    assert.equal(env.request.generationConfig.thinkingConfig, undefined);
     assert.equal(env.project, "ag-project-1");
     assert.equal("requestType" in env, false, "requestType triggers a detail-free 429");
     // Google: "Invalid value at 'request.session_id' (TYPE_STRING)" when this is a number.
@@ -332,7 +384,7 @@ describe("Antigravity flavor — chat envelope", () => {
     assert.ok(env.request.generationConfig.maxOutputTokens <= ANTIGRAVITY_MAX_OUTPUT_TOKENS);
   });
 
-  it("7a. gemini-3.8-flash -> gemini-3.8-flash-medium + 8192 budget; reasoning_effort picks the tier", () => {
+  it("7a. gemini-3.8-flash -> gemini-3.8-flash-medium + thinkingLevel medium; reasoning_effort picks the tier", () => {
     const flavor = getCloudCodeFlavor("antigravity");
     const plain = buildCloudCodeRequest(
       "gemini-3.8-flash",
@@ -341,7 +393,11 @@ describe("Antigravity flavor — chat envelope", () => {
       { flavor }
     );
     assert.equal(plain.model, "gemini-3.8-flash-medium");
-    assert.equal(plain.request.generationConfig.thinkingConfig.thinkingBudget, 8192);
+    // Gemini 3+/4 take a thinking LEVEL (reference client); a budget is the Gemini 2.x format.
+    assert.deepEqual(plain.request.generationConfig.thinkingConfig, {
+      thinkingLevel: "medium",
+      includeThoughts: true
+    });
     // Thoughts count toward output: a 100-token cap would leave no room for the answer.
     assert.ok(plain.request.generationConfig.maxOutputTokens >= 16384);
 
@@ -352,7 +408,15 @@ describe("Antigravity flavor — chat envelope", () => {
       { flavor }
     );
     assert.equal(high.model, "gemini-3.8-flash-high");
-    assert.equal(high.request.generationConfig.thinkingConfig.thinkingBudget, 24576);
+    assert.equal(high.request.generationConfig.thinkingConfig.thinkingLevel, "high");
+    assert.equal(high.request.generationConfig.maxOutputTokens, ANTIGRAVITY_MAX_OUTPUT_TOKENS);
+
+    // A catalog id carries its tier in the name; an unknown tier sends no thinking config.
+    const neon = buildCloudCodeRequest("gemini-4-neon-low", { messages: [{ role: "user", content: "hi" }] }, "p", { flavor });
+    assert.equal(neon.model, "gemini-4-neon-low");
+    assert.equal(neon.request.generationConfig.thinkingConfig.thinkingLevel, "low");
+    const xhigh = buildCloudCodeRequest("gemini-4-hydrogen-xhigh", { messages: [{ role: "user", content: "hi" }] }, "p", { flavor });
+    assert.equal(xhigh.request.generationConfig.thinkingConfig, undefined);
 
     // An explicitly tiered id is not re-tiered by reasoning_effort.
     const low = buildCloudCodeRequest(
@@ -525,8 +589,11 @@ describe("Antigravity routes + /v1 chat", () => {
       assert.match(call.headers["user-agent"], AG_UA);
       assert.equal(call.headers.authorization, "Bearer ya29.ag-access-token");
       assert.equal(call.body.userAgent, "antigravity");
-      assert.equal(call.body.model, "claude-sonnet-5-5-high");
+      // The account's catalog (fetchAvailableModels) offers "claude-sonnet-5-5" itself, so it is
+      // sent as is instead of the legacy alias.
+      assert.equal(call.body.model, "claude-sonnet-5-5");
       assert.doesNotMatch(call.body.model, /[()]/, "no effort suffix in the upstream model name");
+      assert.equal(call.body.request.generationConfig.thinkingConfig, undefined);
       assert.equal(call.body.project, "ag-project-1");
       assert.match(call.body.requestId, AGENT_REQUEST_ID);
       assert.equal("requestType" in call.body, false);
@@ -558,10 +625,21 @@ describe("Antigravity routes + /v1 chat", () => {
     assert.equal(out.steps[2].skipped, true);
     const summary = out.steps.find((s) => s.step === "retrieveUserQuotaSummary");
     assert.equal(summary.windows.find((w) => w.id === "gemini_weekly").remainingFraction, 0.6);
+    const models = out.steps.find((s) => s.step === "fetchAvailableModels");
+    assert.deepEqual(models.catalog, ["claude-sonnet-5-5", "no-quota-model"]);
+    assert.equal(models.defaultModelId, "claude-sonnet-5-5");
     const probe = out.steps.find((s) => s.step === "chatProbe");
     assert.equal(probe.ok, true);
-    assert.equal(probe.reply, "OK");
-    assert.equal(probe.model, "gemini-3.8-flash-medium");
+    assert.deepEqual(
+      probe.probes.map((p) => [p.probe, p.model, p.inCatalog, p.ok, p.reply]),
+      [
+        ["A", "gemini-3.8-flash-medium", false, true, "OK"],
+        ["B", "gemini-3.8-flash-medium", false, true, "OK"],
+        ["C", "claude-sonnet-5-5", true, true, "OK"]
+      ]
+    );
+    assert.deepEqual(probe.probes[0].thinking, { thinkingLevel: "medium", includeThoughts: true });
+    assert.equal(probe.probes[1].thinking, null);
   });
 
   it("13b. the diagnose chat probe is a bare request: no system prompt, no tools", async () => {
@@ -580,11 +658,13 @@ describe("Antigravity routes + /v1 chat", () => {
         body: { probeModel: "claude-sonnet-5-5" }
       });
       assert.equal(res.status, 200);
-      assert.equal(seen.length, 1);
-      assert.equal(seen[0].model, "claude-sonnet-5-5-high");
-      assert.equal(seen[0].request.systemInstruction, undefined);
-      assert.equal(seen[0].request.tools, undefined);
-      assert.equal(seen[0].project, "ag-project-1");
+      // A (alias wire, Claude has no thinking config so no B) + C (plan default, exact id).
+      assert.deepEqual(seen.map((b) => b.model), ["claude-sonnet-5-5-high", "claude-sonnet-5-5"]);
+      for (const sent of seen) {
+        assert.equal(sent.request.systemInstruction, undefined);
+        assert.equal(sent.request.tools, undefined);
+        assert.equal(sent.project, "ag-project-1");
+      }
 
       const skipped = await apiFetch("/api/providers/oauth/antigravity/diagnose", {
         method: "POST",
@@ -592,7 +672,7 @@ describe("Antigravity routes + /v1 chat", () => {
       });
       const out = await skipped.json();
       assert.equal(out.steps.some((s) => s.step === "chatProbe"), false);
-      assert.equal(seen.length, 1);
+      assert.equal(seen.length, 2);
     } finally {
       app.locals.googleOAuthFetchImpl = makeGoogle(GOOGLE_OK).fetchImpl;
     }
@@ -612,19 +692,43 @@ describe("Antigravity routes + /v1 chat", () => {
       assert.equal(key.oauthMeta.tier, "paid");
       assert.equal(key.oauthMeta.quotaWindows.length, 3);
       assert.deepEqual(key.oauthMeta.quotaBuckets.map((b) => b.modelId), ["claude-sonnet-5-5"]);
+      assert.deepEqual(key.oauthMeta.availableModels.map((m) => m.id), ["claude-sonnet-5-5", "no-quota-model"]);
+      const ag = app.locals.storage.getProviders().find((p) => p.preset === "antigravity");
+      assert.deepEqual(ag.models, ["claude-sonnet-5-5", "no-quota-model"], "provider models = plan models");
     } finally {
       app.locals.googleOAuthFetchImpl = makeGoogle(GOOGLE_OK).fetchImpl;
     }
   });
 
-  /** Fake daily host: chat answers 429; the quota summary answers `summary`. */
-  function chat429(summary) {
+  const PLAN = ["gemini-3.8-flash-medium", "gemini-3.8-flash-low", "gemini-3.8-flash-high", "claude-sonnet-5-5"];
+
+  /** Store a plan catalog on the Antigravity key, as sign-in / refresh would. */
+  async function setPlan(ids, catalogAt = new Date().toISOString()) {
+    await app.locals.storage.update((data) => {
+      const p = data.providers.find((x) => x.preset === "antigravity");
+      const k = p.apiKeys[0];
+      k.oauthMeta = {
+        ...k.oauthMeta,
+        availableModels: ids.map((id) => ({ id, label: id, family: "", kind: "chat", remainingFraction: 1, resetTime: "" })),
+        catalogAt
+      };
+    });
+  }
+
+  /** Fake daily host: Gemini chat answers 429, Claude 200; quota endpoints answer the given data. */
+  function chat429(summary, liveModels = PLAN) {
     const calls = [];
     const impl = async (url, init = {}) => {
       const u = String(url);
       calls.push(u);
       if (u.includes(":retrieveUserQuotaSummary")) {
         return new Response(JSON.stringify(summary), { status: 200 });
+      }
+      if (u.includes(":fetchAvailableModels")) {
+        const models = Object.fromEntries(
+          liveModels.map((id) => [id, { quotaInfo: { remainingFraction: 0.9, resetTime: "2026-12-01T00:00:00Z" } }])
+        );
+        return new Response(JSON.stringify({ models }), { status: 200 });
       }
       if (u.includes(":generateContent")) {
         const model = JSON.parse(init.body).model;
@@ -656,6 +760,7 @@ describe("Antigravity routes + /v1 chat", () => {
     });
 
   it("14. a bare 429 with the Gemini window empty says so, and only that model cools down", async () => {
+    await setPlan(PLAN);
     const reset = new Date(Date.now() + 3 * 3600_000).toISOString();
     const fake = chat429({
       groups: [
@@ -704,9 +809,91 @@ describe("Antigravity routes + /v1 chat", () => {
       assert.match(text, /not your quota/);
       assert.match(text, /Gemini \(Weekly\) 80%/);
       assert.doesNotMatch(text, /Argon/, "Argon is a separate pool");
+      // No system prompt was sent, so the prompt is not blamed.
+      assert.match(text, /had no system prompt/);
+      assert.doesNotMatch(text, /x-anthropic-billing-header/);
 
       const again = await chat("gemini-3.8-flash-low");
       assert.doesNotMatch(await again.text(), /in cooldown/, "nothing to wait for");
+    } finally {
+      delete app.locals.cloudCodeFetchImpl;
+    }
+  });
+
+  const QUOTA_LEFT = {
+    groups: [{ displayName: "Gemini", buckets: [{ window: "weekly", remainingFraction: 0.8 }] }]
+  };
+
+  it("15b. with a system prompt, a 429 while quota is left names the prompt as a known trigger", async () => {
+    app.locals.cloudCodeFetchImpl = chat429(QUOTA_LEFT).impl;
+    try {
+      const res = await fetch(`${baseUrl}/v1/chat/completions`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${routerKey}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "antigravity/gemini-3.8-flash-high",
+          messages: [
+            { role: "system", content: "You are a Claude agent, built on Anthropic's Claude Agent SDK." },
+            { role: "user", content: "hi" }
+          ]
+        })
+      });
+      const text = await res.text();
+      assert.equal(res.status, 429, text);
+      assert.match(text, /system prompt that identifies another client/);
+    } finally {
+      delete app.locals.cloudCodeFetchImpl;
+    }
+  });
+
+  it("16. three 429s in a row while quota is left pause that model for 15 minutes", async () => {
+    const fake = chat429(QUOTA_LEFT);
+    app.locals.cloudCodeFetchImpl = fake.impl;
+    try {
+      const a = await (await chat("gemini-3.8-flash-medium")).text();
+      const b = await (await chat("gemini-3.8-flash-medium")).text();
+      assert.doesNotMatch(a + b, /Paused/);
+      const c = await (await chat("gemini-3.8-flash-medium")).text();
+      assert.match(c, /Paused this model on this account for 15 minutes/);
+
+      const before = fake.calls.length;
+      const d = await chat("gemini-3.8-flash-medium");
+      const dText = await d.text();
+      assert.equal(d.status, 429);
+      assert.match(dText, /in cooldown/);
+      assert.equal(fake.calls.length, before, "paused: Google is not called");
+    } finally {
+      delete app.locals.cloudCodeFetchImpl;
+    }
+  });
+
+  it("17. a model outside the plan is refused locally with the plan's models", async () => {
+    await setPlan(PLAN);
+    const fake = chat429(QUOTA_LEFT);
+    app.locals.cloudCodeFetchImpl = fake.impl;
+    try {
+      const res = await chat("gemini-4-argon-medium");
+      const text = await res.text();
+      assert.equal(res.status, 404, text);
+      assert.match(text, /not on this Antigravity account's plan/);
+      assert.match(text, /gemini-3\.8-flash-medium/);
+      assert.equal(fake.calls.length, 0, "Google is not called for a model outside the plan");
+    } finally {
+      delete app.locals.cloudCodeFetchImpl;
+    }
+  });
+
+  it("18. a stale catalog is re-read once before refusing, then the model goes through", async () => {
+    await setPlan(PLAN, new Date(Date.now() - 2 * 3600_000).toISOString());
+    const fake = chat429(QUOTA_LEFT, [...PLAN, "claude-opus-5-5-high"]);
+    app.locals.cloudCodeFetchImpl = fake.impl;
+    try {
+      const res = await chat("claude-opus-5-5-high");
+      assert.equal(res.status, 200, await res.text());
+      assert.equal(fake.calls.filter((u) => u.includes(":fetchAvailableModels")).length, 1);
+      const ag = app.locals.storage.getProviders().find((p) => p.preset === "antigravity");
+      assert.ok(ag.apiKeys[0].oauthMeta.availableModels.some((m) => m.id === "claude-opus-5-5-high"));
+      assert.ok(ag.models.includes("claude-opus-5-5-high"), "provider models follow the fresh plan");
     } finally {
       delete app.locals.cloudCodeFetchImpl;
     }

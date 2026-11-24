@@ -19,6 +19,8 @@ import {
   isDashboardAuthenticated,
   isDashboardLoginRequired,
   isPasswordChangeRequired,
+  isPublicDeployment,
+  isRouterKeyRequired,
   maskKey,
   sanitizeSecrets,
   signSessionToken
@@ -31,7 +33,6 @@ import {
   compressText
 } from "../tokenSaver.js";
 import { getMergedPricingMap, normalizePricingRate } from "../pricing.js";
-import { isLoopbackHost } from "../security/headers.js";
 import { getCatalogChatModelIds } from "../catalog/index.js";
 import {
   claudeToOpenAIRequest,
@@ -89,9 +90,11 @@ import {
   fetchCloudCodeUsage,
   getGeminiCliAccessToken,
   loadGeminiCliProject,
+  mergeCloudCodeUsage,
   peekGeminiCliState,
   restoreGeminiCliState,
-  startGeminiCliOAuth
+  startGeminiCliOAuth,
+  syncProviderModelsWithCatalog
 } from "../geminiCliOAuth.js";
 
 const VALID_COMBO_STRATEGIES = new Set(["fallback", "round-robin"]);
@@ -2093,6 +2096,7 @@ export function createDashboardRouter(storage, liveEvents = null) {
             target.apiKeys.push(newKey);
             savedKeyId = newKey.id;
           }
+          syncProviderModelsWithCatalog(target);
           target.updatedAt = now;
           return target;
         }
@@ -2128,6 +2132,7 @@ export function createDashboardRouter(storage, liveEvents = null) {
           createdAt: now,
           updatedAt: now
         };
+        syncProviderModelsWithCatalog(created);
         data.providers.push(created);
         return created;
       });
@@ -2184,22 +2189,9 @@ export function createDashboardRouter(storage, liveEvents = null) {
         for (const r of results) {
           const k = (p?.apiKeys || []).find((x) => x.id === r.keyId);
           if (!k || !r.usage) continue;
-          const u = r.usage;
-          k.oauthMeta = {
-            ...(k.oauthMeta || {}),
-            ...(u.projectId ? { projectId: u.projectId } : {}),
-            ...(u.tier ? { tier: u.tier } : {}),
-            ...(u.tierLabel ? { tierLabel: u.tierLabel } : {}),
-            ...(u.quotaOk
-              ? {
-                  quotaBuckets: u.buckets,
-                  quotaWindows: u.windows,
-                  perModelHidden: u.perModelHidden
-                }
-              : {}),
-            checkedAt
-          };
+          k.oauthMeta = mergeCloudCodeUsage(k.oauthMeta, r.usage, checkedAt);
         }
+        if (syncProviderModelsWithCatalog(p)) p.updatedAt = checkedAt;
       });
 
       const fresh = findProvider();
@@ -4274,7 +4266,15 @@ export function createDashboardRouter(storage, liveEvents = null) {
   // --- Settings & Password ---
 
   router.get("/settings", (_req, res) => {
-    return res.json({ settings: storage.getSettings() });
+    return res.json({
+      settings: storage.getSettings(),
+      // Public deployments force key + login on, whatever the stored settings say.
+      publicDeployment: isPublicDeployment(storage),
+      effective: {
+        requireKey: isRouterKeyRequired(storage),
+        requireLogin: isDashboardLoginRequired(storage)
+      }
+    });
   });
 
   const handleUpdateSettings = async (req, res) => {
@@ -4300,10 +4300,7 @@ export function createDashboardRouter(storage, liveEvents = null) {
     }
     if (body.requireKey !== undefined) {
       const nextReqKey = Boolean(body.requireKey);
-      const isPublicDeployment =
-        Boolean(process.env.VERCEL || process.env.RENDER || process.env.RAILWAY_ENVIRONMENT) ||
-        !isLoopbackHost(storage.bindHost || "127.0.0.1");
-      if (!nextReqKey && isPublicDeployment) {
+      if (!nextReqKey && isPublicDeployment(storage)) {
         return res.status(400).json({
           error: "Router API key enforcement cannot be disabled on public deployments"
         });
@@ -4407,10 +4404,7 @@ export function createDashboardRouter(storage, liveEvents = null) {
     }
     if (body.requireLogin !== undefined) {
       const nextReq = Boolean(body.requireLogin);
-      const isPublicDeployment =
-        Boolean(process.env.VERCEL || process.env.RENDER || process.env.RAILWAY_ENVIRONMENT) ||
-        !isLoopbackHost(storage.bindHost || "127.0.0.1");
-      if (!nextReq && isPublicDeployment) {
+      if (!nextReq && isPublicDeployment(storage)) {
         return res.status(400).json({
           error: "Dashboard login cannot be disabled when bound to a non-loopback or cloud address"
         });
@@ -4425,7 +4419,14 @@ export function createDashboardRouter(storage, liveEvents = null) {
     }
 
     const updated = await storage.updateSettings(patch);
-    return res.json({ settings: updated });
+    return res.json({
+      settings: updated,
+      publicDeployment: isPublicDeployment(storage),
+      effective: {
+        requireKey: isRouterKeyRequired(storage),
+        requireLogin: isDashboardLoginRequired(storage)
+      }
+    });
   };
 
   router.put("/settings", handleUpdateSettings);
@@ -4596,8 +4597,32 @@ export function createDashboardRouter(storage, liveEvents = null) {
               email: cliKey.oauthMeta?.email || "",
               buckets: usage.buckets,
               windows: usage.windows,
-              perModelHidden: usage.perModelHidden
+              perModelHidden: usage.perModelHidden,
+              models: usage.models,
+              defaultModelId: usage.defaultModelId
             };
+
+            // Keep the stored plan / catalog in step with this live read, so the Providers page and
+            // the router see the same plan. Written only when something changed (or every hour).
+            const prev = cliKey.oauthMeta || {};
+            const idsOf = (list) => (Array.isArray(list) ? list.map((m) => m?.id).join(",") : "");
+            const staleMs = Date.now() - (Date.parse(prev.checkedAt || "") || 0);
+            const changed =
+              (usage.tierLabel && usage.tierLabel !== prev.tierLabel) ||
+              (usage.catalogOk && idsOf(usage.models) !== idsOf(prev.availableModels)) ||
+              staleMs > 60 * 60 * 1000;
+            if (changed) {
+              const checkedAt = new Date().toISOString();
+              await storage
+                .update((data) => {
+                  const p = data.providers.find((x) => x.id === provider.id);
+                  const k = (p?.apiKeys || []).find((x) => x.id === cliKey.id);
+                  if (!k) return;
+                  k.oauthMeta = mergeCloudCodeUsage(k.oauthMeta, usage, checkedAt);
+                  if (syncProviderModelsWithCatalog(p)) p.updatedAt = checkedAt;
+                })
+                .catch(() => {});
+            }
           }
         } catch {
           // Best-effort: never break the quota list because one upstream probe failed.
@@ -5258,9 +5283,9 @@ export function createDashboardRouter(storage, liveEvents = null) {
         if (typeof s.tokenSaverMaxChars === "number" && s.tokenSaverMaxChars >= 100) {
           data.settings.tokenSaverMaxChars = Math.floor(s.tokenSaverMaxChars);
         }
-        if (typeof s.requireKey === "boolean") {
-          data.settings.requireKey = s.requireKey;
-        }
+        // Protected: `requireKey` / `requireLogin` (and secrets) are NEVER restored from a backup.
+        // A backup is data, and an imported `requireKey: false` silently opened /v1 to anyone who
+        // knew the URL. Change them only through PUT /api/settings, which refuses on public hosts.
       }
 
       return {

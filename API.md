@@ -150,15 +150,17 @@ Used by external CLI/IDE tools connecting to `/v1/*`.
     ```
 - `GET /api/logs?limit=100&offset=0&status=&provider=&model=`
   - `200`: `{ logs: LogEntry[], total: number }`
-  - `LogEntry`: `{ id, timestamp, keyId, keyName, requestedModel, resolvedModel, providerSlug, endpoint, status, latencyMs, promptTokens, completionTokens, savedChars, fallbackHops, attemptTrail, error? }`
+  - `LogEntry`: `{ id, timestamp, keyId, keyName, clientIp, requestedModel, resolvedModel, providerSlug, endpoint, status, latencyMs, promptTokens, completionTokens, savedChars, fallbackHops, attemptTrail, error? }` (`clientIp`: caller address — `x-real-ip` on Vercel, otherwise `req.ip`)
   - Storage retains the newest **5000** logs.
 - `DELETE /api/logs`
   - `200`: `{ ok: true }`
 - `GET /api/settings`
-  - `200`: `{ settings: { timeoutMs, tokenSaverEnabled, tokenSaverMaxChars, requireKey, port } }`
+  - `200`: `{ settings: { timeoutMs, tokenSaverEnabled, tokenSaverMaxChars, requireKey, port }, publicDeployment, effective: { requireKey, requireLogin } }`
+  - `effective` is what is enforced: on a public deployment (Vercel / Render / Railway or a non-loopback bind) both are always `true`.
 - `PUT /api/settings`
   - Body: partial `{ timeoutMs?, tokenSaverEnabled?, tokenSaverMaxChars?, requireKey? }`
-  - `200`: `{ settings: { ... } }`
+  - `400` when turning `requireKey` / `requireLogin` off on a public deployment.
+  - `200`: `{ settings: { ... }, publicDeployment, effective }`
 - `POST /api/settings/password`
   - Body: `{ currentPassword: string, newPassword: string }`
   - `200`: `{ ok: true }`
@@ -167,17 +169,18 @@ Used by external CLI/IDE tools connecting to `/v1/*`.
   - `200`: `{ exportedAt, version: 1, providers, combos, keys, settings }` (contains unmasked upstream API keys — UI must warn user!)
 - `POST /api/import`
   - Body: `{ providers?, combos?, keys?, settings?, mode?: "replace" | "merge" }`
+  - `settings.requireKey` / `settings.requireLogin` in a backup are ignored: auth switches are never restored from a file.
   - `200`: `{ ok: true, counts: { providers, combos, keys } }`
 
 ---
 
 ## 7. Unified Router Endpoints (`/v1/*` and `/health`)
 
-Auth for `/v1/*`:
-- When `settings.requireKey === true` (default `true`):
+Auth for `/v1/*` (fail-closed):
+- A router key is required unless `settings.requireKey === false` **and** the instance is local (loopback bind, no cloud host). A missing field counts as required, and public deployments always require one.
   - Check `Authorization: Bearer <token>` OR `x-api-key: <token>`.
   - Must match an enabled key in `db.keys`. Otherwise `401 { error: { message: "Invalid or missing router API key", type: "authentication_error" } }`.
-- When `settings.requireKey === false`: allow requests even without key (still resolve key metadata if provided).
+- Local install with `settings.requireKey === false`: allow requests even without key (still resolve key metadata if provided).
 
 Endpoints:
 - `GET /health` -> `200 { ok: true, service: "001router", port: 20128 }`

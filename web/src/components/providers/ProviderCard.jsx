@@ -61,6 +61,11 @@ function ProviderCardBase({
   const hasDeviceCode = keys.some((k) => getKeyAuthKind(k) === 'device_code');
   const googleOAuthKey = keys.find((k) => getKeyAuthKind(k) === 'google_oauth') || null;
   const googleOAuthMeta = googleOAuthKey ? getGoogleOAuthMeta(googleOAuthKey) : null;
+  // Antigravity / Gemini CLI accounts: show the plan Google reports (e.g. "Google AI Pro").
+  const cloudCodeKey =
+    keys.find((k) => k.enabled !== false && getKeyAuthKind(k) === 'gemini_cli' && k.oauthMeta?.tierLabel) ||
+    null;
+  const cloudCodePlan = cloudCodeKey ? String(cloudCodeKey.oauthMeta.tierLabel).split(' · ')[0] : '';
   const coolingKeys = keys.filter((k) => k.cooldownUntil && k.cooldownUntil > nowMs);
   const maxCooldownSec = coolingKeys.length
     ? Math.max(...coolingKeys.map((k) => Math.ceil((k.cooldownUntil - nowMs) / 1000)))
@@ -207,6 +212,20 @@ function ProviderCardBase({
               <span className="inline-flex items-center gap-1 rounded-full border border-orange-500/35 bg-orange-500/12 px-1.5 py-0.2 text-[9.5px] font-semibold text-orange-400">
                 <KeyRound className="h-2.5 w-2.5" aria-hidden="true" />
                 {t('providers.badge.deviceCode')}
+              </span>
+            ) : null}
+
+            {isConnected && cloudCodePlan ? (
+              <span
+                title={
+                  cloudCodeKey.oauthMeta.email
+                    ? `${cloudCodeKey.oauthMeta.email} — ${cloudCodeKey.oauthMeta.tierLabel}`
+                    : cloudCodeKey.oauthMeta.tierLabel
+                }
+                className="inline-flex items-center gap-1 rounded-full border border-amber-500/35 bg-amber-500/12 px-1.5 py-0.2 text-[9.5px] font-semibold text-amber-500"
+              >
+                <span className="h-1.5 w-1.5 rounded-full bg-amber-500" aria-hidden="true" />
+                {cloudCodePlan}
               </span>
             ) : null}
 

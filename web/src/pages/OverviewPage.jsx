@@ -68,6 +68,8 @@ export function OverviewPage() {
   const [combos, setCombos] = useState([]);
   const [usage, setUsage] = useState(null);
   const [settings, setSettings] = useState(null);
+  // Public deployments (Vercel…) always require a router key, whatever the stored setting says.
+  const [publicDeployment, setPublicDeployment] = useState(false);
   const [loading, setLoading] = useState(true);
 
   const [revealedIds, setRevealedIds] = useState(() => new Set());
@@ -114,6 +116,7 @@ export function OverviewPage() {
       setCombos(combosRes?.combos || []);
       setUsage(usageRes || null);
       setSettings(settingsRes?.settings || null);
+      setPublicDeployment(settingsRes?.publicDeployment === true);
 
       // Handle one-time initial seeded router key reveal (/api/keys/reveal-initial)
       if (revealRes) {
@@ -306,11 +309,21 @@ export function OverviewPage() {
       <div className="flex flex-wrap items-center justify-end gap-2.5">
         <div className="flex flex-wrap items-center gap-2.5">
           <div className="inline-flex items-center gap-2 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-card)] px-2.5 py-1.5 text-xs">
-            <span className="font-medium text-[var(--text-secondary)]">Require Key</span>
+            <span
+              className="font-medium text-[var(--text-secondary)]"
+              title={
+                publicDeployment
+                  ? 'Bản công khai: /v1/* luôn bắt buộc router API key (không tắt được)'
+                  : undefined
+              }
+            >
+              Require Key{publicDeployment ? ' · bản công khai' : ''}
+            </span>
             <Switch
               size="sm"
-              checked={settings?.requireKey !== false}
+              checked={publicDeployment || settings?.requireKey !== false}
               onChange={handleToggleRequireKey}
+              disabled={publicDeployment}
               aria-label="Require Router API Key on /v1/*"
             />
           </div>
@@ -592,9 +605,13 @@ export function OverviewPage() {
           <div className="mt-2 text-xs text-[var(--text-secondary)]">
             Auth:{' '}
             <span
-              className={settings?.requireKey === false ? 'text-amber-500' : 'text-emerald-500'}
+              className={
+                settings?.requireKey === false && !publicDeployment
+                  ? 'text-amber-500'
+                  : 'text-emerald-500'
+              }
             >
-              {settings?.requireKey === false ? 'Key optional' : 'Key required'}
+              {settings?.requireKey === false && !publicDeployment ? 'Key optional' : 'Key required'}
             </span>
           </div>
         </LucianGlowCard>

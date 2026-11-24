@@ -183,6 +183,17 @@ export function isDashboardAuthenticated(req, secretOrStorage, expectedVersion) 
 }
 
 /**
+ * Whether this instance is reachable beyond the local machine: a cloud host (Vercel, Render,
+ * Railway) or a non-loopback bind address. Safety switches are forced on there.
+ * @param {import("./storage.js").Storage} [storage]
+ * @returns {boolean}
+ */
+export function isPublicDeployment(storage) {
+  if (process.env.VERCEL || process.env.RENDER || process.env.RAILWAY_ENVIRONMENT) return true;
+  return !isLoopbackHost(storage?.bindHost || "127.0.0.1");
+}
+
+/**
  * Determine whether dashboard authentication is enforced.
  * On non-loopback hosts, login is ALWAYS enforced regardless of `settings.requireLogin`.
  * @param {import("./storage.js").Storage} storage
@@ -190,12 +201,22 @@ export function isDashboardAuthenticated(req, secretOrStorage, expectedVersion) 
  */
 export function isDashboardLoginRequired(storage) {
   if (!storage || typeof storage !== "object") return true;
-  if (process.env.VERCEL || process.env.RENDER || process.env.RAILWAY_ENVIRONMENT) {
-    return true;
-  }
-  if (!isLoopbackHost(storage.bindHost || "127.0.0.1")) return true;
+  if (isPublicDeployment(storage)) return true;
   const settings = storage.getSettings?.();
   return settings?.requireLogin !== false;
+}
+
+/**
+ * Whether `/v1/*` requires a router API key. Fail-closed: only an explicit `requireKey: false` on a
+ * local (loopback) install turns it off. Public deployments ALWAYS require a key, whatever the
+ * stored setting says — a restored backup or an old data file could still hold `false`.
+ * @param {import("./storage.js").Storage} storage
+ * @returns {boolean}
+ */
+export function isRouterKeyRequired(storage) {
+  if (!storage || typeof storage !== "object") return true;
+  if (isPublicDeployment(storage)) return true;
+  return storage.getSettings?.()?.requireKey !== false;
 }
 
 /**
@@ -310,12 +331,11 @@ export function matchRouterApiKey(token, keys) {
  */
 export function createRouterAuthMiddleware(storage) {
   return (req, res, next) => {
-    const settings = storage.getSettings();
     const token = extractRouterApiKey(req);
     const keys = storage.getKeys();
     const matched = token ? matchRouterApiKey(token, keys) : null;
 
-    if (settings.requireKey !== false) {
+    if (isRouterKeyRequired(storage)) {
       if (!matched) {
         return res.status(401).json({
           error: {

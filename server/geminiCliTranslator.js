@@ -256,12 +256,26 @@ export function toNumericSessionId(seed) {
   return `-${n.toString()}`;
 }
 
-/** Effort level -> Gemini thinkingBudget (same table the reference router uses). */
+/** Effort level -> Gemini 2.x thinkingBudget (Gemini CLI flavor, explicit "(level)" suffix only). */
 const THINKING_LEVEL_TO_BUDGET = Object.freeze({
   minimal: 512,
   low: 1024,
   medium: 8192,
   high: 24576
+});
+
+/** Gemini 3+/4 `thinkingLevel` enum (what Antigravity models take instead of a budget). */
+const GEMINI_THINKING_LEVELS = new Set(["minimal", "low", "medium", "high"]);
+
+/**
+ * Output-token floor per thinking level, so thoughts cannot eat the whole answer
+ * (same table as the reference router's `gemini-level` format).
+ */
+const GEMINI_LEVEL_OUTPUT_FLOOR = Object.freeze({
+  minimal: 4096,
+  low: 8192,
+  medium: 16384,
+  high: 65535
 });
 
 /**
@@ -277,26 +291,38 @@ function thinkingOutputFloor(budget) {
 }
 
 /**
- * Turn a router model id into the id Google expects plus an optional thinking budget.
+ * Turn a router model id into the id Google expects plus the thinking config to send.
  *
  * Antigravity catalogs effort-tiered models as `name(level)`, e.g.
  * `gemini-3.8-flash-medium(medium)`. The `(level)` part is NOT part of the upstream model name
- * — sending it verbatim makes Google answer 404 "Requested entity was not found". It is
- * stripped and becomes `generationConfig.thinkingConfig.thinkingBudget` instead.
+ * — sending it verbatim makes Google answer 404 "Requested entity was not found".
+ *
+ * Thinking follows the reference router's wire format per model family:
+ *  - Antigravity Gemini (3.x / 4): `thinkingLevel` from the "(level)" suffix or the "-<level>"
+ *    tier in the name (`gemini-4-neon-medium` -> medium). An unknown tier such as "-xhigh" sends
+ *    nothing, so Google applies the model's own default.
+ *  - Antigravity Claude / GPT: no thinking config at all (the tier is in the model name).
+ *  - Gemini CLI (Gemini 2.x): `thinkingBudget`, only for an explicit "(level)" suffix.
  *
  * A tierless friendly id (`gemini-3.8-flash`) follows the client's `reasoning_effort` when the
- * flavor knows a `<id>-<effort>` variant.
+ * flavor knows a `<id>-<effort>` variant. With `opts.exact` (an id taken from the account's own
+ * model catalog) neither aliases nor reasoning_effort change the id.
  *
  * @param {string} model
  * @param {any} body OpenAI chat body
- * @param {{ resolveModel?: (m: string) => string } | null} flavor
- * @returns {{ model: string, thinkingBudget: number | null }}
+ * @param {{ id?: string, resolveModel?: (m: string) => string } | null} flavor
+ * @param {{ exact?: boolean }} [opts]
+ * @returns {{ model: string, thinking: Record<string, any> | null, outputFloor: number }}
  */
-export function resolveUpstreamModel(model, body, flavor) {
-  const resolve = typeof flavor?.resolveModel === "function" ? flavor.resolveModel : (m) => m;
+export function resolveUpstreamModel(model, body, flavor, opts = {}) {
+  const resolve =
+    !opts.exact && typeof flavor?.resolveModel === "function" ? flavor.resolveModel : (m) => m;
   let requested = String(model || "");
 
-  const effort = typeof body?.reasoning_effort === "string" ? body.reasoning_effort.trim().toLowerCase() : "";
+  const effort =
+    !opts.exact && typeof body?.reasoning_effort === "string"
+      ? body.reasoning_effort.trim().toLowerCase()
+      : "";
   const effortTier = effort === "xhigh" || effort === "max" ? "high" : effort === "minimal" ? "low" : effort;
   if (effortTier && THINKING_LEVEL_TO_BUDGET[effortTier] !== undefined) {
     const tiered = `${requested}-${effortTier}`;
@@ -304,13 +330,28 @@ export function resolveUpstreamModel(model, body, flavor) {
   }
 
   const resolved = resolve(requested);
-  const m = resolved.match(/^(.*)\(([^()]+)\)\s*$/);
-  if (!m) return { model: resolved, thinkingBudget: null };
-  const level = m[2].trim().toLowerCase();
-  const budget = THINKING_LEVEL_TO_BUDGET[level];
+  const suffix = resolved.match(/^(.*)\(([^()]+)\)\s*$/);
+  const upstream = suffix ? suffix[1].trim() : resolved;
+  const suffixLevel = suffix ? suffix[2].trim().toLowerCase() : "";
+
+  if (flavor?.id === "antigravity") {
+    if (!/^gemini-/i.test(upstream)) return { model: upstream, thinking: null, outputFloor: 0 };
+    const nameTier = upstream.match(/-([a-z]+)$/i)?.[1]?.toLowerCase() || "";
+    const level = suffixLevel || nameTier;
+    if (!GEMINI_THINKING_LEVELS.has(level)) return { model: upstream, thinking: null, outputFloor: 0 };
+    return {
+      model: upstream,
+      thinking: { thinkingLevel: level, includeThoughts: level !== "minimal" },
+      outputFloor: GEMINI_LEVEL_OUTPUT_FLOOR[level]
+    };
+  }
+
+  const budget = THINKING_LEVEL_TO_BUDGET[suffixLevel];
+  if (budget === undefined) return { model: upstream, thinking: null, outputFloor: 0 };
   return {
-    model: m[1].trim(),
-    thinkingBudget: budget === undefined ? null : budget
+    model: upstream,
+    thinking: { thinkingBudget: budget, includeThoughts: true },
+    outputFloor: thinkingOutputFloor(budget)
   };
 }
 
@@ -333,28 +374,33 @@ function uuidFromSeed(seed) {
  * `options.flavor` (from geminiCliOAuth.getCloudCodeFlavor) selects the client dialect:
  *  - gemini_cli: `userAgent: "gemini-cli"`, `requestId: "req-<uuid>"`;
  *  - antigravity: `userAgent: "antigravity"`, `requestId: "agent/<conv>/<ts>/<traj>/<step>"`,
- *    friendly model ids mapped to their effort-suffixed upstream ids, output tokens capped, and
- *    no `requestType` (sending one makes Google answer a detail-free 429).
+ *    friendly model ids mapped to their upstream ids, Gemini thinking as `thinkingLevel`, output
+ *    tokens capped, and no `requestType` (sending one makes Google answer a detail-free 429).
  *
  * @param {string} model
  * @param {any} body OpenAI chat body
  * @param {string} projectId
- * @param {{ flavor?: { id: string, envelopeUserAgent: string, maxOutputTokens: number, resolveModel: (m: string) => string } }} [options]
+ * @param {{ flavor?: { id: string, envelopeUserAgent: string, maxOutputTokens: number, resolveModel: (m: string) => string }, exactModel?: boolean }} [options]
+ *   `exactModel`: `model` is an id from the account's catalog — send it as is.
  * @returns {any}
  */
 export function buildCloudCodeRequest(model, body, projectId, options = {}) {
   const flavor = options.flavor || null;
   const isAntigravity = flavor?.id === "antigravity";
-  const { model: upstreamModel, thinkingBudget } = resolveUpstreamModel(model, body, flavor);
+  const { model: upstreamModel, thinking, outputFloor } = resolveUpstreamModel(
+    model,
+    body,
+    flavor,
+    { exact: options.exactModel === true }
+  );
   const gemini = openAIToGeminiContents(body);
 
   const generationConfig = { ...(gemini.generationConfig || {}) };
-  if (thinkingBudget !== null) {
+  if (thinking) {
     // Thinking tokens count toward the output limit, so keep room for the answer.
-    generationConfig.thinkingConfig = { thinkingBudget, includeThoughts: true };
-    const floor = thinkingOutputFloor(thinkingBudget);
-    if (!(Number(generationConfig.maxOutputTokens) >= floor)) {
-      generationConfig.maxOutputTokens = floor;
+    generationConfig.thinkingConfig = thinking;
+    if (!(Number(generationConfig.maxOutputTokens) >= outputFloor)) {
+      generationConfig.maxOutputTokens = outputFloor;
     }
   }
   const cap = Number(flavor?.maxOutputTokens) || 0;

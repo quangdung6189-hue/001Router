@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import { upstreamFetch } from "./proxy.js";
 import { extractCodeAndState } from "./oauthFlows.js";
 import { isLoopbackHost } from "./security/headers.js";
-import { buildCloudCodeRequest } from "./geminiCliTranslator.js";
+import { buildCloudCodeRequest, resolveUpstreamModel } from "./geminiCliTranslator.js";
 import {
   classifyHostForSSRF,
   redactSecrets,
@@ -809,7 +809,17 @@ export async function diagnoseGeminiCliConnection(accessToken, options = {}) {
     token,
     dispatcher
   );
-  steps.push({ ...quotaStep, projectSent: projectId || "" });
+  const catalog =
+    flavor.id === "antigravity" && quotaStep.ok
+      ? parseAntigravityModelCatalog(quotaStep.response)
+      : { models: [], defaultModelId: "" };
+  steps.push({
+    ...quotaStep,
+    projectSent: projectId || "",
+    ...(catalog.models.length
+      ? { catalog: catalogChatModelIds(catalog.models), defaultModelId: catalog.defaultModelId }
+      : {})
+  });
 
   if (flavor.quotaSummaryUrl) {
     const summaryStep = await probeCloudCode(
@@ -827,36 +837,66 @@ export async function diagnoseGeminiCliConnection(accessToken, options = {}) {
     });
   }
 
-  // The decisive check: one tiny chat with no system prompt and no tools. If this succeeds while
-  // a real client gets 429, Google is refusing that client's request content, not the account.
+  // The decisive check: tiny chats with no system prompt and no tools, varied one factor at a time.
+  //  A — the model exactly as the router would send it;
+  //  B — the same model without a thinking config (only when A had one);
+  //  C — the plan's own default model, bare (only when it differs from A).
+  // Which of them pass tells model-not-on-plan, thinking config, or account/client/IP apart.
   if (chatProbeModel && projectId) {
-    const probeBody = buildCloudCodeRequest(
-      chatProbeModel,
-      { messages: [{ role: "user", content: "Reply with the single word OK." }] },
-      projectId,
-      { flavor }
-    );
-    const chatStep = await probeCloudCode(
-      fetchImpl,
-      "chatProbe",
-      flavor.generateUrl,
-      flavor.chatHeaders(token),
-      probeBody,
-      token,
-      dispatcher
-    );
-    const reply = (chatStep.response?.response?.candidates?.[0]?.content?.parts || [])
-      .filter((part) => typeof part?.text === "string" && !part.thought)
-      .map((part) => part.text)
-      .join("")
-      .slice(0, 200);
-    steps.push({
-      step: "chatProbe",
-      ok: chatStep.ok,
-      status: chatStep.status ?? null,
-      model: probeBody.model,
-      ...(chatStep.ok ? { reply } : { response: chatStep.response, error: chatStep.error })
-    });
+    const message = { messages: [{ role: "user", content: "Reply with the single word OK." }] };
+    const catalogIds = new Set(catalog.models.map((m) => m.id));
+    const variants = [];
+    const asRouted = buildCloudCodeRequest(chatProbeModel, message, projectId, { flavor });
+    variants.push({ probe: "A", label: "as routed", envelope: asRouted });
+    if (asRouted.request.generationConfig?.thinkingConfig) {
+      const bare = buildCloudCodeRequest(chatProbeModel, message, projectId, { flavor });
+      delete bare.request.generationConfig.thinkingConfig;
+      variants.push({ probe: "B", label: "no thinking config", envelope: bare });
+    }
+    if (catalog.defaultModelId && catalog.defaultModelId !== asRouted.model) {
+      const planDefault = buildCloudCodeRequest(catalog.defaultModelId, message, projectId, {
+        flavor,
+        exactModel: true
+      });
+      delete planDefault.request.generationConfig.thinkingConfig;
+      variants.push({ probe: "C", label: "plan default model", envelope: planDefault });
+    }
+
+    const probes = [];
+    for (const v of variants) {
+      const r = await probeCloudCode(
+        fetchImpl,
+        "chatProbe",
+        flavor.generateUrl,
+        flavor.chatHeaders(token),
+        v.envelope,
+        token,
+        dispatcher
+      );
+      const reply = (r.response?.response?.candidates?.[0]?.content?.parts || [])
+        .filter((part) => typeof part?.text === "string" && !part.thought)
+        .map((part) => part.text)
+        .join("")
+        .slice(0, 200);
+      const err = r.response?.error;
+      probes.push({
+        probe: v.probe,
+        label: v.label,
+        model: v.envelope.model,
+        thinking: v.envelope.request.generationConfig?.thinkingConfig || null,
+        inCatalog: catalogIds.size ? catalogIds.has(v.envelope.model) : null,
+        ok: r.ok,
+        status: r.status ?? null,
+        ...(r.ok
+          ? { reply }
+          : {
+              error: (typeof err?.message === "string" && err.message) || r.error || "",
+              reason:
+                (Array.isArray(err?.details) ? err.details.find((d) => d?.reason)?.reason : "") || ""
+            })
+      });
+    }
+    steps.push({ step: "chatProbe", ok: probes.some((p) => p.ok), probes });
   }
 
   return { projectId, tierId: resolvedTierId, flavor: flavor.id, steps };
@@ -1010,6 +1050,166 @@ export function parseAntigravityQuotaSummary(data) {
   return windows;
 }
 
+/** Autocomplete / internal slots that are never chat models (`tab_flash_lite_preview`, `chat_20706`). */
+const NON_CHAT_MODEL_RE = /^(tab_|chat_\d)/i;
+const FAMILY_ORDER = { gemini: 0, gemini_argon: 1, claude_gpt: 2 };
+
+/**
+ * The models an Antigravity account can call, from its `fetchAvailableModels` answer.
+ *
+ * The ids are exactly what generateContent takes as `model`, and the list differs per plan and over
+ * time (an AI Pro account can offer `gemini-4-neon-*` and no `gemini-3.8-flash-*`), so this is the
+ * source of truth rather than a hard-coded catalog.
+ *
+ * kind: "chat" — in the IDE's agent model list (or any non-image model when Google sends no list);
+ * "image" — image generation; "other" — callable but not offered as a chat model.
+ *
+ * @param {any} data
+ * @returns {{ models: Array<{ id: string, label: string, family: string, kind: "chat" | "image" | "other", remainingFraction: number | null, resetTime: string }>, defaultModelId: string }}
+ */
+export function parseAntigravityModelCatalog(data) {
+  const raw =
+    data?.models && typeof data.models === "object" && !Array.isArray(data.models) ? data.models : null;
+  if (!raw) return { models: [], defaultModelId: "" };
+
+  const imageIds = new Set(
+    (Array.isArray(data.imageGenerationModelIds) ? data.imageGenerationModelIds : []).map(String)
+  );
+  const agentOrder = [];
+  for (const sort of Array.isArray(data.agentModelSorts) ? data.agentModelSorts : []) {
+    for (const group of Array.isArray(sort?.groups) ? sort.groups : []) {
+      for (const id of Array.isArray(group?.modelIds) ? group.modelIds : []) {
+        if (typeof id === "string" && id && !agentOrder.includes(id)) agentOrder.push(id);
+      }
+    }
+  }
+
+  const models = [];
+  for (const [id, info] of Object.entries(raw)) {
+    if (!id || !info || typeof info !== "object" || info.isInternal === true) continue;
+    if (NON_CHAT_MODEL_RE.test(id)) continue;
+    const isImage = imageIds.has(id) || /image/i.test(id);
+    const kind = isImage
+      ? "image"
+      : agentOrder.length === 0 || agentOrder.includes(id)
+        ? "chat"
+        : "other";
+    const quota = info.quotaInfo && typeof info.quotaInfo === "object" ? info.quotaInfo : null;
+    // proto3 drops zero values: a quotaInfo without a fraction means 0 left.
+    const fraction = quota ? Number(quota.remainingFraction ?? 0) : NaN;
+    models.push({
+      id,
+      label:
+        typeof info.displayName === "string" && info.displayName.trim() ? info.displayName.trim() : id,
+      family: antigravityQuotaFamily(id)?.id || "",
+      kind,
+      remainingFraction: Number.isFinite(fraction) ? Math.max(0, Math.min(1, fraction)) : null,
+      resetTime: typeof quota?.resetTime === "string" ? quota.resetTime : ""
+    });
+  }
+
+  // The IDE's own order first, then by family, then naturally by id.
+  const rank = (m) => {
+    const i = agentOrder.indexOf(m.id);
+    return i >= 0 ? i : agentOrder.length + (FAMILY_ORDER[m.family] ?? 3) * 1000;
+  };
+  models.sort((a, b) => rank(a) - rank(b) || a.id.localeCompare(b.id, "en", { numeric: true }));
+
+  const chat = models.filter((m) => m.kind === "chat");
+  const preferred = typeof data.defaultAgentModelId === "string" ? data.defaultAgentModelId : "";
+  const defaultModelId = chat.some((m) => m.id === preferred) ? preferred : chat[0]?.id || "";
+  return { models, defaultModelId };
+}
+
+/**
+ * Chat model ids of a catalog, in catalog order.
+ * @param {Array<{ id: string, kind: string }>} models
+ * @returns {string[]}
+ */
+export function catalogChatModelIds(models) {
+  return (Array.isArray(models) ? models : [])
+    .filter((m) => m && m.kind === "chat" && m.id)
+    .map((m) => m.id);
+}
+
+/**
+ * Merge a fresh Cloud Code read (plan, quota windows, model catalog) into a key's oauthMeta.
+ * Parts Google did not answer keep their previous value.
+ *
+ * @param {any} meta
+ * @param {any} usage result of fetchCloudCodeUsage (or a subset: `{ catalogOk, models, defaultModelId }`)
+ * @param {string} checkedAt ISO time
+ * @returns {any}
+ */
+export function mergeCloudCodeUsage(meta, usage, checkedAt) {
+  return {
+    ...(meta || {}),
+    ...(usage.projectId ? { projectId: usage.projectId } : {}),
+    ...(usage.tier ? { tier: usage.tier } : {}),
+    ...(usage.tierLabel ? { tierLabel: usage.tierLabel } : {}),
+    ...(usage.quotaOk
+      ? {
+          quotaBuckets: usage.buckets,
+          quotaWindows: usage.windows,
+          perModelHidden: usage.perModelHidden
+        }
+      : {}),
+    ...(usage.catalogOk
+      ? {
+          availableModels: usage.models,
+          defaultModelId: usage.defaultModelId,
+          catalogAt: checkedAt
+        }
+      : {}),
+    checkedAt
+  };
+}
+
+/**
+ * Keep an Antigravity provider's model list equal to what its accounts' plans offer, so
+ * `/v1/models`, the Providers page and the quota page show one list. No-op without a catalog.
+ *
+ * @param {any} provider mutable provider record
+ * @returns {boolean} whether the list changed
+ */
+export function syncProviderModelsWithCatalog(provider) {
+  if (!provider) return false;
+  const ids = [];
+  for (const k of provider.apiKeys || []) {
+    if (!k || k.enabled === false || k.authMethod !== "antigravity") continue;
+    for (const id of catalogChatModelIds(k.oauthMeta?.availableModels)) {
+      if (!ids.includes(id)) ids.push(id);
+    }
+  }
+  if (ids.length === 0) return false;
+  const current = Array.isArray(provider.models) ? provider.models : [];
+  if (current.length === ids.length && current.every((m, i) => m === ids[i])) return false;
+  provider.models = ids;
+  return true;
+}
+
+/**
+ * Map a requested model id onto an id the account's catalog contains, or "" when none matches.
+ * Order: the id itself -> its alias / reasoning_effort tier -> a default tier (-medium, -high, -low).
+ *
+ * @param {string} requested
+ * @param {Array<{ id: string }>} models
+ * @param {any} [body] OpenAI chat body (for reasoning_effort)
+ * @returns {string}
+ */
+export function resolveCatalogModel(requested, models, body) {
+  const ids = new Set((Array.isArray(models) ? models : []).map((m) => m?.id).filter(Boolean));
+  const id = String(requested || "").trim();
+  if (!id || ids.size === 0) return "";
+  if (ids.has(id)) return id;
+  const viaAlias = resolveUpstreamModel(id, body, CLOUD_CODE_FLAVORS.antigravity).model;
+  if (ids.has(viaAlias)) return viaAlias;
+  for (const tier of ["medium", "high", "low"]) {
+    if (ids.has(`${id}-${tier}`)) return `${id}-${tier}`;
+  }
+  return "";
+}
+
 /**
  * Read the weekly / 5-hour quota windows (Antigravity only).
  *
@@ -1101,6 +1301,10 @@ export async function fetchCloudCodeUsage(accessToken, options = {}) {
 
   const perModelReliable = flavor.id !== "antigravity" || plan?.tier === "paid";
   const allBuckets = Array.isArray(quota?.buckets) ? quota.buckets : [];
+  const catalog =
+    flavor.id === "antigravity"
+      ? parseAntigravityModelCatalog(quota?.raw)
+      : { models: [], defaultModelId: "" };
   return {
     tier: plan?.tier || "",
     tierLabel: plan?.tierLabel || "",
@@ -1108,8 +1312,11 @@ export async function fetchCloudCodeUsage(accessToken, options = {}) {
     buckets: perModelReliable ? allBuckets : [],
     windows: Array.isArray(summary?.windows) ? summary.windows : [],
     perModelHidden: !perModelReliable && allBuckets.length > 0,
+    models: catalog.models,
+    defaultModelId: catalog.defaultModelId,
     planOk: Boolean(plan),
-    quotaOk: Boolean(quota || summary)
+    quotaOk: Boolean(quota || summary),
+    catalogOk: catalog.models.length > 0
   };
 }
 
@@ -1190,9 +1397,12 @@ function withTimeout(promise, ms) {
  * Explain a Cloud Code 429 in words the user can act on.
  *
  * Google often answers a bare "Resource has been exhausted (e.g. check quota)" with no reason. For
- * Antigravity we then read the live weekly / 5-hour windows of the model's family: if the window is
- * empty it is the quota; if quota is left, Google refused this particular request (a known trigger
- * is a system prompt that names another client).
+ * Antigravity we then read, live and in parallel, the account's model catalog (with per-model
+ * quota) and the weekly / 5-hour windows, and decide in this order:
+ *  - "model":   the model is not on the account's plan (Google answers those with 429, not 404);
+ *  - "quota":   the model's quota (paid plans) or its family window is at 0%;
+ *  - "request": quota is left, so Google refused this request — blamed on the system prompt only
+ *               when one was sent, otherwise on the account / client / network.
  *
  * @param {{
  *   errText?: string,
@@ -1200,15 +1410,26 @@ function withTimeout(promise, ms) {
  *   projectId?: string,
  *   model?: string,
  *   flavor?: string,
+ *   tier?: string,
+ *   hasSystemPrompt?: boolean,
  *   fetchImpl?: typeof globalThis.fetch,
  *   dispatcher?: any,
  *   nowMs?: number,
  *   timeoutMs?: number
  * }} options
- * @returns {Promise<{ cause: "quota" | "capacity" | "request" | "unknown", resetAtMs: number | null, note: string, windows: any[] }>}
+ * @returns {Promise<{ cause: "model" | "quota" | "capacity" | "request" | "unknown", resetAtMs: number | null, note: string, windows: any[], catalog: { models: any[], defaultModelId: string } }>}
  */
 export async function explainCloudCode429(options = {}) {
-  const { errText = "", accessToken = "", projectId = "", model = "", timeoutMs = 4000 } = options;
+  const {
+    errText = "",
+    accessToken = "",
+    projectId = "",
+    model = "",
+    tier = "",
+    hasSystemPrompt = false,
+    timeoutMs = 4000
+  } = options;
+  const noCatalog = { models: [], defaultModelId: "" };
   const nowMs = options.nowMs ?? Date.now();
   const flavor = getCloudCodeFlavor(options.flavor);
   const parsed = parseCloudCodeRateLimit(errText, nowMs);
@@ -1219,6 +1440,7 @@ export async function explainCloudCode429(options = {}) {
       cause: "capacity",
       resetAtMs: null,
       windows: [],
+      catalog: noCatalog,
       note: "Google has no free capacity for this model right now (a server-side limit, not your quota). Retry in a minute or use another model."
     };
   }
@@ -1227,11 +1449,12 @@ export async function explainCloudCode429(options = {}) {
       cause: "quota",
       resetAtMs: parsed.resetAtMs,
       windows: [],
+      catalog: noCatalog,
       note: `Quota for this model is used up; Google says it resets at ${fmt(parsed.resetAtMs)}.`
     };
   }
   if (flavor.id !== "antigravity" || !accessToken) {
-    return { cause: "unknown", resetAtMs: null, windows: [], note: "" };
+    return { cause: "unknown", resetAtMs: null, windows: [], catalog: noCatalog, note: "" };
   }
 
   const common = {
@@ -1240,40 +1463,76 @@ export async function explainCloudCode429(options = {}) {
     flavor: flavor.id,
     projectId
   };
-  const summary = await withTimeout(fetchAntigravityQuotaSummary(accessToken, common), timeoutMs);
+  const [summary, quota] = await Promise.all([
+    withTimeout(fetchAntigravityQuotaSummary(accessToken, common), timeoutMs),
+    withTimeout(fetchGeminiCliQuota(accessToken, common), timeoutMs)
+  ]);
   const windows = Array.isArray(summary?.windows) ? summary.windows : [];
+  const catalog = quota ? parseAntigravityModelCatalog(quota.raw) : noCatalog;
+  const entry = catalog.models.find((m) => m.id === model) || null;
+
+  if (catalog.models.length > 0 && !entry) {
+    const chat = catalogChatModelIds(catalog.models);
+    const shown = chat.slice(0, 12);
+    return {
+      cause: "model",
+      resetAtMs: null,
+      windows,
+      catalog,
+      note: `'${model}' is not on this account's plan, and Google answers such models with 429 instead of 404. Models on this plan: ${shown.join(", ")}${chat.length > shown.length ? ", …" : ""}.`
+    };
+  }
+
   const family = antigravityQuotaFamily(model);
   const familyWindows = family ? windows.filter((w) => w.family === family.id) : [];
+  // Per-model numbers are only the real limit on paid plans (on free they mirror the weekly cap).
+  const modelQuota =
+    tier === "paid" && entry && entry.remainingFraction !== null ? entry : null;
 
-  if (familyWindows.length === 0) {
+  if (familyWindows.length === 0 && !modelQuota) {
     return {
       cause: "unknown",
       resetAtMs: null,
       windows,
-      note: "Google gave no reason and the weekly/5h quota could not be read. Run 'Chẩn đoán kết nối' on the Antigravity card: it shows the quota windows and sends one plain test chat."
+      catalog,
+      note: "Google gave no reason and the quota could not be read. Run 'Chẩn đoán kết nối' on the Antigravity card: it shows the quota and tries 3 plain test chats."
     };
   }
 
-  const describe = (w) => `${w.label} ${Math.round(w.remainingFraction * 100)}%`;
-  const empty = familyWindows.filter((w) => w.remainingFraction <= 0);
-  if (empty.length > 0) {
-    const resets = empty.map((w) => Date.parse(w.resetTime)).filter((ms) => Number.isFinite(ms) && ms > nowMs);
+  const empties = familyWindows
+    .filter((w) => w.remainingFraction <= 0)
+    .map((w) => ({ label: w.label, resetTime: w.resetTime }));
+  if (modelQuota && modelQuota.remainingFraction <= 0) {
+    empties.push({ label: model, resetTime: modelQuota.resetTime });
+  }
+  if (empties.length > 0) {
+    const resets = empties
+      .map((w) => Date.parse(w.resetTime))
+      .filter((ms) => Number.isFinite(ms) && ms > nowMs);
     const resetAtMs = resets.length ? Math.max(...resets) : null;
     return {
       cause: "quota",
       resetAtMs,
       windows,
-      note: `${empty.map((w) => w.label).join(" + ")} quota is used up (0% left)${
+      catalog,
+      note: `${empties.map((w) => w.label).join(" + ")} quota is used up (0% left)${
         resetAtMs ? `, resets at ${fmt(resetAtMs)}` : ""
       }. Models in another family draw from a separate pool (Gemini vs Claude & GPT).`
     };
   }
 
+  const left = [
+    ...familyWindows.map((w) => `${w.label} ${Math.round(w.remainingFraction * 100)}%`),
+    ...(modelQuota ? [`${model} ${Math.round(modelQuota.remainingFraction * 100)}%`] : [])
+  ].join(", ");
   return {
     cause: "request",
     resetAtMs: null,
     windows,
-    note: `Google still reports quota left (${familyWindows.map(describe).join(", ")}), so this is not your quota running out: Google refused this particular request. Known trigger: a system prompt that identifies another client (e.g. Claude Code's "x-anthropic-billing-header" line, "Claude Agent SDK", "OpenCode"). Try the same model with no system prompt.`
+    catalog,
+    note: hasSystemPrompt
+      ? `Google still reports quota left (${left}), so this is not your quota running out: Google refused this particular request. Known trigger: a system prompt that identifies another client (e.g. Claude Code's "x-anthropic-billing-header" line, "Claude Agent SDK", "OpenCode"). Try the same model with no system prompt.`
+      : `Google still reports quota left (${left}), so this is not your quota running out, and this request had no system prompt: Google is refusing '${model}' for this account, client or network. Run 'Chẩn đoán kết nối' on the Antigravity card (it tries 3 variants) or use another model from the plan.`
   };
 }
 
@@ -1481,6 +1740,10 @@ export async function exchangeGeminiCliOAuth(options = {}) {
       : Promise.resolve(null)
   ]);
   const perModelReliable = flavor.id !== "antigravity" || projectInfo.tier === "paid";
+  const catalog =
+    flavor.id === "antigravity"
+      ? parseAntigravityModelCatalog(quota.raw)
+      : { models: [], defaultModelId: "" };
 
   const oauthCredentials = {
     clientId: record.clientId,
@@ -1506,6 +1769,13 @@ export async function exchangeGeminiCliOAuth(options = {}) {
     quotaBuckets: perModelReliable ? quota.buckets : [],
     quotaWindows: Array.isArray(summary?.windows) ? summary.windows : [],
     perModelHidden: !perModelReliable && quota.buckets.length > 0,
+    ...(catalog.models.length
+      ? {
+          availableModels: catalog.models,
+          defaultModelId: catalog.defaultModelId,
+          catalogAt: new Date().toISOString()
+        }
+      : {}),
     checkedAt: new Date().toISOString()
   };
 

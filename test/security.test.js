@@ -17,6 +17,7 @@ import {
   stripPrototypePollution,
   validateProviderBaseUrl
 } from "../server/security/redact.js";
+import { runSecurityScan } from "../server/security/scan.js";
 
 function extractCookie(res) {
   const raw = res.headers.get("set-cookie");
@@ -928,6 +929,100 @@ describe("001Router Section 9.8 Security Hardening Test Suite", () => {
         body: { requireKey: false }
       });
       assert.equal(disableKeyRes.status, 400);
+    } finally {
+      if (prevVercel === undefined) delete process.env.VERCEL;
+      else process.env.VERCEL = prevVercel;
+    }
+  });
+});
+describe("Router API key enforcement is fail-closed (a backup cannot open /v1)", () => {
+  let tmpDir;
+  let app;
+  let server;
+  let baseUrl;
+  let cookie = "";
+  let routerKey = "";
+
+  const api = (urlPath, opts = {}) =>
+    fetch(`${baseUrl}${urlPath}`, {
+      method: opts.method || "GET",
+      headers: {
+        "x-requested-with": "001router",
+        ...(cookie ? { cookie } : {}),
+        ...(opts.body ? { "content-type": "application/json" } : {})
+      },
+      body: opts.body ? JSON.stringify(opts.body) : undefined
+    });
+  const v1 = (withKey) =>
+    fetch(`${baseUrl}/v1/models`, {
+      headers: withKey ? { authorization: `Bearer ${routerKey}` } : {}
+    });
+
+  before(async () => {
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "001router-keyenforce-"));
+    app = await createApp({ dataDir: tmpDir, port: 20128 });
+    server = app.listen(0, "127.0.0.1");
+    await new Promise((resolve) => server.once("listening", resolve));
+    baseUrl = `http://127.0.0.1:${server.address().port}`;
+    const login = await fetch(`${baseUrl}/api/login`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ password: "1234" })
+    });
+    assert.equal(login.status, 200);
+    cookie = extractCookie(login);
+    const created = await api("/api/keys", { method: "POST", body: { name: "enforce test" } });
+    assert.equal(created.status, 201);
+    routerKey = (await created.json()).key.key;
+  });
+
+  after(async () => {
+    server?.closeAllConnections?.();
+    await new Promise((resolve) => server.close(resolve));
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  });
+
+  it("a. settings without a requireKey field still require a key", async () => {
+    await app.locals.storage.update((data) => {
+      delete data.settings.requireKey;
+    });
+    assert.equal((await v1(false)).status, 401);
+    assert.equal((await v1(true)).status, 200);
+  });
+
+  it("b. importing a backup with requireKey:false leaves the key required", async () => {
+    const res = await api("/api/import", {
+      method: "POST",
+      body: { settings: { requireKey: false, requireLogin: false, timeoutMs: 4321 } }
+    });
+    assert.equal(res.status, 200, await res.text());
+    assert.notEqual(app.locals.storage.getSettings().requireKey, false);
+    assert.notEqual(app.locals.storage.getSettings().requireLogin, false);
+    assert.equal((await v1(false)).status, 401);
+  });
+
+  it("c. a valid import still updates ordinary settings", async () => {
+    assert.equal(app.locals.storage.getSettings().timeoutMs, 4321);
+  });
+
+  it("d. on a public deployment a stored requireKey:false is overridden", async () => {
+    await app.locals.storage.update((data) => {
+      data.settings.requireKey = false;
+    });
+    assert.equal((await v1(false)).status, 200, "a loopback install may make the key optional");
+
+    const prevVercel = process.env.VERCEL;
+    process.env.VERCEL = "1";
+    try {
+      assert.equal((await v1(false)).status, 401);
+      assert.equal((await v1(true)).status, 200);
+      const settings = await (await api("/api/settings")).json();
+      assert.equal(settings.publicDeployment, true);
+      assert.equal(settings.effective.requireKey, true);
+      const scan = await runSecurityScan({ storage: app.locals.storage });
+      const check = scan.checks.find((c) => c.id === "routerKeyEnforced");
+      assert.equal(check.status, "PASS");
+      assert.match(check.detail, /overrides a stored requireKey=false/);
     } finally {
       if (prevVercel === undefined) delete process.env.VERCEL;
       else process.env.VERCEL = prevVercel;

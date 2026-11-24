@@ -3,6 +3,7 @@ import path from "node:path";
 import { isEncrypted, MASTER_KEY_FILENAME } from "./crypto.js";
 import { containsUnredactedSecret } from "./redact.js";
 import { CSP_HEADER_VALUE, isLoopbackHost } from "./headers.js";
+import { isPublicDeployment, isRouterKeyRequired } from "../auth.js";
 
 /**
  * Recursively collect all `.js` files inside a directory (excluding `security/scan.js` itself).
@@ -200,6 +201,12 @@ export async function runSecurityScan(options = {}) {
   }
   const routerKeysHashed = plaintextRouterKeys === 0;
 
+  // 2b. Router API key on /v1/* — fail-closed, and always forced on public deployments.
+  const publicDeployment = isPublicDeployment(storage || { bindHost });
+  const storedRequireKey = storage?.getSettings?.()?.requireKey;
+  const routerKeyRequired = isRouterKeyRequired(storage || { bindHost, getSettings: () => ({}) });
+  const routerKeyEnforced = routerKeyRequired || !publicDeployment;
+
   // 3. Check Logs for secrets or raw prompt/response bodies
   let logSecretLeaks = 0;
   let logBodyLeaks = 0;
@@ -300,6 +307,18 @@ export async function runSecurityScan(options = {}) {
         : `Found ${plaintextRouterKeys} plaintext router key(s) in db.json`
     },
     {
+      id: "routerKeyEnforced",
+      label: "Router API Key Required on /v1/*",
+      status: routerKeyEnforced ? "PASS" : "FAIL",
+      detail: !routerKeyRequired
+        ? publicDeployment
+          ? "Router API key is OPTIONAL on a public deployment: anyone with the URL can use your providers"
+          : "Router API key optional — allowed only on a loopback (local) install"
+        : publicDeployment && storedRequireKey === false
+          ? "Enforced: this public deployment overrides a stored requireKey=false (e.g. from an imported backup)"
+          : "Every /v1/* request needs a valid router API key"
+    },
+    {
       id: "noSecretsInLogs",
       label: "Zero Secrets / Bodies in Logs",
       status: noSecretsInLogs ? "PASS" : "FAIL",
@@ -356,6 +375,7 @@ export async function runSecurityScan(options = {}) {
   const ok =
     encryptionAtRest &&
     routerKeysHashed &&
+    routerKeyEnforced &&
     noSecretsInLogs &&
     headersConfigured &&
     corsLocked &&
@@ -367,6 +387,7 @@ export async function runSecurityScan(options = {}) {
     scannedAt: new Date().toISOString(),
     encryptionAtRest,
     routerKeysHashed,
+    routerKeyEnforced,
     noSecretsInLogs,
     headers: headersConfigured,
     corsLocked,

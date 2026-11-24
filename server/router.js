@@ -1,9 +1,15 @@
 import { nanoid } from "nanoid";
 import { PRESETS, buildUpstreamUrl, getPreset, isKeyOptionalProvider } from "./presets.js";
 import {
+  catalogChatModelIds,
   explainCloudCode429,
+  fetchGeminiCliQuota,
   getCloudCodeFlavorForKey,
-  loadGeminiCliProject
+  loadGeminiCliProject,
+  mergeCloudCodeUsage,
+  parseAntigravityModelCatalog,
+  resolveCatalogModel,
+  syncProviderModelsWithCatalog
 } from "./geminiCliOAuth.js";
 import { buildCloudCodeRequest } from "./geminiCliTranslator.js";
 import {
@@ -45,8 +51,34 @@ import {
 
 export { resolveAuthContextForKey, resolveAuthSecretForKey };
 export const COOLDOWN_MS = 60_000;
+
+/**
+ * Best-effort caller IP for request logs (to trace who used the router). On Vercel the edge sets
+ * `x-real-ip` and clients cannot forge it; elsewhere `req.ip`, which only honours forwarding
+ * headers when ROUTER001_TRUST_PROXY is set.
+ * @param {import("express").Request} req
+ * @returns {string}
+ */
+function requestClientIp(req) {
+  if (process.env.VERCEL) {
+    const real = req.headers?.["x-real-ip"];
+    if (typeof real === "string" && real.trim()) return real.trim().slice(0, 64);
+  }
+  return String(req.ip || req.socket?.remoteAddress || "").slice(0, 64);
+}
+
 /** Upper bound for a Cloud Code cooldown taken from Google's quota reset time. */
 const MAX_CLOUD_CODE_COOLDOWN_MS = 6 * 60 * 60 * 1000;
+/** A stored Antigravity model catalog older than this is re-read before refusing a model. */
+const CLOUD_CODE_CATALOG_RECHECK_MS = 60 * 60 * 1000;
+/**
+ * Strike breaker (same idea as the reference router, #3681): Google can keep answering 429 while
+ * its quota API still reports quota left. After this many such 429s for one key+model within the
+ * window, pause that pair instead of hammering Google.
+ */
+const CLOUD_CODE_STRIKE_LIMIT = 3;
+const CLOUD_CODE_STRIKE_WINDOW_MS = 60_000;
+const CLOUD_CODE_STRIKE_PAUSE_MS = 15 * 60_000;
 
 /**
  * Parse a direct `"providerSlug/upstreamModel"` target on the first `/`.
@@ -570,6 +602,8 @@ export class RouterService {
     this.modelCooldowns = new Map();
     /** Same key as modelCooldowns -> why it is cooling down (shown while the cooldown lasts). */
     this.modelCooldownNotes = new Map();
+    /** Same key as modelCooldowns -> { count, since } of Cloud Code 429s while quota was left. */
+    this.cloudCodeStrikes = new Map();
     /** @type {Map<string, { idx: number, count: number }>} */
     this.stickyCursors = new Map();
     /** @type {Map<string, number>} */
@@ -800,6 +834,57 @@ export class RouterService {
     return { note, untilMs };
   }
 
+  /**
+   * Store a fresh Antigravity model catalog on the key (and align the provider's model list).
+   * @param {string} providerId
+   * @param {string} keyId
+   * @param {{ models: any[], defaultModelId: string }} catalog
+   */
+  async _storeCloudCodeCatalog(providerId, keyId, catalog) {
+    if (!keyId || !catalog?.models?.length) return;
+    const at = new Date().toISOString();
+    await this.storage
+      .update((data) => {
+        const p = data.providers.find((x) => x.id === providerId);
+        const k = (p?.apiKeys || []).find((x) => x.id === keyId);
+        if (!k) return;
+        k.oauthMeta = mergeCloudCodeUsage(
+          k.oauthMeta,
+          { catalogOk: true, models: catalog.models, defaultModelId: catalog.defaultModelId },
+          at
+        );
+        if (syncProviderModelsWithCatalog(p)) p.updatedAt = at;
+      })
+      .catch(() => {});
+  }
+
+  /**
+   * Re-read an Antigravity account's model catalog (best effort, 4s) and store it.
+   * @returns {Promise<any[]>} the fresh models, or [] when Google did not answer in time
+   */
+  async _refreshCloudCodeCatalog(provider, keyEntry, accessToken, projectId, opts = {}) {
+    let timer;
+    try {
+      const quota = await Promise.race([
+        fetchGeminiCliQuota(accessToken, {
+          flavor: "antigravity",
+          projectId,
+          ...(opts.fetchImpl ? { fetchImpl: opts.fetchImpl } : {}),
+          ...(opts.dispatcher ? { dispatcher: opts.dispatcher } : {})
+        }).catch(() => null),
+        new Promise((resolve) => {
+          timer = setTimeout(() => resolve(null), 4000);
+        })
+      ]);
+      const catalog = parseAntigravityModelCatalog(quota?.raw);
+      if (!catalog.models.length) return [];
+      await this._storeCloudCodeCatalog(provider.id, keyEntry.id, catalog);
+      return catalog.models;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   isKeyModelCoolingDown(providerId, keyId, model, now = Date.now()) {
     if (!model || !keyId) return false;
     const k = this._modelCooldownKey(providerId, keyId, model);
@@ -961,6 +1046,7 @@ export class RouterService {
     const settings = this.storage.getSettings();
     const timeoutMs = settings.timeoutMs || 120000;
     const routerKey = req.routerKey || null;
+    const clientIp = requestClientIp(req);
 
     // Enforce per-key access restrictions if enabled on this Router API Key
     if (routerKey && !isRouterKeyModelAllowed(routerKey, requestedModel)) {
@@ -977,6 +1063,7 @@ export class RouterService {
           timestamp: new Date().toISOString(),
           keyId: routerKey?.id || null,
           keyName: routerKey?.name || "Anonymous",
+          clientIp,
           requestedModel: requestedModel || "",
           resolvedModel: requestedModel || "",
           providerSlug: null,
@@ -1326,14 +1413,74 @@ export class RouterService {
                   break;
                 }
 
+                // Antigravity plans differ per account and over time. Google answers a model that
+                // is not on the plan with a misleading "429 check quota", so only send ids the
+                // account's own catalog (fetchAvailableModels) offers, and refuse others here.
+                let catalogModel = "";
+                if (cloudCodeFlavor.id === "antigravity") {
+                  let catalog = Array.isArray(keyEntry?.oauthMeta?.availableModels)
+                    ? keyEntry.oauthMeta.availableModels
+                    : [];
+                  catalogModel = resolveCatalogModel(target.upstreamModel, catalog, savedBody);
+                  const catalogAgeMs =
+                    Date.now() - (Date.parse(keyEntry?.oauthMeta?.catalogAt || "") || 0);
+                  if (catalog.length && !catalogModel && catalogAgeMs > CLOUD_CODE_CATALOG_RECHECK_MS) {
+                    const fresh = await this._refreshCloudCodeCatalog(
+                      provider,
+                      keyEntry,
+                      resolvedSecret,
+                      cloudProject,
+                      { fetchImpl: cloudCodeFetch, dispatcher }
+                    );
+                    if (fresh.length) {
+                      catalog = fresh;
+                      catalogModel = resolveCatalogModel(target.upstreamModel, catalog, savedBody);
+                    }
+                  }
+                  if (catalog.length && !catalogModel) {
+                    const chat = catalogChatModelIds(catalog);
+                    const shown = chat.slice(0, 12);
+                    const suggestion = keyEntry?.oauthMeta?.defaultModelId || shown[0] || "";
+                    const msg = `Model '${target.upstreamModel}' is not on this Antigravity account's plan (${
+                      keyEntry?.oauthMeta?.tierLabel || "Antigravity"
+                    }); Google would only answer "429 check quota". Models on this plan: ${shown.join(", ")}${
+                      chat.length > shown.length ? ", …" : ""
+                    }.${suggestion ? ` Use e.g. '${provider.slug}/${suggestion}'.` : ""} If the plan just changed, press 'Làm mới gói & quota' on the Antigravity card.`;
+                    clearTimeout(timer);
+                    this.liveEvents?.markRequestEnd(provider.slug, {
+                      model: `${provider.slug}/${target.upstreamModel}`,
+                      status: 404,
+                      latencyMs: Date.now() - attemptStart,
+                      error: msg
+                    });
+                    markedActive = false;
+                    attemptTrail.push({
+                      target: target.raw,
+                      providerSlug: provider.slug,
+                      model: target.upstreamModel,
+                      keyId: keyEntry.id,
+                      status: 404,
+                      latencyMs: Date.now() - attemptStart,
+                      error: msg
+                    });
+                    lastErrorStatus = 404;
+                    lastErrorMessage = msg;
+                    break;
+                  }
+                }
+
                 effectiveUrl = isStream ? cloudCodeFlavor.streamUrl : cloudCodeFlavor.generateUrl;
                 const envelope = buildCloudCodeRequest(
-                  target.upstreamModel,
+                  catalogModel || target.upstreamModel,
                   savedBody,
                   cloudProject,
-                  { flavor: cloudCodeFlavor }
+                  { flavor: cloudCodeFlavor, exactModel: Boolean(catalogModel) }
                 );
-                cloudCodeCtx = { projectId: cloudProject, model: envelope.model };
+                cloudCodeCtx = {
+                  projectId: cloudProject,
+                  model: envelope.model,
+                  hasSystemPrompt: Boolean(envelope.request?.systemInstruction)
+                };
                 effectiveBody = JSON.stringify(envelope);
                 effectiveHeaders = {
                   ...cloudCodeFlavor.chatHeaders(resolvedSecret, {
@@ -1388,10 +1535,34 @@ export class RouterService {
                         projectId: cloudCodeCtx?.projectId || "",
                         model: cloudCodeCtx?.model || target.upstreamModel,
                         flavor: cloudCodeFlavor.id,
+                        tier: keyEntry?.oauthMeta?.tier || "",
+                        hasSystemPrompt: cloudCodeCtx?.hasSystemPrompt === true,
                         ...(cloudCodeFetch ? { fetchImpl: cloudCodeFetch } : {}),
                         ...(dispatcher ? { dispatcher } : {})
                       }).catch(() => null)
                     : null;
+                // The live read found the model missing from the plan: keep that catalog so the
+                // next request is refused locally with the real model list.
+                if (cloudCodeVerdict?.cause === "model" && !keyEntry.isAnonymous) {
+                  await this._storeCloudCodeCatalog(provider.id, keyEntry.id, cloudCodeVerdict.catalog);
+                }
+                // Strike breaker for 429s while quota is left (see CLOUD_CODE_STRIKE_LIMIT).
+                let strikePause = false;
+                if (cloudCodeVerdict?.cause === "request" && keyEntry.id) {
+                  const sk = this._modelCooldownKey(provider.id, keyEntry.id, target.upstreamModel);
+                  const now = Date.now();
+                  const prev = this.cloudCodeStrikes.get(sk);
+                  const since =
+                    prev && now - prev.since <= CLOUD_CODE_STRIKE_WINDOW_MS ? prev.since : now;
+                  const count = prev && since === prev.since ? prev.count + 1 : 1;
+                  if (count >= CLOUD_CODE_STRIKE_LIMIT) {
+                    this.cloudCodeStrikes.delete(sk);
+                    strikePause = true;
+                    cloudCodeVerdict.note += ` Paused this model on this account for 15 minutes after ${count} refusals in a row.`;
+                  } else {
+                    this.cloudCodeStrikes.set(sk, { count, since });
+                  }
+                }
                 // Prefix with provenance: the text is the PROVIDER's own message, not 001Router's.
                 const cleanMsg = `upstream ${provider.slug} HTTP ${upstreamRes.status}: ${sanitizeSecrets(
                   extractUpstreamErrorMessage(errText, upstreamRes.status),
@@ -1424,14 +1595,17 @@ export class RouterService {
                 });
 
                 // Cloud Code quota is per model family, so a 429 never takes the whole account
-                // down; a refused request (quota still left) is not cooled down at all.
+                // down. A model missing from the plan is refused locally from now on; a refused
+                // request (quota still left) only cools down once the strike breaker trips.
                 const cooldownScope = cloudCodeVerdict
-                  ? cloudCodeVerdict.cause === "request"
+                  ? cloudCodeVerdict.cause === "model" ||
+                    (cloudCodeVerdict.cause === "request" && !strikePause)
                     ? null
                     : "model"
                   : getCooldownScope(upstreamRes.status, cleanMsg);
-                const cooldownUntil =
-                  cloudCodeVerdict?.resetAtMs && cloudCodeVerdict.resetAtMs > Date.now()
+                const cooldownUntil = strikePause
+                  ? Date.now() + CLOUD_CODE_STRIKE_PAUSE_MS
+                  : cloudCodeVerdict?.resetAtMs && cloudCodeVerdict.resetAtMs > Date.now()
                     ? Math.min(
                         Math.max(cloudCodeVerdict.resetAtMs, Date.now() + COOLDOWN_MS),
                         Date.now() + MAX_CLOUD_CODE_COOLDOWN_MS
@@ -1576,6 +1750,9 @@ export class RouterService {
                   this.modelCooldowns.delete(
                     this._modelCooldownKey(provider.id, keyEntry.id, target.upstreamModel)
                   );
+                  this.cloudCodeStrikes.delete(
+                    this._modelCooldownKey(provider.id, keyEntry.id, target.upstreamModel)
+                  );
                 }
 
                 const logId = nanoid();
@@ -1613,6 +1790,7 @@ export class RouterService {
                     timestamp: loggedAt,
                     keyId: routerKey?.id || null,
                     keyName: routerKey?.name || "Anonymous",
+                    clientIp,
                     requestedModel,
                     resolvedModel: `${target.providerSlug}/${target.upstreamModel}`,
                     providerSlug: provider.slug,
@@ -1826,6 +2004,9 @@ export class RouterService {
                   this.modelCooldowns.delete(
                     this._modelCooldownKey(provider.id, keyEntry.id, target.upstreamModel)
                   );
+                  this.cloudCodeStrikes.delete(
+                    this._modelCooldownKey(provider.id, keyEntry.id, target.upstreamModel)
+                  );
                 }
               }
 
@@ -1866,6 +2047,7 @@ export class RouterService {
                   timestamp: streamLoggedAt,
                   keyId: routerKey?.id || null,
                   keyName: routerKey?.name || "Anonymous",
+                  clientIp,
                   requestedModel,
                   resolvedModel: `${target.providerSlug}/${target.upstreamModel}`,
                   providerSlug: provider.slug,
@@ -1967,6 +2149,7 @@ export class RouterService {
           timestamp: new Date().toISOString(),
           keyId: routerKey?.id || null,
           keyName: routerKey?.name || "Anonymous",
+          clientIp,
           requestedModel,
           resolvedModel: finalTarget
             ? `${finalTarget.providerSlug}/${finalTarget.upstreamModel}`
