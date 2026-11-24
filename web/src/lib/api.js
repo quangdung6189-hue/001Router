@@ -139,43 +139,6 @@ export const providersApi = {
       method: 'POST',
       body: { code, state },
     }),
-  googleClientStatus: () => apiFetch('/api/providers/oauth/google/client-status'),
-  startGoogleOAuth: (payload) =>
-    apiFetch('/api/providers/oauth/google/start', {
-      method: 'POST',
-      body: payload,
-    }),
-  exchangeGoogleOAuth: (codeOrPayload, state) =>
-    apiFetch('/api/providers/oauth/google/exchange', {
-      method: 'POST',
-      body:
-        codeOrPayload && typeof codeOrPayload === 'object'
-          ? codeOrPayload
-          : { code: codeOrPayload, state },
-    }),
-  refreshGooglePlan: (providerId) =>
-    apiFetch(`/api/providers/${encodeURIComponent(providerId)}/oauth/google/refresh-plan`, {
-      method: 'POST',
-    }),
-  geminiCliStatus: () => apiFetch('/api/providers/oauth/gemini-cli/status'),
-  diagnoseGeminiCli: (payload = {}) =>
-    apiFetch('/api/providers/oauth/gemini-cli/diagnose', {
-      method: 'POST',
-      body: payload,
-    }),
-  startGeminiCliOAuth: (payload = {}) =>
-    apiFetch('/api/providers/oauth/gemini-cli/start', {
-      method: 'POST',
-      body: payload,
-    }),
-  exchangeGeminiCliOAuth: (codeOrPayload, state) =>
-    apiFetch('/api/providers/oauth/gemini-cli/exchange', {
-      method: 'POST',
-      body:
-        codeOrPayload && typeof codeOrPayload === 'object'
-          ? codeOrPayload
-          : { code: codeOrPayload, state },
-    }),
   startAntigravityOAuth: (payload = {}) =>
     apiFetch('/api/providers/oauth/antigravity/start', {
       method: 'POST',

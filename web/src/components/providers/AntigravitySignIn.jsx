@@ -2,39 +2,21 @@ import { useMemo, useState } from 'react';
 import { BadgeCheck, CheckCircle2, ExternalLink, RefreshCw, Terminal } from 'lucide-react';
 import { CopyButton } from '../CopyButton';
 
-const VARIANTS = {
-  gemini_cli: {
-    name: 'Gemini CLI',
-    title: 'Đăng nhập Gemini CLI (Cloud Code Assist)',
-    badge: 'Không cần GCP Project',
-    accent: '#E56A4A',
-    defaultRedirect: 'http://127.0.0.1:1455/oauth2callback',
-    description: (
-      <>
-        Dùng OAuth client công khai của <strong>Gemini CLI</strong> — cùng client mà 9router dùng.
-        Không cần tạo OAuth client riêng, không cần bật Cloud Billing. Server tự gọi{' '}
-        <code>loadCodeAssist</code> để lấy project miễn phí và <code>retrieveUserQuota</code> để
-        hiện gói.
-      </>
-    ),
-    warning: null,
-  },
-  antigravity: {
-    name: 'Antigravity',
-    title: 'Đăng nhập Antigravity (Google)',
-    badge: 'Thử nghiệm',
-    accent: '#F59E0B',
-    defaultRedirect: 'http://localhost:1456/callback',
-    description: (
-      <>
-        Dùng OAuth client của <strong>Antigravity IDE</strong> — dịch vụ Google thay cho Gemini CLI.
-        Kết nối tạo (hoặc cập nhật) provider riêng <strong>Antigravity (Google)</strong> với model
-        Gemini 3.x/4 và Claude. Chat đi qua <code>daily-cloudcode-pa.googleapis.com</code>.
-      </>
-    ),
-    warning:
-      'Đây là client không chính thức: Google có thể chặn hoặc hạn chế tài khoản dùng nó qua công cụ bên thứ ba. Nên dùng tài khoản phụ để thử.',
-  },
+const AG = {
+  name: 'Antigravity',
+  title: 'Đăng nhập Antigravity (Google)',
+  badge: 'Thử nghiệm',
+  accent: '#F59E0B',
+  defaultRedirect: 'http://localhost:1456/callback',
+  description: (
+    <>
+      Dùng OAuth client của <strong>Antigravity IDE</strong> — dịch vụ Google thay cho Gemini CLI.
+      Kết nối tạo (hoặc cập nhật) provider riêng <strong>Antigravity (Google)</strong> với model
+      Gemini 3.x/4 và Claude. Chat đi qua <code>daily-cloudcode-pa.googleapis.com</code>.
+    </>
+  ),
+  warning:
+    'Đây là client không chính thức: Google có thể chặn hoặc hạn chế tài khoản dùng nó qua công cụ bên thứ ba. Nên dùng tài khoản phụ để thử.',
 };
 
 const FAMILY_LABELS = {
@@ -273,22 +255,12 @@ function diagnosisVerdict(d) {
 }
 
 /**
- * Gemini CLI (Cloud Code Assist) sign-in — the same public OAuth client the official
- * `gemini-cli` binary uses. Google accepts a loopback redirect on any port for that client,
- * so a dashboard hosted on Vercel can finish the flow by pasting the callback URL back.
- *
- * This is the path that resolves the account plan/quota without any GCP project or
- * Cloud Billing, because the upstream is `cloudcode-pa.googleapis.com`.
+ * Antigravity sign-in — the Antigravity IDE's public OAuth client. Google accepts a loopback
+ * redirect on any port for that client, so a dashboard hosted on Vercel can finish the flow by
+ * pasting the callback URL back. Also lists the connected accounts with their plan and quota.
  */
-export function GeminiCliSignIn({
-  onStart,
-  onComplete,
-  onDiagnose,
-  onRefresh,
-  accounts = [],
-  variant = 'gemini_cli',
-}) {
-  const v = VARIANTS[variant] || VARIANTS.gemini_cli;
+export function AntigravitySignIn({ onStart, onComplete, onDiagnose, onRefresh, accounts = [] }) {
+  const v = AG;
   const DEFAULT_CLI_REDIRECT = v.defaultRedirect;
   const [redirectUri, setRedirectUri] = useState(DEFAULT_CLI_REDIRECT);
   const [authUrl, setAuthUrl] = useState('');

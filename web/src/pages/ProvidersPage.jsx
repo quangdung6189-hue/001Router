@@ -50,7 +50,7 @@ import { CopyButton } from '../components/CopyButton';
 import { ProviderLogo } from '../components/ProviderLogo';
 import { ProviderCard } from '../components/providers/ProviderCard';
 import { GoogleMark } from '../components/providers/GoogleMark';
-import { GeminiCliSignIn } from '../components/providers/GeminiCliSignIn';
+import { AntigravitySignIn } from '../components/providers/AntigravitySignIn';
 import {
   getGoogleOAuthMeta,
   getGoogleTierDotClass,
@@ -196,237 +196,6 @@ const VERTEX_REGIONS = [
 ];
 
 const GCP_SERVICE_ACCOUNTS_URL = 'https://console.cloud.google.com/iam-admin/serviceaccounts';
-const GCP_OAUTH_CREDENTIALS_URL = 'https://console.cloud.google.com/apis/credentials';
-
-const DEFAULT_GOOGLE_MANUAL_REDIRECT = 'http://127.0.0.1:1455/oauth2callback';
-
-/**
- * Manual Google sign-in: opens Google in a new tab with a loopback redirect URI that nothing is listening on,
- * then lets the user paste the full address from the browser bar (?code=...&state=...) to finish the exchange.
- * Works with the user's OWN Google Cloud OAuth client (Desktop app), also when the dashboard is hosted remotely.
- */
-function GoogleManualSignIn({ onStart, onComplete }) {
-  const [redirectUri, setRedirectUri] = useState(DEFAULT_GOOGLE_MANUAL_REDIRECT);
-  const [authUrl, setAuthUrl] = useState('');
-  const [startedAt, setStartedAt] = useState(0);
-  const [pasted, setPasted] = useState('');
-  const [busy, setBusy] = useState('');
-  const [feedback, setFeedback] = useState(null);
-
-  const redirectError = useMemo(() => {
-    try {
-      const u = new URL(redirectUri.trim());
-      if (u.protocol !== 'http:' && u.protocol !== 'https:') {
-        return 'Redirect URI phải bắt đầu bằng http:// hoặc https://';
-      }
-      if (!['127.0.0.1', 'localhost', '[::1]'].includes(u.hostname) && u.hostname !== window.location.hostname) {
-        return 'Redirect URI nên dùng 127.0.0.1 hoặc localhost (hoặc đúng domain dashboard).';
-      }
-      return '';
-    } catch {
-      return 'Redirect URI không hợp lệ.';
-    }
-  }, [redirectUri]);
-
-  const handleOpen = async () => {
-    if (redirectError) return;
-    setFeedback(null);
-    setBusy('start');
-    try {
-      const url = await onStart(redirectUri.trim());
-      setAuthUrl(url);
-      setStartedAt(Date.now());
-      setPasted('');
-      const w = window.open(url, '_blank', 'noopener,noreferrer');
-      setFeedback({
-        type: 'info',
-        message: w
-          ? 'Đã mở tab đăng nhập Google. Chọn tài khoản → Allow, sau đó quay lại đây dán địa chỉ.'
-          : 'Trình duyệt chặn tab mới — bấm liên kết "Mở trang đăng nhập Google" bên dưới.',
-      });
-    } catch (err) {
-      setFeedback({ type: 'error', message: err?.message || 'Không thể bắt đầu đăng nhập Google.' });
-    } finally {
-      setBusy('');
-    }
-  };
-
-  const handleComplete = async () => {
-    const value = pasted.trim();
-    if (!value) {
-      setFeedback({ type: 'error', message: 'Hãy dán địa chỉ (URL) từ thanh địa chỉ trình duyệt sau khi bấm Allow.' });
-      return;
-    }
-    setFeedback(null);
-    setBusy('complete');
-    try {
-      await onComplete(value);
-      setPasted('');
-      setAuthUrl('');
-      setStartedAt(0);
-      setFeedback({ type: 'success', message: 'Kết nối Google thành công.' });
-    } catch (err) {
-      setFeedback({ type: 'error', message: err?.message || 'Không thể hoàn tất kết nối Google.' });
-    } finally {
-      setBusy('');
-    }
-  };
-
-  const minutesLeft = startedAt ? Math.max(0, 10 - Math.floor((Date.now() - startedAt) / 60000)) : 0;
-  const feedbackClass =
-    feedback?.type === 'error'
-      ? 'border-red-500/40 bg-red-500/10 text-red-400'
-      : feedback?.type === 'success'
-        ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-500'
-        : 'border-blue-500/30 bg-blue-500/10 text-blue-400';
-
-  return (
-    <details className="group rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-card)]">
-      <summary className="flex cursor-pointer list-none flex-wrap items-center justify-between gap-2 px-4 py-3 text-xs font-semibold text-[var(--text-primary)]">
-        <span className="inline-flex items-center gap-2">
-          <GoogleMark className="h-4 w-4" />
-          Đăng nhập thủ công — dán URL callback
-        </span>
-        <span className="text-[11px] font-normal text-[var(--text-muted)]">
-          Dùng khi dashboard không chạy trên localhost hoặc tab Google không tự quay lại
-        </span>
-      </summary>
-
-      <div className="space-y-3 border-t border-[var(--border-subtle)] px-4 py-3 text-[11px] leading-relaxed text-[var(--text-secondary)]">
-        <ol className="list-decimal space-y-1.5 pl-4">
-          <li>
-            Trong{' '}
-            <a
-              href={GCP_OAUTH_CREDENTIALS_URL}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="font-semibold text-blue-500 hover:underline"
-            >
-              Google Cloud Console → Credentials
-            </a>{' '}
-            tạo <strong>OAuth client ID</strong> loại <strong>Desktop app</strong> (client Desktop chấp nhận mọi cổng
-            loopback). Nếu dùng loại <em>Web application</em>, thêm đúng Redirect URI bên dưới vào danh sách
-            Authorized redirect URIs. Nhập Client ID/Secret ở form bên dưới (hoặc tải <code>client_secret.json</code>).
-          </li>
-          <li>
-            Redirect URI (phải khớp từng ký tự, kể cả đường dẫn):
-            <div className="mt-1 flex flex-wrap items-center gap-2">
-              <input
-                type="text"
-                value={redirectUri}
-                onChange={(e) => setRedirectUri(e.target.value)}
-                spellCheck={false}
-                aria-label="Redirect URI"
-                className="field-input min-w-0 flex-1 px-2.5 py-1.5 font-mono text-xs"
-              />
-              <CopyButton value={redirectUri} size="xs" toastMessage={`Copied ${redirectUri}`} />
-            </div>
-            {redirectError ? <p className="mt-1 text-red-400">{redirectError}</p> : null}
-          </li>
-          <li>
-            <button
-              type="button"
-              onClick={handleOpen}
-              disabled={busy !== '' || Boolean(redirectError)}
-              className="r-btn-primary inline-flex items-center gap-1.5 px-3 py-1.5 text-xs"
-            >
-              {busy === 'start' ? (
-                <RefreshCw className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" aria-hidden="true" />
-              ) : (
-                <ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />
-              )}
-              <span>Mở đăng nhập Google</span>
-            </button>
-            {authUrl ? (
-              <a
-                href={authUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="ml-3 font-semibold text-blue-500 hover:underline"
-              >
-                Mở trang đăng nhập Google (nếu tab không tự mở)
-              </a>
-            ) : null}
-          </li>
-          <li>
-            Chọn tài khoản → <strong>Allow</strong>. Trình duyệt sẽ chuyển tới <code>{redirectUri || '127.0.0.1…'}</code>{' '}
-            và báo <em>“Không thể truy cập trang này / ERR_CONNECTION_REFUSED”</em> — <strong>đó là bình thường</strong>.
-            Hãy <strong>copy toàn bộ địa chỉ trên thanh địa chỉ</strong> (phải có <code>?code=…&amp;state=…</code>).
-          </li>
-          <li>Dán vào ô dưới đây rồi bấm “Hoàn tất kết nối”.</li>
-        </ol>
-
-        <textarea
-          value={pasted}
-          onChange={(e) => setPasted(e.target.value)}
-          rows={3}
-          spellCheck={false}
-          autoComplete="off"
-          placeholder={`${redirectUri || DEFAULT_GOOGLE_MANUAL_REDIRECT}?state=...&code=4/0A...&scope=...`}
-          aria-label="Callback URL đã copy từ thanh địa chỉ"
-          className="field-input w-full px-2.5 py-2 font-mono text-xs"
-        />
-
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <button
-            type="button"
-            onClick={handleComplete}
-            disabled={busy !== '' || !pasted.trim()}
-            className="r-btn-secondary inline-flex items-center gap-1.5 px-3 py-1.5 text-xs"
-          >
-            {busy === 'complete' ? (
-              <RefreshCw className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" aria-hidden="true" />
-            ) : (
-              <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />
-            )}
-            <span>Hoàn tất kết nối</span>
-          </button>
-          {startedAt ? (
-            <span className="text-[11px] text-[var(--text-muted)]">
-              Phiên đăng nhập hết hạn sau ~10 phút (còn khoảng {minutesLeft} phút).
-            </span>
-          ) : null}
-        </div>
-
-        {feedback ? (
-          <p role={feedback.type === 'error' ? 'alert' : 'status'} className={`rounded-lg border px-3 py-2 ${feedbackClass}`}>
-            {feedback.message}
-          </p>
-        ) : null}
-
-        <div className="space-y-1 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-subtle)] p-2.5">
-          <div className="font-semibold text-[var(--text-primary)]">Gặp lỗi?</div>
-          <ul className="list-disc space-y-0.5 pl-4">
-            <li>
-              <code>redirect_uri_mismatch</code> — Redirect URI trong Cloud Console khác với ô ở bước 2 (kể cả{' '}
-              <code>/oauth2callback</code> và cổng). Client <em>Desktop</em> không cần khai báo.
-            </li>
-            <li>
-              <code>invalid_grant</code> — code đã dùng rồi / quá ~10 phút / copy thiếu. Bấm “Mở đăng nhập Google”
-              lại và dán ngay.
-            </li>
-            <li>
-              <code>access_denied</code> / “app is blocked” — thêm tài khoản của bạn vào <em>Test users</em> ở OAuth
-              consent screen (khi app đang ở chế độ Testing).
-            </li>
-            <li>
-              <code>invalid_client</code> — Client ID hoặc Client Secret sai.
-            </li>
-            <li>Cổng đã bị phần mềm khác chiếm: đổi cổng trong ô Redirect URI (ví dụ 8085) rồi bấm mở lại.</li>
-          </ul>
-          <p className="flex items-start gap-1.5 text-amber-500">
-            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-            <span>
-              URL chứa mã dùng một lần — không chia sẻ cho ai và chỉ dán ở đây. Sau khi kết nối xong có thể xoá khỏi
-              lịch sử trình duyệt.
-            </span>
-          </p>
-        </div>
-      </div>
-    </details>
-  );
-}
-
 function stripJsonCommentsAndTrailingCommas(str) {
   let out = '';
   let inString = false;
@@ -746,37 +515,6 @@ function parseLenientJsonInput(rawText) {
   }
 
   return { empty: false, ok: false, parsed: null, wasNormalized: false };
-}
-
-function parseGoogleClientSecretJson(rawText) {
-  const lenient = parseLenientJsonInput(rawText);
-  if (!lenient.ok || !lenient.parsed) {
-    return { ok: false };
-  }
-  const parsed = lenient.parsed;
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    return { ok: false };
-  }
-  const clientType = parsed.web
-    ? 'Web application'
-    : parsed.installed
-      ? 'Desktop app'
-      : 'OAuth Client';
-  const root = parsed.web || parsed.installed || parsed;
-  const clientId = String(root.client_id || root.clientId || '').trim();
-  const clientSecret = String(root.client_secret || root.clientSecret || '').trim();
-  const projectId = String(root.project_id || root.projectId || '').trim();
-  if (!clientId) {
-    return { ok: false };
-  }
-  return {
-    ok: true,
-    clientId,
-    clientSecret,
-    projectId,
-    clientType,
-    parsed,
-  };
 }
 
 function getKeySaInfo(keyEntry) {
@@ -1347,29 +1085,9 @@ export function ProvidersPage() {
   const [jsonConnecting, setJsonConnecting] = useState(false);
   const [jsonTestingAction, setJsonTestingAction] = useState(false);
 
-  // Mode 3: Official Web (OpenRouter OAuth PKCE, Google OAuth 2.0 + PKCE & Guided Portal Token)
-  const [oauthExchanging, setOauthExchanging] = useState(null); // null | 'openrouter' | 'google'
-  const [googleOAuthBanner, setGoogleOAuthBanner] = useState(null);
+  // Mode 3: Official Web (OpenRouter OAuth PKCE, GitLab / custom OAuth & Guided Portal Token)
+  const [oauthExchanging, setOauthExchanging] = useState(null); // null | 'openrouter' | 'gitlab' | 'custom_oauth'
   const [startingOAuth, setStartingOAuth] = useState(false);
-  const [startingGoogleOAuth, setStartingGoogleOAuth] = useState(false);
-  const [googleClientStatus, setGoogleClientStatus] = useState({
-    configured: false,
-    source: 'none',
-    clientIdPreview: '',
-    projectId: '',
-  });
-  const [refreshingGooglePlan, setRefreshingGooglePlan] = useState(false);
-  const [googleClientId, setGoogleClientId] = useState('');
-  const [googleClientSecret, setGoogleClientSecret] = useState('');
-  const [googleSecretVisible, setGoogleSecretVisible] = useState(false);
-  const [googleProjectId, setGoogleProjectId] = useState('');
-  const [googleClientSecretJson, setGoogleClientSecretJson] = useState(null);
-  const [googleJsonFileName, setGoogleJsonFileName] = useState('');
-  const [googleJsonClientType, setGoogleJsonClientType] = useState('');
-  const [googleJsonDragActive, setGoogleJsonDragActive] = useState(false);
-  const [googleJsonError, setGoogleJsonError] = useState('');
-  const [googleClientIdError, setGoogleClientIdError] = useState('');
-  const [googleClientSecretError, setGoogleClientSecretError] = useState('');
   const [webToken, setWebToken] = useState('');
   const [webTokenVisible, setWebTokenVisible] = useState(false);
   const [webTokenLabel, setWebTokenLabel] = useState('');
@@ -1401,9 +1119,6 @@ export function ProvidersPage() {
   const oauthHandledRef = useRef(false);
   const jsonFileInputRef = useRef(null);
   const jsonTextareaRef = useRef(null);
-  const googleFileInputRef = useRef(null);
-  const googleClientIdRef = useRef(null);
-  const googleClientSecretRef = useRef(null);
   const webTokenInputRef = useRef(null);
 
   useEffect(() => {
@@ -1429,99 +1144,6 @@ export function ProvidersPage() {
     [activePresetMeta, form?.baseUrl]
   );
   const portalHost = useMemo(() => getHostLabel(portalUrl), [portalUrl]);
-  // Shared by the automatic redirect-back flow and the manual "paste callback URL" flow
-  const finishGoogleExchange = async (res) => {
-    if (!isMountedRef.current) return;
-    const loaded = await loadProviders();
-    if (!isMountedRef.current) return;
-
-    const geminiProv =
-      res?.provider ||
-      loaded?.providers?.find((p) => p.preset === 'gemini' || p.slug === 'gemini') ||
-      null;
-    const geminiPreset =
-      loaded?.presets?.find((p) => p.preset === 'gemini') ||
-      FALLBACK_PRESETS.find((p) => p.preset === 'gemini') ||
-      null;
-
-    const googleKeys = (geminiProv?.apiKeys || []).filter(
-      (k) => getKeyAuthKind(k) === 'google_oauth'
-    );
-    const latestGoogleKey = googleKeys[googleKeys.length - 1] || null;
-    const resMeta = res?.oauthMeta || res?.account || res?.plan || null;
-    const meta = getGoogleOAuthMeta(latestGoogleKey, {
-      ...(resMeta || {}),
-      ...(res?.email ? { email: res.email } : {}),
-      ...(res?.name ? { name: res.name } : {}),
-      ...(res?.projectId ? { projectId: res.projectId } : {}),
-      ...(res?.tier ? { tier: res.tier } : {}),
-      ...(res?.tierLabel ? { tierLabel: res.tierLabel } : {}),
-      ...(typeof res?.modelsCount === 'number' ? { modelsCount: res.modelsCount } : {}),
-    });
-
-    const effectiveModelsCount =
-      meta.modelsCount !== null
-        ? meta.modelsCount
-        : geminiProv?.models?.length ?? null;
-
-    setGoogleOAuthBanner({
-      ...meta,
-      modelsCount: effectiveModelsCount,
-      providerId: geminiProv?.id || null,
-    });
-
-    if (geminiProv) {
-      resetConnectionModeDrafts();
-      setActivePresetMeta(geminiPreset);
-      setModalTab('connection');
-      setConnectionMode('web');
-      setModelSearch('');
-      setModelTestResults({});
-      setForm(providerToForm(geminiProv));
-      setSlugManuallyEdited(true);
-      setNewModelInput('');
-      const summaryParts = [
-        meta.email || t('providers.web.googleCallbackSuccess'),
-        meta.tierLabel,
-        effectiveModelsCount !== null ? `${effectiveModelsCount} models` : '',
-      ].filter(Boolean);
-      setModalFeedback({
-        type: 'success',
-        message: `${t('providers.web.googleCallbackSuccess')} · ${summaryParts.join(' · ')}`,
-      });
-      setModalOpen(true);
-    }
-
-    const toastSummary = [
-      meta.email,
-      meta.tierLabel,
-      effectiveModelsCount !== null ? `${effectiveModelsCount} models` : '',
-    ]
-      .filter(Boolean)
-      .join(' · ');
-    toast.success(
-      res?.message ||
-        (toastSummary
-          ? `${t('providers.web.googleCallbackSuccess')} (${toastSummary})`
-          : t('providers.web.googleCallbackSuccess'))
-    );
-  };
-
-  const googleRedirectUri = useMemo(
-    () => (typeof window !== 'undefined' ? `${window.location.origin}/providers` : 'http://localhost:20128/providers'),
-    []
-  );
-  const connectedGoogleKeys = useMemo(() => {
-    if (!form?.apiKeys) return [];
-    return form.apiKeys
-      .filter((k) => {
-        if (k.isNew) return false;
-        const kind = getKeyAuthKind(k);
-        return kind === 'google_oauth' || kind === 'gemini_cli';
-      })
-      .map((k) => ({ key: k, meta: getGoogleOAuthMeta(k) }));
-  }, [form]);
-
   const resetConnectionModeDrafts = useCallback(() => {
     setConnectionMode('api');
     setJsonText('');
@@ -1530,17 +1152,6 @@ export function ProvidersPage() {
     setVertexRegion('us-central1');
     setJsonTouched(false);
     setJsonDragActive(false);
-    setGoogleClientId('');
-    setGoogleClientSecret('');
-    setGoogleSecretVisible(false);
-    setGoogleProjectId('');
-    setGoogleClientSecretJson(null);
-    setGoogleJsonFileName('');
-    setGoogleJsonClientType('');
-    setGoogleJsonDragActive(false);
-    setGoogleJsonError('');
-    setGoogleClientIdError('');
-    setGoogleClientSecretError('');
     setWebToken('');
     setWebTokenVisible(false);
     setWebTokenLabel('');
@@ -1566,9 +1177,6 @@ export function ProvidersPage() {
     setDevicePolling(false);
     if (jsonFileInputRef.current) {
       jsonFileInputRef.current.value = '';
-    }
-    if (googleFileInputRef.current) {
-      googleFileInputRef.current.value = '';
     }
   }, []);
 
@@ -1642,7 +1250,7 @@ export function ProvidersPage() {
     loadProviders();
   }, [loadProviders]);
 
-  // Handle Official OAuth 2.0 + PKCE redirect callbacks (Google Gemini, OpenRouter, GitLab, Custom OAuth)
+  // Handle Official OAuth 2.0 + PKCE redirect callbacks (OpenRouter, GitLab, Custom OAuth)
   useEffect(() => {
     if (oauthHandledRef.current) return;
     const params = new URLSearchParams(window.location.search);
@@ -1696,33 +1304,10 @@ export function ProvidersPage() {
       return;
     }
 
+    // Google accounts now connect through the Antigravity sign-in; the old Google OAuth return is
+    // still recognised so it is not mistaken for an OpenRouter callback.
     if (isGoogleReturn) {
-      if (oauthError) {
-        toast.error(`${t('providers.web.googleCallbackError')}: ${oauthError}`);
-        return;
-      }
-      if (!code || !state) {
-        toast.error(
-          `${t('providers.web.googleCallbackError')}: missing authorization code or state`
-        );
-        return;
-      }
-
-      setOauthExchanging('google');
-      providersApi
-        .exchangeGoogleOAuth(code, state)
-        .then(async (res) => {
-          await finishGoogleExchange(res);
-        })
-        .catch((err) => {
-          if (!isMountedRef.current) return;
-          toast.error(
-            `${t('providers.web.googleCallbackError')}: ${err?.message || 'Exchange failed'}`
-          );
-        })
-        .finally(() => {
-          if (isMountedRef.current) setOauthExchanging(null);
-        });
+      toast.error('Đăng nhập Google OAuth đã được gỡ — dùng "Đăng nhập Antigravity" trong provider Google Gemini.');
       return;
     }
 
@@ -1924,6 +1509,17 @@ export function ProvidersPage() {
       return;
     }
 
+    // Google OAuth client sign-in (client_secret.json) was removed: its redirect-back flow is gone
+    // and Google accounts now connect through the Antigravity sign-in.
+    if (jsonDraftInfo.mode === 'google_oauth_client') {
+      setModalFeedback({
+        type: 'error',
+        message:
+          'Đăng nhập bằng client_secret.json (Google OAuth) đã được gỡ — dùng "Đăng nhập Antigravity" ở tab Đăng nhập web.',
+      });
+      return;
+    }
+
     if (jsonDraftInfo.mode === 'service_account' && jsonDraftInfo.isPlaceholderKey) {
       jsonTextareaRef.current?.focus();
       setModalFeedback({
@@ -1959,16 +1555,10 @@ export function ProvidersPage() {
 
       const res = await providersApi.connectJson(payload);
 
-      // If user uploaded/pasted Google Cloud client_secret_*.json in the JSON tab, seamlessly redirect to OAuth!
+      // The server may answer with an OAuth authorization URL to continue in the browser.
       const redirectAuthUrl =
         res?.authUrl || res?.url || res?.authorizeUrl || '';
       if ((res?.requiresOAuthRedirect || redirectAuthUrl) && redirectAuthUrl) {
-        if (jsonDraftInfo.mode === 'google_oauth_client') {
-          setGoogleClientId(jsonDraftInfo.clientId || '');
-          setGoogleClientSecret(jsonDraftInfo.clientSecret || '');
-          if (jsonDraftInfo.projectId) setGoogleProjectId(jsonDraftInfo.projectId);
-          setGoogleClientSecretJson(jsonDraftInfo.parsed);
-        }
         const parsedUrl = new URL(redirectAuthUrl);
         if (parsedUrl.protocol === 'https:' || parsedUrl.protocol === 'http:') {
           window.location.assign(redirectAuthUrl);
@@ -2087,116 +1677,6 @@ export function ProvidersPage() {
     }
   };
 
-  const handleGoogleClientJsonFile = async (file) => {
-    if (!file) return;
-    setGoogleJsonError('');
-    setModalFeedback(null);
-    if (file.size > 1024 * 1024) {
-      setGoogleJsonError('JSON file exceeds 1 MB limit.');
-      return;
-    }
-    try {
-      const rawText = await file.text();
-      const parsed = parseGoogleClientSecretJson(rawText);
-      if (!parsed.ok) {
-        setGoogleJsonError(t('providers.web.googleUploadInvalid'));
-        return;
-      }
-      setGoogleClientId(parsed.clientId);
-      setGoogleClientSecret(parsed.clientSecret);
-      if (parsed.projectId) {
-        setGoogleProjectId(parsed.projectId);
-      }
-      setGoogleClientSecretJson(parsed.parsed);
-      setGoogleJsonFileName(file.name);
-      setGoogleJsonClientType(parsed.clientType);
-      setGoogleClientIdError('');
-      setGoogleClientSecretError('');
-    } catch (err) {
-      setGoogleJsonError(err?.message || t('providers.web.googleUploadInvalid'));
-    }
-  };
-
-  const loadGoogleClientStatus = useCallback(async () => {
-    try {
-      const res = await providersApi.googleClientStatus();
-      if (isMountedRef.current && res) {
-        setGoogleClientStatus({
-          configured: Boolean(res.configured),
-          source: res.source || 'none',
-          clientIdPreview: res.clientIdPreview || '',
-          projectId: res.projectId || '',
-        });
-      }
-    } catch {
-      // Ignore if offline/unauthenticated
-    }
-  }, []);
-
-  useEffect(() => {
-    if (modalOpen && form?.preset === 'gemini') {
-      loadGoogleClientStatus();
-    }
-  }, [modalOpen, form?.preset, loadGoogleClientStatus]);
-
-  // Manual Google sign-in (loopback redirect + pasted callback URL) using the user's own OAuth client
-  const startGoogleManualSignIn = async (redirectUri) => {
-    const id = googleClientId.trim();
-    const secret = googleClientSecret.trim();
-    const project = googleProjectId.trim();
-    let payload;
-    if (id && secret) {
-      payload = {
-        clientId: id,
-        clientSecret: secret,
-        ...(project ? { projectId: project } : {}),
-        ...(googleClientSecretJson ? { clientSecretJson: googleClientSecretJson } : {}),
-        selectAccount: true,
-        saveClient: true,
-        callbackUrl: redirectUri,
-      };
-    } else if (googleClientStatus.configured) {
-      payload = { useSavedClient: true, selectAccount: true, callbackUrl: redirectUri };
-    } else {
-      throw new Error('Nhập Client ID và Client Secret (hoặc tải client_secret.json) ở form bên dưới trước.');
-    }
-    const res = await providersApi.startGoogleOAuth(payload);
-    const url = res?.authUrl || res?.url || res?.authorizeUrl || '';
-    if (!url) throw new Error('Server did not return a Google OAuth 2.0 authorization URL.');
-    const parsed = new URL(url);
-    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
-      throw new Error('Invalid OAuth redirect URL protocol.');
-    }
-    return url;
-  };
-
-  const completeGoogleManualSignIn = async (pastedUrl) => {
-    const res = await providersApi.exchangeGoogleOAuth({ pastedUrl });
-    await finishGoogleExchange(res);
-  };
-
-  // Gemini CLI (Cloud Code Assist) — public CLI OAuth client, loopback redirect + pasted callback.
-  const startGeminiCliSignIn = async (redirectUri) => {
-    const res = await providersApi.startGeminiCliOAuth({
-      callbackUrl: redirectUri,
-      selectAccount: true,
-    });
-    const url = res?.authUrl || '';
-    if (!url) throw new Error('Server did not return a Gemini CLI authorization URL.');
-    const parsed = new URL(url);
-    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
-      throw new Error('Invalid OAuth redirect URL protocol.');
-    }
-    return url;
-  };
-
-  const completeGeminiCliSignIn = async (pastedUrl) => {
-    const res = await providersApi.exchangeGeminiCliOAuth({ pastedUrl });
-    await finishGoogleExchange(res);
-  };
-
-  const diagnoseGeminiCli = async () => providersApi.diagnoseGeminiCli({ forceRefresh: true });
-
   // Antigravity — same Cloud Code machinery, but its keys live on a separate "antigravity"
   // provider, so finishing the sign-in only reloads the list (the Gemini form stays open).
   const startAntigravitySignIn = async (redirectUri) => {
@@ -2235,145 +1715,6 @@ export function ProvidersPage() {
 
   // Google presets whose "web" tab is the Antigravity sign-in only.
   const isCloudCodeWebPreset = form?.preset === 'gemini' || form?.preset === 'antigravity';
-
-  const handleOneClickGoogleSignIn = async () => {
-    setModalFeedback(null);
-    setStartingGoogleOAuth(true);
-    try {
-      const res = await providersApi.startGoogleOAuth({
-        useSavedClient: true,
-        selectAccount: true,
-        callbackUrl: googleRedirectUri,
-      });
-      const authUrl = res?.authUrl || res?.url || res?.authorizeUrl || '';
-      if (!authUrl) {
-        throw new Error('Server did not return a Google OAuth 2.0 authorization URL.');
-      }
-      const parsed = new URL(authUrl);
-      if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
-        throw new Error('Invalid OAuth redirect URL protocol.');
-      }
-      window.location.assign(authUrl);
-    } catch (err) {
-      setStartingGoogleOAuth(false);
-      setModalFeedback({
-        type: 'error',
-        message: err?.message || 'Không thể mở trang chọn tài khoản Google OAuth.',
-      });
-    }
-  };
-
-  const handleStartGoogleOAuth = async (e) => {
-    e.preventDefault();
-    setModalFeedback(null);
-    setGoogleClientIdError('');
-    setGoogleClientSecretError('');
-
-    const trimmedClientId = googleClientId.trim();
-    const trimmedClientSecret = googleClientSecret.trim();
-    const trimmedProjectId = googleProjectId.trim();
-
-    if (!trimmedClientId) {
-      setGoogleClientIdError(t('providers.web.googleClientIdRequired'));
-      googleClientIdRef.current?.focus();
-      return;
-    }
-    if (!trimmedClientSecret) {
-      setGoogleClientSecretError(t('providers.web.googleClientSecretRequired'));
-      googleClientSecretRef.current?.focus();
-      return;
-    }
-
-    setStartingGoogleOAuth(true);
-    try {
-      const payload = {
-        clientId: trimmedClientId,
-        clientSecret: trimmedClientSecret,
-        ...(trimmedProjectId ? { projectId: trimmedProjectId } : {}),
-        ...(googleClientSecretJson ? { clientSecretJson: googleClientSecretJson } : {}),
-        selectAccount: true,
-        saveClient: true,
-        callbackUrl: googleRedirectUri,
-      };
-      const res = await providersApi.startGoogleOAuth(payload);
-      const authUrl = res?.authUrl || res?.url || res?.authorizeUrl || '';
-      if (!authUrl) {
-        throw new Error('Server did not return a Google OAuth 2.0 authorization URL.');
-      }
-      const parsed = new URL(authUrl);
-      if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
-        throw new Error('Invalid OAuth redirect URL protocol.');
-      }
-      window.location.assign(authUrl);
-    } catch (err) {
-      setStartingGoogleOAuth(false);
-      setModalFeedback({
-        type: 'error',
-        message: err?.message || 'Failed to start Google OAuth 2.0 flow.',
-      });
-    }
-  };
-
-  const handleRefreshGooglePlan = async () => {
-    if (!form?.id) return;
-    setModalFeedback(null);
-    setRefreshingGooglePlan(true);
-    try {
-      const res = await providersApi.refreshGooglePlan(form.id);
-      let updatedProv = res?.provider || null;
-      const loaded = await loadProviders();
-      if (!updatedProv && loaded?.providers) {
-        updatedProv = loaded.providers.find((p) => p.id === form.id) || null;
-      }
-      if (updatedProv) {
-        setForm(providerToForm(updatedProv));
-      }
-
-      const googleKeys = (updatedProv?.apiKeys || []).filter(
-        (k) => getKeyAuthKind(k) === 'google_oauth'
-      );
-      const latestGoogleKey = googleKeys[googleKeys.length - 1] || null;
-      const resMeta = res?.oauthMeta || res?.plan || res?.account || null;
-      const meta = getGoogleOAuthMeta(latestGoogleKey, {
-        ...(resMeta || {}),
-        ...(res?.email ? { email: res.email } : {}),
-        ...(res?.projectId ? { projectId: res.projectId } : {}),
-        ...(res?.tier ? { tier: res.tier } : {}),
-        ...(res?.tierLabel ? { tierLabel: res.tierLabel } : {}),
-        ...(typeof res?.modelsCount === 'number' ? { modelsCount: res.modelsCount } : {}),
-      });
-      const effectiveModelsCount =
-        meta.modelsCount !== null ? meta.modelsCount : updatedProv?.models?.length ?? null;
-
-      if (googleOAuthBanner && googleOAuthBanner.providerId === form.id) {
-        setGoogleOAuthBanner({
-          ...meta,
-          modelsCount: effectiveModelsCount,
-          providerId: form.id,
-        });
-      }
-
-      const detailParts = [
-        meta.email,
-        meta.tierLabel,
-        effectiveModelsCount !== null ? `${effectiveModelsCount} models` : '',
-      ].filter(Boolean);
-      const successMsg =
-        res?.message ||
-        `${t('providers.web.googleRefreshSuccess')}${
-          detailParts.length ? ` · ${detailParts.join(' · ')}` : ''
-        }`;
-
-      setModalFeedback({ type: 'success', message: successMsg });
-      toast.success(successMsg);
-    } catch (err) {
-      const errMsg = `${t('providers.web.googleRefreshError')}: ${err?.message || 'Refresh failed'}`;
-      setModalFeedback({ type: 'error', message: errMsg });
-      toast.error(errMsg);
-    } finally {
-      setRefreshingGooglePlan(false);
-    }
-  };
 
   const handleInspectAccount = async (keyId = '') => {
     if (!form) return;
@@ -3160,113 +2501,17 @@ export function ProvidersPage() {
         <div
           role="status"
           aria-live="polite"
-          className={`flex items-center gap-2.5 rounded-xl border px-4 py-3 text-xs font-medium ${
-            oauthExchanging === 'google'
-              ? 'border-blue-500/35 bg-blue-500/10 text-blue-500'
-              : 'border-indigo-500/35 bg-indigo-500/10 text-indigo-500'
-          }`}
+          className="flex items-center gap-2.5 rounded-xl border border-indigo-500/35 bg-indigo-500/10 px-4 py-3 text-xs font-medium text-indigo-500"
         >
           <RefreshCw
             className="h-4 w-4 shrink-0 animate-spin motion-reduce:animate-none"
             aria-hidden="true"
           />
           <span>
-            {oauthExchanging === 'google'
-              ? t('providers.web.googleCallbackProcessing')
-              : oauthExchanging === 'gitlab' || oauthExchanging === 'custom_oauth'
-                ? 'Completing official OAuth 2.0 PKCE token exchange…'
-                : t('providers.web.openrouterCallbackProcessing')}
+            {oauthExchanging === 'gitlab' || oauthExchanging === 'custom_oauth'
+              ? 'Completing official OAuth 2.0 PKCE token exchange…'
+              : t('providers.web.openrouterCallbackProcessing')}
           </span>
-        </div>
-      ) : null}
-
-      {googleOAuthBanner ? (
-        <div
-          role="status"
-          aria-live="polite"
-          className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-emerald-500/35 bg-emerald-500/10 px-4 py-3 text-xs"
-        >
-          <div className="flex min-w-0 flex-wrap items-center gap-2.5">
-            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-blue-500/30 bg-[var(--bg-card)]">
-              <GoogleMark className="h-4 w-4" />
-            </div>
-            <div className="min-w-0 space-y-0.5">
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="font-semibold text-[var(--text-primary)]">
-                  {t('providers.web.googleBannerTitle')}
-                </span>
-                <span
-                  className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[10.5px] font-semibold ${getGoogleTierPillClass(
-                    googleOAuthBanner
-                  )}`}
-                >
-                  <span
-                    className={`h-1.5 w-1.5 rounded-full ${getGoogleTierDotClass(
-                      googleOAuthBanner
-                    )}`}
-                    aria-hidden="true"
-                  />
-                  {googleOAuthBanner.tierLabel}
-                </span>
-              </div>
-              <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11.5px] text-[var(--text-secondary)]">
-                {googleOAuthBanner.email ? (
-                  <span className="font-mono text-[var(--text-primary)]">
-                    {googleOAuthBanner.name
-                      ? `${googleOAuthBanner.name} (${googleOAuthBanner.email})`
-                      : googleOAuthBanner.email}
-                  </span>
-                ) : null}
-                {googleOAuthBanner.projectId ? (
-                  <span>
-                    Project:{' '}
-                    <code className="font-mono text-[var(--text-primary)]">
-                      {googleOAuthBanner.projectId}
-                    </code>
-                  </span>
-                ) : null}
-                {googleOAuthBanner.modelsCount !== null ? (
-                  <span>
-                    <strong className="text-[var(--text-primary)]">
-                      {googleOAuthBanner.modelsCount}
-                    </strong>{' '}
-                    Gemini {t('common.models')}
-                  </span>
-                ) : null}
-              </div>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => {
-                const geminiPreset =
-                  presetMap.get('gemini') ||
-                  FALLBACK_PRESETS.find((p) => p.preset === 'gemini');
-                const geminiProv =
-                  providerByPreset.get('gemini') ||
-                  providers.find((p) => p.id === googleOAuthBanner.providerId) ||
-                  null;
-                if (geminiPreset) {
-                  openPresetModal(geminiPreset, geminiProv, 'connection');
-                  setConnectionMode('web');
-                }
-              }}
-              className="r-btn-secondary inline-flex items-center gap-1.5 px-3 py-1.5 text-xs"
-            >
-              <BadgeCheck className="h-3.5 w-3.5 text-blue-500" aria-hidden="true" />
-              {t('providers.web.googleBannerOpen')}
-            </button>
-            <button
-              type="button"
-              onClick={() => setGoogleOAuthBanner(null)}
-              aria-label={t('common.close')}
-              className="rounded-md p-1 text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-subtle)] hover:text-[var(--text-primary)]"
-            >
-              <X className="h-4 w-4" aria-hidden="true" />
-            </button>
-          </div>
         </div>
       ) : null}
 
@@ -4746,8 +3991,7 @@ export function ProvidersPage() {
                     {/* Google: only the Antigravity sign-in. Its keys live on the "Antigravity (Google)"
                         provider, so the same card is shown on the Gemini and the Antigravity provider. */}
                     {isCloudCodeWebPreset ? (
-                      <GeminiCliSignIn
-                        variant="antigravity"
+                      <AntigravitySignIn
                         accounts={antigravityAccounts}
                         onStart={startAntigravitySignIn}
                         onComplete={completeAntigravitySignIn}
@@ -5708,9 +4952,7 @@ export function ProvidersPage() {
                       modalTesting ||
                       saving ||
                       jsonConnecting ||
-                      webConnecting ||
-                      startingGoogleOAuth ||
-                      refreshingGooglePlan
+                      webConnecting
                     }
                     className="r-btn-secondary inline-flex items-center gap-1.5 px-3 py-2 text-xs"
                   >
