@@ -9,9 +9,13 @@ import {
   ANTIGRAVITY_MAX_OUTPUT_TOKENS,
   GEMINI_CLI_CLIENT_ID,
   exchangeGeminiCliOAuth,
+  explainCloudCode429,
+  fetchCloudCodeUsage,
   fetchGeminiCliQuota,
   getCloudCodeFlavor,
   getCloudCodeFlavorForKey,
+  parseAntigravityQuotaSummary,
+  parseCloudCodeRateLimit,
   startGeminiCliOAuth
 } from "../server/geminiCliOAuth.js";
 import { buildCloudCodeRequest } from "../server/geminiCliTranslator.js";
@@ -69,8 +73,35 @@ const GOOGLE_OK = {
       "internal-model": { isInternal: true, quotaInfo: { remainingFraction: 1 } },
       "no-quota-model": {}
     }
+  }),
+  retrieveUserQuotaSummary: json(200, {
+    groups: [
+      {
+        displayName: "Gemini Models",
+        buckets: [
+          { window: "WEEKLY", remainingFraction: 0.6, resetTime: "2026-11-30T00:00:00Z" },
+          { window: "5H", remainingFraction: 1, resetTime: "2026-11-24T10:00:00Z" }
+        ]
+      },
+      {
+        displayName: "Claude and GPT Models",
+        buckets: [{ window: "weekly", remainingFraction: 0.25, resetTime: "2026-11-30T00:00:00Z" }]
+      }
+    ]
+  }),
+  generateContent: json(200, {
+    response: {
+      candidates: [{ content: { role: "model", parts: [{ text: "OK" }] }, finishReason: "STOP" }]
+    }
   })
 };
+
+/** loadCodeAssist answer of a paid (Google AI Pro) account. */
+const LOAD_PAID = json(200, {
+  cloudaicompanionProject: "ag-project-1",
+  currentTier: { id: "standard-tier", name: "Gemini Code Assist" },
+  paidTier: { id: "g1-pro-tier", name: "Google AI Pro" }
+});
 
 describe("Antigravity flavor — OAuth + discovery", () => {
   it("1. flavor lookup: antigravity and gemini_cli keys resolve, other auth methods do not", () => {
@@ -118,6 +149,11 @@ describe("Antigravity flavor — OAuth + discovery", () => {
     const quota = google.calls.find((c) => c.rpc === "fetchAvailableModels");
     assert.match(quota.url, /^https:\/\/daily-cloudcode-pa\.googleapis\.com\/v1internal:fetchAvailableModels$/);
     assert.deepEqual(quota.body, { project: "ag-project-1" });
+    assert.equal(quota.init.headers["x-client-name"], "antigravity");
+
+    const summary = google.calls.find((c) => c.rpc === "retrieveUserQuotaSummary");
+    assert.match(summary.url, /^https:\/\/daily-cloudcode-pa\.googleapis\.com\/v1internal:retrieveUserQuotaSummary$/);
+    assert.deepEqual(summary.body, { project: "ag-project-1" });
 
     assert.equal(out.flavor, "antigravity");
     assert.equal(out.oauthCredentials.flow, "antigravity");
@@ -125,10 +161,31 @@ describe("Antigravity flavor — OAuth + discovery", () => {
     assert.equal(out.oauthCredentials.projectId, "ag-project-1");
     assert.equal(out.oauthMeta.flow, "antigravity");
     assert.equal(out.oauthMeta.email, "ag@example.com");
+    // Free tier: Google's per-model numbers are not the limit, the weekly / 5h windows are.
+    assert.deepEqual(out.oauthMeta.quotaBuckets, []);
+    assert.equal(out.oauthMeta.perModelHidden, true);
     assert.deepEqual(
-      out.oauthMeta.quotaBuckets.map((b) => b.modelId),
-      ["claude-sonnet-5-5"]
+      out.oauthMeta.quotaWindows.map((w) => [w.id, w.remainingFraction]),
+      [
+        ["gemini_weekly", 0.6],
+        ["gemini_5h", 1],
+        ["claude_gpt_weekly", 0.25]
+      ]
     );
+  });
+
+  it("3b. a paid plan keeps the per-model quota and labels the plan", async () => {
+    const google = makeGoogle({ ...GOOGLE_OK, loadCodeAssist: LOAD_PAID });
+    const usage = await fetchCloudCodeUsage("ya29.x", {
+      flavor: "antigravity",
+      projectId: "ag-project-1",
+      fetchImpl: google.fetchImpl
+    });
+    assert.equal(usage.tier, "paid");
+    assert.match(usage.tierLabel, /Google AI Pro/);
+    assert.deepEqual(usage.buckets.map((b) => b.modelId), ["claude-sonnet-5-5"]);
+    assert.equal(usage.perModelHidden, false);
+    assert.equal(usage.windows.length, 3);
   });
 
   it("4. a state started for one flavor cannot be finished as the other (no token call made)", async () => {
@@ -156,6 +213,92 @@ describe("Antigravity flavor — OAuth + discovery", () => {
     assert.deepEqual(quota.buckets, [
       { modelId: "claude-sonnet-5-5", remainingFraction: 0.75, resetTime: "2026-11-25T00:00:00Z" }
     ]);
+  });
+
+  it("5a. quota summary: Argon before Gemini, disabled weekly skipped, missing fraction + reset = empty", () => {
+    const windows = parseAntigravityQuotaSummary({
+      quotaSummary: {
+        groups: [
+          {
+            displayName: "Gemini 4 Argon",
+            buckets: [{ bucketId: "argon-weekly", remainingFraction: 0.3, resetTime: "R1" }]
+          },
+          {
+            displayName: "Gemini",
+            buckets: [
+              { window: "weekly", disabled: true, remainingFraction: 1 },
+              { displayName: "Five hour limit", disabled: true },
+              { window: "weekly", resetTime: "R2" }
+            ]
+          },
+          { displayName: "Claude & GPT", buckets: [{ window: "5h" }, { window: "minute", remainingFraction: 1 }] },
+          { displayName: "Imagen", buckets: [{ window: "weekly", remainingFraction: 1 }] }
+        ]
+      }
+    });
+    assert.deepEqual(
+      windows.map((w) => [w.id, w.remainingFraction, w.resetTime]),
+      [
+        ["gemini_argon_weekly", 0.3, "R1"],
+        ["gemini_5h", 0, ""],
+        ["gemini_weekly", 0, "R2"]
+      ]
+    );
+    assert.deepEqual(parseAntigravityQuotaSummary(null), []);
+  });
+
+  it("5b. rate-limit hints: retryDelay, quotaResetTimeStamp and 'reset after' text", () => {
+    const now = Date.parse("2026-11-24T00:00:00Z");
+    const body = (details, message = "x") => JSON.stringify({ error: { message, details } });
+    assert.equal(parseCloudCodeRateLimit(body([{ retryDelay: "12.5s" }]), now).resetAtMs, now + 12_500);
+    assert.equal(
+      parseCloudCodeRateLimit(
+        body([{ reason: "QUOTA_EXHAUSTED", metadata: { quotaResetTimeStamp: "2026-11-24T05:00:00Z" } }]),
+        now
+      ).resetAtMs,
+      Date.parse("2026-11-24T05:00:00Z")
+    );
+    const text = parseCloudCodeRateLimit(
+      body([], "You have exhausted your capacity. Your quota will reset after 2h7m23s."),
+      now
+    );
+    assert.equal(text.resetAtMs, now + (2 * 3600 + 7 * 60 + 23) * 1000);
+    const bare = parseCloudCodeRateLimit(body([], "Resource has been exhausted (e.g. check quota)."), now);
+    assert.deepEqual(bare, { reason: "", message: "Resource has been exhausted (e.g. check quota).", resetAtMs: null });
+  });
+
+  it("5c. 429 verdicts: capacity, explicit reset, unreadable quota", async () => {
+    const capacity = await explainCloudCode429({
+      flavor: "antigravity",
+      errText: JSON.stringify({ error: { message: "x", details: [{ reason: "MODEL_CAPACITY_EXHAUSTED" }] } })
+    });
+    assert.equal(capacity.cause, "capacity");
+
+    const explicit = await explainCloudCode429({
+      flavor: "antigravity",
+      nowMs: 0,
+      errText: JSON.stringify({ error: { message: "x", details: [{ retryDelay: "60s" }] } })
+    });
+    assert.deepEqual([explicit.cause, explicit.resetAtMs], ["quota", 60_000]);
+
+    let called = 0;
+    const unreadable = await explainCloudCode429({
+      flavor: "antigravity",
+      accessToken: "ya29.x",
+      model: "gemini-3.8-flash-medium",
+      errText: "{}",
+      fetchImpl: async () => {
+        called += 1;
+        return json(403, { error: { message: "denied" } });
+      }
+    });
+    assert.equal(unreadable.cause, "unknown");
+    assert.match(unreadable.note, /Chẩn đoán kết nối/);
+    assert.equal(called, 1);
+
+    // Gemini CLI has no summary endpoint: nothing is fetched.
+    const cli = await explainCloudCode429({ flavor: "gemini_cli", accessToken: "ya29.x", errText: "{}" });
+    assert.deepEqual([cli.cause, cli.note], ["unknown", ""]);
   });
 });
 
@@ -403,8 +546,169 @@ describe("Antigravity routes + /v1 chat", () => {
     assert.equal(out.flavor, "antigravity");
     assert.deepEqual(
       out.steps.map((s) => s.step),
-      ["refreshToken", "loadCodeAssist", "onboardUser", "fetchAvailableModels"]
+      [
+        "refreshToken",
+        "loadCodeAssist",
+        "onboardUser",
+        "fetchAvailableModels",
+        "retrieveUserQuotaSummary",
+        "chatProbe"
+      ]
     );
     assert.equal(out.steps[2].skipped, true);
+    const summary = out.steps.find((s) => s.step === "retrieveUserQuotaSummary");
+    assert.equal(summary.windows.find((w) => w.id === "gemini_weekly").remainingFraction, 0.6);
+    const probe = out.steps.find((s) => s.step === "chatProbe");
+    assert.equal(probe.ok, true);
+    assert.equal(probe.reply, "OK");
+    assert.equal(probe.model, "gemini-3.8-flash-medium");
+  });
+
+  it("13b. the diagnose chat probe is a bare request: no system prompt, no tools", async () => {
+    const seen = [];
+    const google = makeGoogle({
+      ...GOOGLE_OK,
+      generateContent: (body) => {
+        seen.push(body);
+        return GOOGLE_OK.generateContent;
+      }
+    });
+    app.locals.googleOAuthFetchImpl = google.fetchImpl;
+    try {
+      const res = await apiFetch("/api/providers/oauth/antigravity/diagnose", {
+        method: "POST",
+        body: { probeModel: "claude-sonnet-5-5" }
+      });
+      assert.equal(res.status, 200);
+      assert.equal(seen.length, 1);
+      assert.equal(seen[0].model, "claude-sonnet-5-5-high");
+      assert.equal(seen[0].request.systemInstruction, undefined);
+      assert.equal(seen[0].request.tools, undefined);
+      assert.equal(seen[0].project, "ag-project-1");
+
+      const skipped = await apiFetch("/api/providers/oauth/antigravity/diagnose", {
+        method: "POST",
+        body: { chatProbe: false }
+      });
+      const out = await skipped.json();
+      assert.equal(out.steps.some((s) => s.step === "chatProbe"), false);
+      assert.equal(seen.length, 1);
+    } finally {
+      app.locals.googleOAuthFetchImpl = makeGoogle(GOOGLE_OK).fetchImpl;
+    }
+  });
+
+  it("13c. refresh re-reads plan + quota windows and stores them on the key", async () => {
+    app.locals.googleOAuthFetchImpl = makeGoogle({ ...GOOGLE_OK, loadCodeAssist: LOAD_PAID }).fetchImpl;
+    try {
+      const res = await apiFetch("/api/providers/oauth/antigravity/refresh", { method: "POST", body: {} });
+      assert.equal(res.status, 200);
+      const out = await res.json();
+      assert.equal(out.accounts.length, 1);
+      assert.match(out.accounts[0].oauthMeta.tierLabel, /Google AI Pro/);
+      assert.equal(JSON.stringify(out).includes("1//ag-refresh-token"), false);
+
+      const key = app.locals.storage.getProviders().find((p) => p.preset === "antigravity").apiKeys[0];
+      assert.equal(key.oauthMeta.tier, "paid");
+      assert.equal(key.oauthMeta.quotaWindows.length, 3);
+      assert.deepEqual(key.oauthMeta.quotaBuckets.map((b) => b.modelId), ["claude-sonnet-5-5"]);
+    } finally {
+      app.locals.googleOAuthFetchImpl = makeGoogle(GOOGLE_OK).fetchImpl;
+    }
+  });
+
+  /** Fake daily host: chat answers 429; the quota summary answers `summary`. */
+  function chat429(summary) {
+    const calls = [];
+    const impl = async (url, init = {}) => {
+      const u = String(url);
+      calls.push(u);
+      if (u.includes(":retrieveUserQuotaSummary")) {
+        return new Response(JSON.stringify(summary), { status: 200 });
+      }
+      if (u.includes(":generateContent")) {
+        const model = JSON.parse(init.body).model;
+        if (model.startsWith("claude")) {
+          return new Response(
+            JSON.stringify({
+              response: { candidates: [{ content: { parts: [{ text: "claude ok" }] }, finishReason: "STOP" }] }
+            }),
+            { status: 200, headers: { "content-type": "application/json" } }
+          );
+        }
+        return new Response(
+          JSON.stringify({
+            error: { code: 429, message: "Resource has been exhausted (e.g. check quota).", status: "RESOURCE_EXHAUSTED" }
+          }),
+          { status: 429, headers: { "content-type": "application/json" } }
+        );
+      }
+      throw new Error(`unexpected fetch ${u}`);
+    };
+    return { impl, calls };
+  }
+
+  const chat = (model) =>
+    fetch(`${baseUrl}/v1/chat/completions`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${routerKey}`, "content-type": "application/json" },
+      body: JSON.stringify({ model: `antigravity/${model}`, messages: [{ role: "user", content: "hi" }] })
+    });
+
+  it("14. a bare 429 with the Gemini window empty says so, and only that model cools down", async () => {
+    const reset = new Date(Date.now() + 3 * 3600_000).toISOString();
+    const fake = chat429({
+      groups: [
+        { displayName: "Gemini", buckets: [{ window: "weekly", resetTime: reset }] },
+        { displayName: "Claude", buckets: [{ window: "weekly", remainingFraction: 0.5 }] }
+      ]
+    });
+    app.locals.cloudCodeFetchImpl = fake.impl;
+    try {
+      const first = await chat("gemini-3.8-flash");
+      const text = await first.text();
+      assert.equal(first.status, 429, text);
+      assert.match(text, /Gemini \(Weekly\) quota is used up/);
+      assert.match(text, new RegExp(reset.slice(0, 16)));
+
+      // Same model: blocked locally until the reset, with the reason, without calling Google.
+      const before = fake.calls.length;
+      const second = await chat("gemini-3.8-flash");
+      const secondText = await second.text();
+      assert.equal(second.status, 429);
+      assert.match(secondText, /in cooldown/);
+      assert.match(secondText, /quota is used up/);
+      assert.equal(fake.calls.length, before);
+
+      // Another family on the same account still works: the key itself is not cooled down.
+      const claude = await chat("claude-sonnet-5-5");
+      assert.equal(claude.status, 200, await claude.text());
+    } finally {
+      delete app.locals.cloudCodeFetchImpl;
+      app.locals.router?.modelCooldowns?.clear?.();
+    }
+  });
+
+  it("15. a bare 429 while quota is left blames the request and does not cool down", async () => {
+    const fake = chat429({
+      groups: [
+        { displayName: "Gemini 4 Argon", buckets: [{ window: "weekly", remainingFraction: 0.1 }] },
+        { displayName: "Gemini", buckets: [{ window: "weekly", remainingFraction: 0.8 }, { window: "5h", remainingFraction: 1 }] }
+      ]
+    });
+    app.locals.cloudCodeFetchImpl = fake.impl;
+    try {
+      const first = await chat("gemini-3.8-flash-low");
+      const text = await first.text();
+      assert.equal(first.status, 429, text);
+      assert.match(text, /not your quota/);
+      assert.match(text, /Gemini \(Weekly\) 80%/);
+      assert.doesNotMatch(text, /Argon/, "Argon is a separate pool");
+
+      const again = await chat("gemini-3.8-flash-low");
+      assert.doesNotMatch(await again.text(), /in cooldown/, "nothing to wait for");
+    } finally {
+      delete app.locals.cloudCodeFetchImpl;
+    }
   });
 });

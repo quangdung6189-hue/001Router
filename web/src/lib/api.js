@@ -191,6 +191,11 @@ export const providersApi = {
       method: 'POST',
       body: payload,
     }),
+  refreshAntigravity: (payload = {}) =>
+    apiFetch('/api/providers/oauth/antigravity/refresh', {
+      method: 'POST',
+      body: payload,
+    }),
   startOAuth: (provider, payload) =>
     apiFetch(`/api/providers/oauth/${encodeURIComponent(provider)}/start`, {
       method: 'POST',

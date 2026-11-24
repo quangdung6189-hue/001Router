@@ -1,6 +1,10 @@
 import { nanoid } from "nanoid";
 import { PRESETS, buildUpstreamUrl, getPreset, isKeyOptionalProvider } from "./presets.js";
-import { getCloudCodeFlavorForKey, loadGeminiCliProject } from "./geminiCliOAuth.js";
+import {
+  explainCloudCode429,
+  getCloudCodeFlavorForKey,
+  loadGeminiCliProject
+} from "./geminiCliOAuth.js";
 import { buildCloudCodeRequest } from "./geminiCliTranslator.js";
 import {
   cloudCodeChunkToOpenAI,
@@ -41,6 +45,8 @@ import {
 
 export { resolveAuthContextForKey, resolveAuthSecretForKey };
 export const COOLDOWN_MS = 60_000;
+/** Upper bound for a Cloud Code cooldown taken from Google's quota reset time. */
+const MAX_CLOUD_CODE_COOLDOWN_MS = 6 * 60 * 60 * 1000;
 
 /**
  * Parse a direct `"providerSlug/upstreamModel"` target on the first `/`.
@@ -562,6 +568,8 @@ export class RouterService {
     this.rrCursors = new Map();
     /** `${providerId}|${keyId}|${model}` -> cooldown-until epoch ms (per-model 429s, not persisted). */
     this.modelCooldowns = new Map();
+    /** Same key as modelCooldowns -> why it is cooling down (shown while the cooldown lasts). */
+    this.modelCooldownNotes = new Map();
     /** @type {Map<string, { idx: number, count: number }>} */
     this.stickyCursors = new Map();
     /** @type {Map<string, number>} */
@@ -771,6 +779,25 @@ export class RouterService {
    */
   _modelCooldownKey(providerId, keyId, model) {
     return `${providerId}|${keyId}|${model}`;
+  }
+
+  /**
+   * Latest reason + end of the per-model cooldowns blocking `model` on this provider.
+   * @param {any} provider
+   * @param {string} model
+   * @returns {{ note: string, untilMs: number }}
+   */
+  _modelCooldownInfo(provider, model, now = Date.now()) {
+    let note = "";
+    let untilMs = 0;
+    for (const k of provider?.apiKeys || []) {
+      const mk = this._modelCooldownKey(provider.id, k.id, model);
+      const until = this.modelCooldowns.get(mk);
+      if (!until || until <= now) continue;
+      if (!untilMs || until < untilMs) untilMs = until;
+      note = note || this.modelCooldownNotes.get(mk) || "";
+    }
+    return { note, untilMs };
   }
 
   isKeyModelCoolingDown(providerId, keyId, model, now = Date.now()) {
@@ -1126,8 +1153,16 @@ export class RouterService {
 
         const keySelection = this.getOrderedActiveKeys(provider, target.upstreamModel);
         if (keySelection.keys.length === 0) {
+          const cooldownInfo = keySelection.allInCooldown
+            ? this._modelCooldownInfo(provider, target.upstreamModel)
+            : { note: "", untilMs: 0 };
+          const retryHint = cooldownInfo.untilMs
+            ? `retry after ${new Date(cooldownInfo.untilMs).toISOString().replace(/\.\d{3}Z$/, "Z")}`
+            : "retry after ~60s";
           const msg = keySelection.allInCooldown
-            ? `All API keys for provider '${provider.slug}' are in cooldown for model '${target.upstreamModel}' (rate-limited or account-level error; retry after ~60s or pick another model)`
+            ? `All API keys for provider '${provider.slug}' are in cooldown for model '${target.upstreamModel}' (rate-limited or account-level error; ${retryHint} or pick another model)${
+                cooldownInfo.note ? `. Last upstream answer: ${cooldownInfo.note}` : ""
+              }`
             : `No active API keys configured for provider '${provider.slug}'`;
           attemptTrail.push({
             target: target.raw,
@@ -1223,6 +1258,8 @@ export class RouterService {
               const cloudCodeFetch =
                 (isGeminiCliKey && this.options?.appLocals?.cloudCodeFetchImpl) || null;
               let effectiveUrl = upstreamUrl;
+              /** Project + upstream model actually sent, for explaining a Cloud Code 429. */
+              let cloudCodeCtx = null;
               let effectiveBody = JSON.stringify(upstreamPayload);
               let effectiveHeaders = headers;
               if (isGeminiCliKey) {
@@ -1290,11 +1327,14 @@ export class RouterService {
                 }
 
                 effectiveUrl = isStream ? cloudCodeFlavor.streamUrl : cloudCodeFlavor.generateUrl;
-                effectiveBody = JSON.stringify(
-                  buildCloudCodeRequest(target.upstreamModel, savedBody, cloudProject, {
-                    flavor: cloudCodeFlavor
-                  })
+                const envelope = buildCloudCodeRequest(
+                  target.upstreamModel,
+                  savedBody,
+                  cloudProject,
+                  { flavor: cloudCodeFlavor }
                 );
+                cloudCodeCtx = { projectId: cloudProject, model: envelope.model };
+                effectiveBody = JSON.stringify(envelope);
                 effectiveHeaders = {
                   ...cloudCodeFlavor.chatHeaders(resolvedSecret, {
                     model: target.upstreamModel
@@ -1338,11 +1378,25 @@ export class RouterService {
                 const errText = await upstreamRes.text().catch(() => "");
                 const secrets = this._allSecretKeys();
                 if (resolvedSecret) secrets.push(resolvedSecret);
+                // Cloud Code 429s are often a bare "Resource has been exhausted"; read the live
+                // quota so the message says whether it is the quota or this request.
+                const cloudCodeVerdict =
+                  isGeminiCliKey && upstreamRes.status === 429
+                    ? await explainCloudCode429({
+                        errText,
+                        accessToken: resolvedSecret,
+                        projectId: cloudCodeCtx?.projectId || "",
+                        model: cloudCodeCtx?.model || target.upstreamModel,
+                        flavor: cloudCodeFlavor.id,
+                        ...(cloudCodeFetch ? { fetchImpl: cloudCodeFetch } : {}),
+                        ...(dispatcher ? { dispatcher } : {})
+                      }).catch(() => null)
+                    : null;
                 // Prefix with provenance: the text is the PROVIDER's own message, not 001Router's.
                 const cleanMsg = `upstream ${provider.slug} HTTP ${upstreamRes.status}: ${sanitizeSecrets(
                   extractUpstreamErrorMessage(errText, upstreamRes.status),
                   secrets
-                )}`;
+                )}${cloudCodeVerdict?.note ? ` — ${cloudCodeVerdict.note}` : ""}`;
                 const attemptLatency = Date.now() - attemptStart;
 
                 this.liveEvents?.markRequestEnd(provider.slug, {
@@ -1369,7 +1423,20 @@ export class RouterService {
                   error: cleanMsg
                 });
 
-                const cooldownScope = getCooldownScope(upstreamRes.status, cleanMsg);
+                // Cloud Code quota is per model family, so a 429 never takes the whole account
+                // down; a refused request (quota still left) is not cooled down at all.
+                const cooldownScope = cloudCodeVerdict
+                  ? cloudCodeVerdict.cause === "request"
+                    ? null
+                    : "model"
+                  : getCooldownScope(upstreamRes.status, cleanMsg);
+                const cooldownUntil =
+                  cloudCodeVerdict?.resetAtMs && cloudCodeVerdict.resetAtMs > Date.now()
+                    ? Math.min(
+                        Math.max(cloudCodeVerdict.resetAtMs, Date.now() + COOLDOWN_MS),
+                        Date.now() + MAX_CLOUD_CODE_COOLDOWN_MS
+                      )
+                    : Date.now() + COOLDOWN_MS;
                 if (!keyEntry.isAnonymous && keyEntry.id && cooldownScope === "key") {
                   await this.storage.markProviderKeyCooldown(
                     provider.id,
@@ -1379,10 +1446,10 @@ export class RouterService {
                   );
                 } else if (!keyEntry.isAnonymous && keyEntry.id && cooldownScope === "model") {
                   // Per-model rate/capacity limit: keep the key usable for every other model.
-                  this.modelCooldowns.set(
-                    this._modelCooldownKey(provider.id, keyEntry.id, target.upstreamModel),
-                    Date.now() + COOLDOWN_MS
-                  );
+                  const mk = this._modelCooldownKey(provider.id, keyEntry.id, target.upstreamModel);
+                  this.modelCooldowns.set(mk, cooldownUntil);
+                  if (cloudCodeVerdict?.note) this.modelCooldownNotes.set(mk, cloudCodeVerdict.note);
+                  else this.modelCooldownNotes.delete(mk);
                 }
 
                 lastErrorStatus = upstreamRes.status;

@@ -2222,6 +2222,20 @@ export function ProvidersPage() {
 
   const diagnoseAntigravity = async () => providersApi.diagnoseAntigravity({ forceRefresh: true });
 
+  // Re-read plan + weekly / 5-hour quota from Google and store it on the keys.
+  const refreshAntigravity = async () => {
+    await providersApi.refreshAntigravity();
+    await loadProviders();
+  };
+
+  const antigravityAccounts = useMemo(() => {
+    const ag = providers.find((p) => p.preset === 'antigravity');
+    return (ag?.apiKeys || []).filter((k) => k.authMethod === 'antigravity');
+  }, [providers]);
+
+  // Google presets whose "web" tab is the Antigravity sign-in only.
+  const isCloudCodeWebPreset = form?.preset === 'gemini' || form?.preset === 'antigravity';
+
   const handleOneClickGoogleSignIn = async () => {
     setModalFeedback(null);
     setStartingGoogleOAuth(true);
@@ -3555,17 +3569,17 @@ export function ProvidersPage() {
                     ariaLabel={t('providers.mode.ariaLabel')}
                   />
 
-                  {form.preset === 'gemini' && connectionMode !== 'web' ? (
+                  {isCloudCodeWebPreset && connectionMode !== 'web' ? (
                     <button
                       type="button"
                       onClick={() => {
                         setConnectionMode('web');
                         setModalFeedback(null);
                       }}
-                      className="inline-flex items-center gap-1.5 rounded-full border border-blue-500/35 bg-blue-500/10 px-2.5 py-1 text-[11px] font-semibold text-blue-500 transition-colors hover:bg-blue-500/15"
+                      className="inline-flex items-center gap-1.5 rounded-full border border-amber-500/35 bg-amber-500/10 px-2.5 py-1 text-[11px] font-semibold text-amber-500 transition-colors hover:bg-amber-500/15"
                     >
                       <GoogleMark className="h-3.5 w-3.5 shrink-0" />
-                      Google OAuth 2.0 →
+                      Đăng nhập Antigravity →
                     </button>
                   ) : null}
 
@@ -4729,683 +4743,17 @@ export function ProvidersPage() {
                     aria-labelledby="provider-connect-mode-tab-web"
                     className="space-y-4"
                   >
-                    {/* Google Gemini Official Google OAuth 2.0 + PKCE Section */}
-                    {form.preset === 'gemini' ? (
-                      <>
-                        {/* Connected Google Account, Quota & Accessible Models Card */}
-                        {connectedGoogleKeys.length > 0 ? (
-                          <div className="space-y-3 rounded-xl border border-emerald-500/35 bg-emerald-500/8 p-4">
-                            <div className="flex flex-wrap items-center justify-between gap-2.5">
-                              <div className="flex flex-wrap items-center gap-2">
-                                <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-blue-500/30 bg-[var(--bg-card)]">
-                                  <GoogleMark className="h-4 w-4" />
-                                </div>
-                                <h3 className="text-xs font-semibold text-[var(--text-primary)]">
-                                  {t('providers.web.googleConnectedHeading')} ({connectedGoogleKeys.length})
-                                </h3>
-                              </div>
-
-                              <div className="flex flex-wrap items-center gap-2">
-                                {googleClientStatus.configured ? (
-                                  <button
-                                    type="button"
-                                    onClick={handleOneClickGoogleSignIn}
-                                    disabled={startingGoogleOAuth}
-                                    className="r-btn-primary inline-flex items-center gap-1.5 px-3 py-1.5 text-xs"
-                                  >
-                                    {startingGoogleOAuth ? (
-                                      <RefreshCw
-                                        className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none"
-                                        aria-hidden="true"
-                                      />
-                                    ) : (
-                                      <span className="flex h-4 w-4 items-center justify-center rounded-full bg-white p-0.5">
-                                        <GoogleMark className="h-2.5 w-2.5" />
-                                      </span>
-                                    )}
-                                    + Chọn tài khoản Gmail khác
-                                  </button>
-                                ) : null}
-
-                                {form.id ? (
-                                  <button
-                                    type="button"
-                                    onClick={handleRefreshGooglePlan}
-                                    disabled={refreshingGooglePlan}
-                                    className="r-btn-secondary inline-flex items-center gap-1.5 px-3 py-1.5 text-xs"
-                                  >
-                                    <RefreshCw
-                                      className={`h-3.5 w-3.5 text-blue-500 ${
-                                        refreshingGooglePlan
-                                          ? 'animate-spin motion-reduce:animate-none'
-                                          : ''
-                                      }`}
-                                      aria-hidden="true"
-                                    />
-                                    {refreshingGooglePlan
-                                      ? t('providers.web.googleRefreshingPlan')
-                                      : t('providers.web.googleRefreshPlan')}
-                                  </button>
-                                ) : null}
-                              </div>
-                            </div>
-
-                            <div className="space-y-2.5">
-                              {connectedGoogleKeys.map(({ key: gKey, meta }) => {
-                                const modelsCount =
-                                  meta.modelsCount !== null
-                                    ? meta.modelsCount
-                                    : form.models.length;
-                                const previewModels =
-                                  meta.topModels && meta.topModels.length > 0
-                                    ? meta.topModels.slice(0, 8)
-                                    : (form.models || []).slice(0, 8);
-                                const isCooling =
-                                  Boolean(gKey.cooldownUntil) && gKey.cooldownUntil > nowMs;
-                                const coolSec = isCooling
-                                  ? Math.max(1, Math.ceil((gKey.cooldownUntil - nowMs) / 1000))
-                                  : 0;
-                                const qSum = meta.quotaSummary || {};
-                                return (
-                                  <div
-                                    key={gKey.localId}
-                                    className="space-y-3 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-card)] p-3.5"
-                                  >
-                                    <div className="flex flex-wrap items-start justify-between gap-2.5">
-                                      <div className="min-w-0 space-y-0.5">
-                                        <div className="flex flex-wrap items-center gap-2">
-                                          <BadgeCheck
-                                            className="h-4 w-4 shrink-0 text-blue-500"
-                                            aria-hidden="true"
-                                          />
-                                          <span className="truncate text-xs font-semibold text-[var(--text-primary)]">
-                                            {meta.name || meta.email || gKey.label || 'Google Account'}
-                                          </span>
-                                          {gKey.enabled === false ? (
-                                            <span className="rounded-full bg-white/10 px-2 py-0.5 text-[10px] font-medium text-[var(--text-muted)]">
-                                              {t('common.disabled')}
-                                            </span>
-                                          ) : isCooling ? (
-                                            <span className="rounded-full border border-amber-500/35 bg-amber-500/15 px-2 py-0.5 font-mono text-[10px] font-semibold text-amber-400">
-                                              429 Cooldown {coolSec}s
-                                            </span>
-                                          ) : (
-                                            <span className="rounded-full border border-emerald-500/35 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-500">
-                                              Sẵn sàng
-                                            </span>
-                                          )}
-                                        </div>
-                                        {meta.email ? (
-                                          <div className="pl-6 font-mono text-[11.5px] text-[var(--text-secondary)]">
-                                            {meta.email}
-                                          </div>
-                                        ) : null}
-                                      </div>
-
-                                      <span
-                                        className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-semibold ${getGoogleTierPillClass(
-                                          meta
-                                        )}`}
-                                      >
-                                        <span
-                                          className={`h-2 w-2 rounded-full ${getGoogleTierDotClass(
-                                            meta
-                                          )}`}
-                                          aria-hidden="true"
-                                        />
-                                        {meta.tierLabel}
-                                      </span>
-                                    </div>
-
-                                    <div className="grid gap-2 sm:grid-cols-3">
-                                      <div className="rounded-md border border-[var(--border-subtle)] bg-[var(--bg-subtle)] px-2.5 py-2">
-                                        <div className="text-[10px] font-medium text-[var(--text-muted)]">
-                                          {t('providers.web.googleProjectLabel')}
-                                        </div>
-                                        <div className="mt-0.5 truncate font-mono text-[11.5px] font-semibold text-[var(--text-primary)]">
-                                          {meta.projectId || '—'}
-                                        </div>
-                                      </div>
-                                      <div className="rounded-md border border-[var(--border-subtle)] bg-[var(--bg-subtle)] px-2.5 py-2">
-                                        <div className="text-[10px] font-medium text-[var(--text-muted)]">
-                                          {t('providers.web.googleModelsLabel')}
-                                        </div>
-                                        <div className="mt-0.5 font-mono text-[11.5px] font-semibold text-[var(--text-primary)]">
-                                          {modelsCount} {t('common.models')}
-                                        </div>
-                                      </div>
-                                      <div className="rounded-md border border-[var(--border-subtle)] bg-[var(--bg-subtle)] px-2.5 py-2">
-                                        <div className="flex items-center justify-between gap-1 text-[10px] font-medium text-[var(--text-muted)]">
-                                          <span>Quota gói Gemini API</span>
-                                          <Link
-                                            to="/quota"
-                                            className="font-semibold text-[#E56A4A] hover:underline"
-                                          >
-                                            Chi tiết →
-                                          </Link>
-                                        </div>
-                                        <div className="mt-0.5 truncate font-mono text-[11px] font-semibold text-emerald-500">
-                                          {qSum.rpmEstimate || '5–15 RPM'} · {qSum.rpdEstimate || '1,500 RPD'}
-                                        </div>
-                                      </div>
-                                    </div>
-
-                                    {qSum.note ? (
-                                      <p className="text-[11px] leading-relaxed text-[var(--text-muted)]">
-                                        {qSum.note}
-                                      </p>
-                                    ) : null}
-
-                                    {previewModels.length > 0 ? (
-                                      <div className="space-y-1.5 border-t border-[var(--border-subtle)] pt-2.5">
-                                        <div className="text-[10.5px] font-medium text-[var(--text-secondary)]">
-                                          Model Gemini khả dụng (bấm để sao chép ID dùng cho Cline / Cursor):
-                                        </div>
-                                        <div className="flex flex-wrap gap-1.5">
-                                          {previewModels.map((modelId) => {
-                                            const fullId = `${form.slug || 'gemini'}/${modelId}`;
-                                            return (
-                                              <button
-                                                key={modelId}
-                                                type="button"
-                                                onClick={() => {
-                                                  navigator.clipboard?.writeText(fullId);
-                                                  toast.success(`Đã sao chép ${fullId}`);
-                                                }}
-                                                title={`Sao chép ${fullId}`}
-                                                className="inline-flex items-center gap-1 rounded-md border border-[var(--border-strong)] bg-[var(--bg-subtle)] px-2 py-0.5 font-mono text-[10.5px] text-[var(--text-primary)] transition-colors hover:border-[#E56A4A] hover:text-[#E56A4A]"
-                                              >
-                                                <span>{fullId}</span>
-                                              </button>
-                                            );
-                                          })}
-                                        </div>
-                                      </div>
-                                    ) : null}
-                                  </div>
-                                );
-                              })}
-                            </div>
-                          </div>
-                        ) : null}
-
-                        {/* Gemini CLI / Cloud Code Assist — primary path, no GCP project needed */}
-                        <GeminiCliSignIn
-                          onStart={startGeminiCliSignIn}
-                          onComplete={completeGeminiCliSignIn}
-                          onDiagnose={diagnoseGeminiCli}
-                        />
-
-                        {/* Antigravity — Google's replacement for Gemini CLI (separate provider) */}
-                        <GeminiCliSignIn
-                          variant="antigravity"
-                          onStart={startAntigravitySignIn}
-                          onComplete={completeAntigravitySignIn}
-                          onDiagnose={diagnoseAntigravity}
-                        />
-
-                        {/* Primary Official Google OAuth 2.0 + PKCE Card */}
-                        <div className="space-y-4 rounded-xl border border-blue-500/35 bg-blue-500/8 p-4">
-                          <div className="flex flex-wrap items-center justify-between gap-2">
-                            <div className="flex flex-wrap items-center gap-2">
-                              <GoogleMark className="h-4 w-4 shrink-0" />
-                              <h3
-                                id="google-oauth-form-heading"
-                                className="text-xs font-semibold text-[var(--text-primary)]"
-                              >
-                                {connectedGoogleKeys.length > 0
-                                  ? t('providers.web.googleAddAnother')
-                                  : t('providers.web.googleTitle')}
-                              </h3>
-                            </div>
-                            <span className="rounded-full border border-blue-500/35 bg-blue-500/15 px-2 py-0.5 text-[10px] font-semibold text-blue-500">
-                              {t('providers.web.googleBadge')}
-                            </span>
-                          </div>
-
-                          <p className="text-xs leading-relaxed text-[var(--text-secondary)]">
-                            {t('providers.web.googleDesc')}
-                          </p>
-
-                          <GoogleManualSignIn
-                            onStart={startGoogleManualSignIn}
-                            onComplete={completeGoogleManualSignIn}
-                          />
-
-                          {/* 1-Click Account Chooser Banner (shown immediately once OAuth Client is saved or configured via .env) */}
-                          {googleClientStatus.configured ? (
-                            <div className="space-y-3 rounded-xl border border-emerald-500/40 bg-[var(--bg-card)] p-4">
-                              <div className="flex flex-wrap items-center justify-between gap-2">
-                                <div className="space-y-0.5">
-                                  <div className="flex flex-wrap items-center gap-2 text-xs font-semibold text-[var(--text-primary)]">
-                                    <CheckCircle2
-                                      className="h-4 w-4 shrink-0 text-emerald-500"
-                                      aria-hidden="true"
-                                    />
-                                    <span>Google OAuth Client đã sẵn sàng — Đăng nhập 1-Click</span>
-                                  </div>
-                                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1 pl-6 text-[11px] text-[var(--text-secondary)]">
-                                    <span>
-                                      Nguồn:{' '}
-                                      <code className="font-mono text-emerald-500">
-                                        {googleClientStatus.source === 'env'
-                                          ? 'Environment (.env)'
-                                          : 'Đã lưu trên hệ thống'}
-                                      </code>
-                                    </span>
-                                    {googleClientStatus.clientIdPreview ? (
-                                      <span>
-                                        Client ID:{' '}
-                                        <code className="font-mono text-[var(--text-primary)]">
-                                          {googleClientStatus.clientIdPreview}
-                                        </code>
-                                      </span>
-                                    ) : null}
-                                    {googleClientStatus.projectId ? (
-                                      <span>
-                                        Project:{' '}
-                                        <code className="font-mono text-[var(--text-primary)]">
-                                          {googleClientStatus.projectId}
-                                        </code>
-                                      </span>
-                                    ) : null}
-                                  </div>
-                                </div>
-
-                                <button
-                                  type="button"
-                                  onClick={handleOneClickGoogleSignIn}
-                                  disabled={startingGoogleOAuth}
-                                  className="r-btn-primary inline-flex items-center gap-2 px-4 py-2.5 text-xs shadow-xs"
-                                >
-                                  {startingGoogleOAuth ? (
-                                    <RefreshCw
-                                      className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none"
-                                      aria-hidden="true"
-                                    />
-                                  ) : (
-                                    <span className="flex h-4 w-4 items-center justify-center rounded-full bg-white p-0.5">
-                                      <GoogleMark className="h-3 w-3" />
-                                    </span>
-                                  )}
-                                  {startingGoogleOAuth
-                                    ? t('providers.web.googleStarting')
-                                    : 'Đăng nhập Google (Chọn tài khoản Gmail)'}
-                                </button>
-                              </div>
-                              <p className="pl-6 text-[11px] leading-relaxed text-[var(--text-muted)]">
-                                Nhấn nút trên để chuyển thẳng sang <code>accounts.google.com</code> chọn tài khoản Gmail, cấp quyền và tự động hiển thị Email, gói <strong>Free Tier / Pay-as-you-go</strong>, hạn mức Quota &amp; danh sách Model Gemini khả dụng.
-                              </p>
-                            </div>
-                          ) : (
-                            <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3.5 py-2.5 text-[11.5px] leading-relaxed text-[var(--text-secondary)]">
-                              <strong className="text-amber-400">Chỉ cần cấu hình 1 lần duy nhất:</strong>{' '}
-                              Tải tệp <code>client_secret_*.json</code> từ Google Cloud của bạn (hoặc đặt biến môi trường <code>GOOGLE_OAUTH_CLIENT_ID</code> &amp; <code>GOOGLE_OAUTH_CLIENT_SECRET</code>). Sau lần đầu tiên, 001Router sẽ tự lưu cấu hình để mọi lần sau bạn bấm <strong>1-Click → chọn tài khoản Gmail</strong> ngay lập tức.
-                            </div>
-                          )}
-
-                          {/* Collapsible / Always-open Google Cloud OAuth Client Setup */}
-                          <details
-                            open={!googleClientStatus.configured}
-                            className="space-y-3 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-card)]/60 p-3"
-                          >
-                            <summary className="cursor-pointer select-none text-xs font-semibold text-[var(--text-primary)]">
-                              {googleClientStatus.configured
-                                ? 'Cấu hình / Đổi Google Cloud OAuth Client (client_secret_*.json)'
-                                : 'Thiết lập Google Cloud OAuth Client (1 lần duy nhất)'}
-                            </summary>
-
-                            <div className="mt-3 space-y-4">
-                              {/* 3-Step Visual Setup Guide for Google OAuth 2.0 + Plan Detection */}
-                              <ol className="grid gap-2 sm:grid-cols-3">
-                                <li className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-card)] p-2.5">
-                                  <div className="text-[11px] font-semibold text-blue-500">
-                                    1. Tạo OAuth Client (Web)
-                                  </div>
-                                  <p className="mt-1 text-[10.5px] leading-relaxed text-[var(--text-secondary)]">
-                                    Mở Google Cloud Credentials, tạo <strong>OAuth Client ID</strong> loại{' '}
-                                    <code>Web application</code> và dán Redirect URI bên dưới.
-                                  </p>
-                                </li>
-                                <li className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-card)] p-2.5">
-                                  <div className="text-[11px] font-semibold text-blue-500">
-                                    2. Tải client_secret_*.json
-                                  </div>
-                                  <p className="mt-1 text-[10.5px] leading-relaxed text-[var(--text-secondary)]">
-                                    Tải tệp JSON về và kéo thả vào ô dưới — hệ thống tự lưu lại cho lần sau.
-                                  </p>
-                                </li>
-                                <li className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-card)] p-2.5">
-                                  <div className="text-[11px] font-semibold text-blue-500">
-                                    3. Chọn Gmail &amp; Hiện Quota
-                                  </div>
-                                  <p className="mt-1 text-[10.5px] leading-relaxed text-[var(--text-secondary)]">
-                                    Mở <code>accounts.google.com</code> chọn tài khoản Gmail → tự hiển thị gói{' '}
-                                    <strong>Free Tier / Pay-as-you-go</strong>, Quota và Model Gemini.
-                                  </p>
-                                </li>
-                              </ol>
-
-                              {/* Authorized Redirect URI Helper + Direct GCP Console Credentials Link */}
-                              <div className="space-y-2 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-card)] p-3">
-                                <div className="flex flex-wrap items-center justify-between gap-2">
-                                  <span className="text-[11px] font-semibold text-[var(--text-primary)]">
-                                    {t('providers.web.googleRedirectLabel')}
-                                  </span>
-                                  <a
-                                    href={GCP_OAUTH_CREDENTIALS_URL}
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                    className="inline-flex items-center gap-1 text-[11px] font-semibold text-blue-500 hover:underline"
-                                  >
-                                    <span>{t('providers.web.googleConsoleLink')}</span>
-                                    <ExternalLink className="h-3 w-3" aria-hidden="true" />
-                                  </a>
-                                </div>
-
-                                <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-[var(--border-strong)] bg-[var(--bg-subtle)] px-2.5 py-1.5">
-                                  <code className="min-w-0 flex-1 truncate font-mono text-xs text-[var(--text-primary)]">
-                                    {googleRedirectUri}
-                                  </code>
-                                  <CopyButton
-                                    value={googleRedirectUri}
-                                    size="xs"
-                                    toastMessage={`Copied ${googleRedirectUri}`}
-                                  />
-                                </div>
-
-                                <p className="text-[11px] leading-relaxed text-[var(--text-muted)]">
-                                  {t('providers.web.googleRedirectHint')}
-                                </p>
-                              </div>
-
-                              {/* Upload client_secret_*.json Dropzone + Accessible File Input */}
-                              <div
-                                onDragOver={(e) => {
-                                  e.preventDefault();
-                                  if (!googleJsonDragActive) setGoogleJsonDragActive(true);
-                                }}
-                                onDragLeave={() => setGoogleJsonDragActive(false)}
-                                onDrop={(e) => {
-                                  e.preventDefault();
-                                  setGoogleJsonDragActive(false);
-                                  const dropped = e.dataTransfer?.files?.[0];
-                                  if (dropped) handleGoogleClientJsonFile(dropped);
-                                }}
-                                className={`flex flex-wrap items-center justify-between gap-2.5 rounded-lg border border-dashed px-3.5 py-2.5 transition-colors ${
-                                  googleJsonDragActive
-                                    ? 'border-blue-500 bg-blue-500/12'
-                                    : 'border-[var(--border-strong)] bg-[var(--bg-card)]'
-                                }`}
-                              >
-                                <div className="flex min-w-0 flex-wrap items-center gap-2.5">
-                                  <input
-                                    ref={googleFileInputRef}
-                                    id="prov-google-client-json"
-                                    name="google_client_secret_file"
-                                    type="file"
-                                    accept=".json,application/json"
-                                    className="visually-hidden peer"
-                                    onChange={(e) => {
-                                      const file = e.target.files?.[0];
-                                      if (file) handleGoogleClientJsonFile(file);
-                                    }}
-                                  />
-                                  <label
-                                    htmlFor="prov-google-client-json"
-                                    className="r-btn-secondary inline-flex cursor-pointer items-center gap-1.5 px-3 py-1.5 text-xs peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-[#E56A4A]"
-                                  >
-                                    <Upload className="h-3.5 w-3.5 text-blue-500" aria-hidden="true" />
-                                    {t('providers.web.googleUploadBtn')}
-                                  </label>
-                                  {googleJsonFileName ? (
-                                    <span className="inline-flex items-center gap-1 rounded-md border border-emerald-500/35 bg-emerald-500/10 px-2 py-1 font-mono text-[11px] text-emerald-500">
-                                      <CheckCircle2 className="h-3 w-3 shrink-0" aria-hidden="true" />
-                                      <span>
-                                        {t('providers.web.googleUploadLoaded')} {googleJsonFileName}
-                                        {googleJsonClientType ? ` (${googleJsonClientType})` : ''}
-                                      </span>
-                                    </span>
-                                  ) : (
-                                    <span className="text-[11px] text-[var(--text-muted)]">
-                                      {t('providers.web.googleUploadHint')}
-                                    </span>
-                                  )}
-                                </div>
-
-                                {googleJsonFileName ? (
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      setGoogleClientSecretJson(null);
-                                      setGoogleJsonFileName('');
-                                      setGoogleJsonClientType('');
-                                      setGoogleJsonError('');
-                                      if (googleFileInputRef.current) {
-                                        googleFileInputRef.current.value = '';
-                                      }
-                                    }}
-                                    className="rounded-md px-2 py-1 text-[11px] font-medium text-[var(--text-muted)] hover:text-red-500"
-                                  >
-                                    {t('providers.json.clear')}
-                                  </button>
-                                ) : null}
-                              </div>
-
-                              {googleJsonError ? (
-                                <p
-                                  role="alert"
-                                  className="flex items-center gap-1.5 text-xs text-red-500"
-                                >
-                                  <AlertTriangle className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                                  <span>{googleJsonError}</span>
-                                </p>
-                              ) : null}
-
-                              {/* Direct Client ID, Client Secret, Optional GCP Project ID Form */}
-                              <form
-                                id="provider-google-oauth-form"
-                                aria-labelledby="google-oauth-form-heading"
-                                onSubmit={handleStartGoogleOAuth}
-                                noValidate
-                                className="space-y-3 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-card)] p-3.5"
-                              >
-                                <p className="text-[11px] text-[var(--text-muted)]">
-                                  {t('providers.web.googleRequiredNote')}
-                                </p>
-
-                                <div className="grid gap-3 sm:grid-cols-2">
-                                  <div>
-                                    <label
-                                      htmlFor="prov-google-client-id"
-                                      className="block text-xs font-medium text-[var(--text-secondary)]"
-                                    >
-                                      {t('providers.web.googleClientIdLabel')}{' '}
-                                      <span aria-hidden="true" className="text-[#E56A4A]">
-                                        *
-                                      </span>
-                                    </label>
-                                    <input
-                                      ref={googleClientIdRef}
-                                      id="prov-google-client-id"
-                                      name="google_client_id"
-                                      type="text"
-                                      required
-                                      value={googleClientId}
-                                      onChange={(e) => {
-                                        setGoogleClientId(e.target.value);
-                                        if (googleClientIdError) setGoogleClientIdError('');
-                                        if (googleClientSecretJson) setGoogleClientSecretJson(null);
-                                      }}
-                                      onBlur={() => {
-                                        if (googleClientId && !googleClientId.trim()) {
-                                          setGoogleClientIdError(
-                                            t('providers.web.googleClientIdRequired')
-                                          );
-                                        }
-                                      }}
-                                      placeholder={t('providers.web.googleClientIdPlaceholder')}
-                                      autoComplete="off"
-                                      autoCorrect="off"
-                                      autoCapitalize="none"
-                                      spellCheck={false}
-                                      aria-invalid={googleClientIdError ? 'true' : 'false'}
-                                      aria-describedby={
-                                        googleClientIdError ? 'prov-google-client-id-error' : undefined
-                                      }
-                                      className={`field-input mt-1 w-full px-3 py-2 font-mono text-xs ${
-                                        googleClientIdError ? 'border-red-500/70' : ''
-                                      }`}
-                                    />
-                                    {googleClientIdError ? (
-                                      <p
-                                        id="prov-google-client-id-error"
-                                        className="mt-1 flex items-center gap-1 text-[11px] text-red-500"
-                                      >
-                                        <AlertTriangle
-                                          className="h-3 w-3 shrink-0"
-                                          aria-hidden="true"
-                                        />
-                                        <span>{googleClientIdError}</span>
-                                      </p>
-                                    ) : null}
-                                  </div>
-
-                                  <div>
-                                    <label
-                                      htmlFor="prov-google-client-secret"
-                                      className="block text-xs font-medium text-[var(--text-secondary)]"
-                                    >
-                                      {t('providers.web.googleClientSecretLabel')}{' '}
-                                      <span aria-hidden="true" className="text-[#E56A4A]">
-                                        *
-                                      </span>
-                                    </label>
-                                    <div className="relative mt-1">
-                                      <input
-                                        ref={googleClientSecretRef}
-                                        id="prov-google-client-secret"
-                                        name="google_client_secret"
-                                        type={googleSecretVisible ? 'text' : 'password'}
-                                        required
-                                        value={googleClientSecret}
-                                        onChange={(e) => {
-                                          setGoogleClientSecret(e.target.value);
-                                          if (googleClientSecretError) setGoogleClientSecretError('');
-                                          if (googleClientSecretJson) setGoogleClientSecretJson(null);
-                                        }}
-                                        onBlur={() => {
-                                          if (googleClientSecret && !googleClientSecret.trim()) {
-                                            setGoogleClientSecretError(
-                                              t('providers.web.googleClientSecretRequired')
-                                            );
-                                          }
-                                        }}
-                                        placeholder={t('providers.web.googleClientSecretPlaceholder')}
-                                        autoComplete="off"
-                                        autoCorrect="off"
-                                        autoCapitalize="none"
-                                        spellCheck={false}
-                                        aria-invalid={googleClientSecretError ? 'true' : 'false'}
-                                        aria-describedby={
-                                          googleClientSecretError
-                                            ? 'prov-google-client-secret-error'
-                                            : undefined
-                                        }
-                                        className={`field-input w-full py-2 pr-9 pl-3 font-mono text-xs ${
-                                          googleClientSecretError ? 'border-red-500/70' : ''
-                                        }`}
-                                      />
-                                      <button
-                                        type="button"
-                                        aria-pressed={googleSecretVisible}
-                                        onClick={() => setGoogleSecretVisible((v) => !v)}
-                                        aria-label={
-                                          googleSecretVisible
-                                            ? 'Hide client secret'
-                                            : 'Show client secret'
-                                        }
-                                        className="absolute inset-y-0 right-1.5 my-auto flex h-7 w-7 items-center justify-center rounded text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
-                                      >
-                                        {googleSecretVisible ? (
-                                          <EyeOff className="h-3.5 w-3.5" aria-hidden="true" />
-                                        ) : (
-                                          <Eye className="h-3.5 w-3.5" aria-hidden="true" />
-                                        )}
-                                      </button>
-                                    </div>
-                                    {googleClientSecretError ? (
-                                      <p
-                                        id="prov-google-client-secret-error"
-                                        className="mt-1 flex items-center gap-1 text-[11px] text-red-500"
-                                      >
-                                        <AlertTriangle
-                                          className="h-3 w-3 shrink-0"
-                                          aria-hidden="true"
-                                        />
-                                        <span>{googleClientSecretError}</span>
-                                      </p>
-                                    ) : null}
-                                  </div>
-
-                                  <div className="sm:col-span-2">
-                                    <label
-                                      htmlFor="prov-google-project-id"
-                                      className="block text-xs font-medium text-[var(--text-secondary)]"
-                                    >
-                                      {t('providers.web.googleProjectIdLabel')}
-                                    </label>
-                                    <input
-                                      id="prov-google-project-id"
-                                      name="google_project_id"
-                                      type="text"
-                                      value={googleProjectId}
-                                      onChange={(e) => setGoogleProjectId(e.target.value)}
-                                      placeholder={t('providers.web.googleProjectIdPlaceholder')}
-                                      autoComplete="off"
-                                      autoCorrect="off"
-                                      autoCapitalize="none"
-                                      spellCheck={false}
-                                      className="field-input mt-1 w-full px-3 py-2 font-mono text-xs"
-                                    />
-                                  </div>
-                                </div>
-
-                                <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
-                                  <span className="font-mono text-[11px] text-[var(--text-muted)]">
-                                    accounts.google.com · OAuth 2.0 + PKCE (S256)
-                                  </span>
-                                  <button
-                                    type="submit"
-                                    disabled={startingGoogleOAuth}
-                                    className="r-btn-primary inline-flex items-center gap-2 px-4 py-2.5 text-xs shadow-xs"
-                                  >
-                                    {startingGoogleOAuth ? (
-                                      <RefreshCw
-                                        className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none"
-                                        aria-hidden="true"
-                                      />
-                                    ) : (
-                                      <span className="flex h-4 w-4 items-center justify-center rounded-full bg-white p-0.5">
-                                        <GoogleMark className="h-3 w-3" />
-                                      </span>
-                                    )}
-                                    {startingGoogleOAuth
-                                      ? t('providers.web.googleStarting')
-                                      : 'Lưu Client & Chọn tài khoản Gmail'}
-                                  </button>
-                                </div>
-                              </form>
-                            </div>
-                          </details>
-                        </div>
-
-                        <div className="flex items-center gap-3 text-[11px] text-[var(--text-muted)]">
-                          <span className="h-px flex-1 bg-[var(--border-subtle)]" />
-                          <span>{t('providers.web.googleAiStudioDivider')}</span>
-                          <span className="h-px flex-1 bg-[var(--border-subtle)]" />
-                        </div>
-                      </>
+                    {/* Google: only the Antigravity sign-in. Its keys live on the "Antigravity (Google)"
+                        provider, so the same card is shown on the Gemini and the Antigravity provider. */}
+                    {isCloudCodeWebPreset ? (
+                      <GeminiCliSignIn
+                        variant="antigravity"
+                        accounts={antigravityAccounts}
+                        onStart={startAntigravitySignIn}
+                        onComplete={completeAntigravitySignIn}
+                        onDiagnose={diagnoseAntigravity}
+                        onRefresh={refreshAntigravity}
+                      />
                     ) : null}
 
                     {/* OpenRouter 1-Click Official OAuth PKCE Card */}
@@ -5870,7 +5218,10 @@ export function ProvidersPage() {
                       </>
                     ) : null}
 
-                    {/* Official Developer Portal Guided 3-Step Login & Quick Connect */}
+                    {/* Official Developer Portal Guided 3-Step Login & Quick Connect
+                        (not for Google presets: their web tab is the Antigravity sign-in only) */}
+                    {!isCloudCodeWebPreset ? (
+                    <>
                     <div className="space-y-4 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-subtle)] p-4">
                       <div className="flex flex-wrap items-center justify-between gap-2.5">
                         <div className="flex items-center gap-2">
@@ -6094,17 +5445,15 @@ export function ProvidersPage() {
                       />
                       <div className="space-y-0.5">
                         <div className="font-semibold text-emerald-500">
-                          {form.preset === 'gemini'
-                            ? t('providers.web.googleTosTitle')
-                            : t('providers.web.tosTitle')}
+                          {t('providers.web.tosTitle')}
                         </div>
                         <p className="leading-relaxed text-[var(--text-secondary)]">
-                          {form.preset === 'gemini'
-                            ? t('providers.web.googleTosBody')
-                            : t('providers.web.tosBody')}
+                          {t('providers.web.tosBody')}
                         </p>
                       </div>
                     </div>
+                    </>
+                    ) : null}
                   </div>
                 ) : null}
               </div>

@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import { upstreamFetch } from "./proxy.js";
 import { extractCodeAndState } from "./oauthFlows.js";
 import { isLoopbackHost } from "./security/headers.js";
+import { buildCloudCodeRequest } from "./geminiCliTranslator.js";
 import {
   classifyHostForSSRF,
   redactSecrets,
@@ -77,6 +78,8 @@ export const ANTIGRAVITY_VERSION = "2.24.0";
 export const ANTIGRAVITY_USER_AGENT = `antigravity/hub/${ANTIGRAVITY_VERSION} darwin/arm64`;
 export const ANTIGRAVITY_CHAT_BASE = "https://daily-cloudcode-pa.googleapis.com/v1internal";
 export const ANTIGRAVITY_DEFAULT_REDIRECT = "http://localhost:1456/callback";
+/** Weekly + 5-hour quota windows per model family — the real limit on free-tier accounts. */
+export const ANTIGRAVITY_QUOTA_SUMMARY_URL = `${ANTIGRAVITY_CHAT_BASE}:retrieveUserQuotaSummary`;
 export const ANTIGRAVITY_SCOPES = [
   ...GEMINI_CLI_SCOPES,
   "https://www.googleapis.com/auth/cclog",
@@ -132,6 +135,8 @@ export const ANTIGRAVITY_MODEL_ALIASES = Object.freeze({
  *   streamUrl: string,
  *   envelopeUserAgent: string,
  *   maxOutputTokens: number,
+ *   quotaSummaryUrl: string,
+ *   quotaHeaders: (token: string) => Record<string, string>,
  *   discoveryHeaders: (token: string) => Record<string, string>,
  *   loadCodeAssistBody: () => any,
  *   chatHeaders: (token: string, options?: { model?: string }) => Record<string, string>,
@@ -152,6 +157,8 @@ const CLOUD_CODE_FLAVORS = {
     onboardUserUrl: GEMINI_CLI_ONBOARD_USER_URL,
     quotaUrl: GEMINI_CLI_QUOTA_URL,
     quotaKind: "buckets",
+    quotaSummaryUrl: "",
+    quotaHeaders: (token) => buildGeminiCliHeaders(token),
     generateUrl: GEMINI_CLI_GENERATE_URL,
     streamUrl: GEMINI_CLI_STREAM_URL,
     envelopeUserAgent: "gemini-cli",
@@ -173,6 +180,13 @@ const CLOUD_CODE_FLAVORS = {
     onboardUserUrl: GEMINI_CLI_ONBOARD_USER_URL,
     quotaUrl: `${ANTIGRAVITY_CHAT_BASE}:fetchAvailableModels`,
     quotaKind: "models",
+    quotaSummaryUrl: ANTIGRAVITY_QUOTA_SUMMARY_URL,
+    // The IDE tags its quota RPCs with its client name/version.
+    quotaHeaders: (token) => ({
+      ...buildAntigravityHeaders(token),
+      "x-client-name": "antigravity",
+      "x-client-version": ANTIGRAVITY_VERSION
+    }),
     generateUrl: `${ANTIGRAVITY_CHAT_BASE}:generateContent`,
     streamUrl: `${ANTIGRAVITY_CHAT_BASE}:streamGenerateContent?alt=sse`,
     envelopeUserAgent: "antigravity",
@@ -703,7 +717,8 @@ async function probeCloudCode(fetchImpl, step, url, headers, body, token, dispat
  *   tierId?: string,
  *   forceOnboard?: boolean,
  *   retryDelayMs?: number,
- *   maxAttempts?: number
+ *   maxAttempts?: number,
+ *   chatProbeModel?: string
  * }} [options]
  * @returns {Promise<{ projectId: string, tierId: string, steps: Array<Record<string, any>> }>}
  */
@@ -714,7 +729,8 @@ export async function diagnoseGeminiCliConnection(accessToken, options = {}) {
     tierId = "",
     forceOnboard = false,
     retryDelayMs = 3000,
-    maxAttempts = 5
+    maxAttempts = 5,
+    chatProbeModel = ""
   } = options;
   const flavor = getCloudCodeFlavor(options.flavor);
   const token = String(accessToken || "").trim();
@@ -788,12 +804,60 @@ export async function diagnoseGeminiCliConnection(accessToken, options = {}) {
     fetchImpl,
     flavor.quotaKind === "models" ? "fetchAvailableModels" : "retrieveUserQuota",
     flavor.quotaUrl,
-    flavor.chatHeaders(token),
+    flavor.quotaHeaders(token),
     projectId ? { project: projectId } : {},
     token,
     dispatcher
   );
   steps.push({ ...quotaStep, projectSent: projectId || "" });
+
+  if (flavor.quotaSummaryUrl) {
+    const summaryStep = await probeCloudCode(
+      fetchImpl,
+      "retrieveUserQuotaSummary",
+      flavor.quotaSummaryUrl,
+      flavor.quotaHeaders(token),
+      projectId ? { project: projectId } : {},
+      token,
+      dispatcher
+    );
+    steps.push({
+      ...summaryStep,
+      windows: summaryStep.ok ? parseAntigravityQuotaSummary(summaryStep.response) : []
+    });
+  }
+
+  // The decisive check: one tiny chat with no system prompt and no tools. If this succeeds while
+  // a real client gets 429, Google is refusing that client's request content, not the account.
+  if (chatProbeModel && projectId) {
+    const probeBody = buildCloudCodeRequest(
+      chatProbeModel,
+      { messages: [{ role: "user", content: "Reply with the single word OK." }] },
+      projectId,
+      { flavor }
+    );
+    const chatStep = await probeCloudCode(
+      fetchImpl,
+      "chatProbe",
+      flavor.generateUrl,
+      flavor.chatHeaders(token),
+      probeBody,
+      token,
+      dispatcher
+    );
+    const reply = (chatStep.response?.response?.candidates?.[0]?.content?.parts || [])
+      .filter((part) => typeof part?.text === "string" && !part.thought)
+      .map((part) => part.text)
+      .join("")
+      .slice(0, 200);
+    steps.push({
+      step: "chatProbe",
+      ok: chatStep.ok,
+      status: chatStep.status ?? null,
+      model: probeBody.model,
+      ...(chatStep.ok ? { reply } : { response: chatStep.response, error: chatStep.error })
+    });
+  }
 
   return { projectId, tierId: resolvedTierId, flavor: flavor.id, steps };
 }
@@ -816,7 +880,7 @@ export async function fetchGeminiCliQuota(accessToken, options = {}) {
   try {
     res = await fetchImpl(flavor.quotaUrl, {
       method: "POST",
-      headers: flavor.chatHeaders(token),
+      headers: flavor.quotaHeaders(token),
       body: JSON.stringify(body),
       ...(dispatcher ? { dispatcher } : {})
     });
@@ -867,6 +931,350 @@ export async function fetchGeminiCliQuota(accessToken, options = {}) {
     .filter((b) => b.modelId && Number.isFinite(b.remainingFraction));
 
   return { buckets, raw: data };
+}
+
+/**
+ * Antigravity quota families. Order matters: Argon has its own pool and must match before the
+ * broader Gemini pattern.
+ */
+const ANTIGRAVITY_QUOTA_FAMILIES = [
+  { id: "gemini_argon", pattern: /argon/i, label: "Gemini 4 Argon" },
+  { id: "gemini", pattern: /gemini/i, label: "Gemini" },
+  { id: "claude_gpt", pattern: /claude|gpt/i, label: "Claude & GPT" }
+];
+
+/**
+ * Which Antigravity quota pool a model (or quota group name) draws from.
+ * @param {string} text
+ * @returns {{ id: string, label: string } | null}
+ */
+export function antigravityQuotaFamily(text) {
+  const value = String(text || "");
+  const family = ANTIGRAVITY_QUOTA_FAMILIES.find((f) => f.pattern.test(value));
+  return family ? { id: family.id, label: family.label } : null;
+}
+
+/**
+ * Normalize a `retrieveUserQuotaSummary` answer into one row per (family, window).
+ * Pure: safe to unit-test without network.
+ *
+ * @param {any} data
+ * @returns {Array<{ id: string, family: string, window: "weekly" | "5h", label: string, remainingFraction: number, resetTime: string }>}
+ */
+export function parseAntigravityQuotaSummary(data) {
+  const groups = Array.isArray(data?.groups)
+    ? data.groups
+    : Array.isArray(data?.quotaSummary?.groups)
+      ? data.quotaSummary.groups
+      : [];
+  const windows = [];
+  const seen = new Set();
+  for (const group of groups) {
+    if (!group || typeof group !== "object") continue;
+    const family = antigravityQuotaFamily(group.displayName || group.groupId || "");
+    if (!family) continue;
+    for (const bucket of Array.isArray(group.buckets) ? group.buckets : []) {
+      if (!bucket || typeof bucket !== "object") continue;
+      const windowType = String(bucket.window || "").toLowerCase();
+      const text = `${bucket.bucketId || ""} ${bucket.displayName || ""}`.toLowerCase();
+      const window =
+        windowType === "weekly" || text.includes("weekly")
+          ? "weekly"
+          : windowType === "5h" || windowType === "daily" || /five hour|5h|daily/.test(text)
+            ? "5h"
+            : "";
+      if (!window) continue;
+      // Google disables the weekly bucket when it does not apply; a disabled 5h bucket means the
+      // weekly cap was hit, so it reads as empty.
+      if (bucket.disabled === true && window === "weekly") continue;
+      const resetTime = typeof bucket.resetTime === "string" ? bucket.resetTime : "";
+      let fraction = bucket.disabled === true ? 0 : Number(bucket.remainingFraction);
+      // proto3 drops zero values: an exhausted bucket arrives with a resetTime and no fraction.
+      if (bucket.disabled !== true && bucket.remainingFraction === undefined) {
+        fraction = resetTime ? 0 : NaN;
+      }
+      if (!Number.isFinite(fraction)) continue;
+      const id = `${family.id}_${window}`;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      windows.push({
+        id,
+        family: family.id,
+        window,
+        label: `${family.label} (${window === "weekly" ? "Weekly" : "5h"})`,
+        remainingFraction: Math.max(0, Math.min(1, fraction)),
+        resetTime
+      });
+    }
+  }
+  return windows;
+}
+
+/**
+ * Read the weekly / 5-hour quota windows (Antigravity only).
+ *
+ * @param {string} accessToken
+ * @param {{ projectId?: string, fetchImpl?: typeof globalThis.fetch, dispatcher?: any, flavor?: string }} [options]
+ * @returns {Promise<{ windows: ReturnType<typeof parseAntigravityQuotaSummary>, raw: any }>}
+ */
+export async function fetchAntigravityQuotaSummary(accessToken, options = {}) {
+  const { projectId = "", fetchImpl = upstreamFetch, dispatcher } = options;
+  const flavor = getCloudCodeFlavor(options.flavor || "antigravity");
+  const token = String(accessToken || "").trim();
+  if (!token) throw httpError(400, "Missing access token for retrieveUserQuotaSummary");
+  if (!flavor.quotaSummaryUrl) return { windows: [], raw: null };
+
+  let res;
+  try {
+    res = await fetchImpl(flavor.quotaSummaryUrl, {
+      method: "POST",
+      headers: flavor.quotaHeaders(token),
+      body: JSON.stringify(projectId ? { project: projectId } : {}),
+      ...(dispatcher ? { dispatcher } : {})
+    });
+  } catch (err) {
+    throw httpError(
+      502,
+      redactSecrets(
+        `Could not reach retrieveUserQuotaSummary (${err?.message || "network error"})`,
+        [token]
+      )
+    );
+  }
+  const text = await res.text().catch(() => "");
+  if (!res.ok) {
+    throw httpError(
+      res.status >= 400 && res.status < 500 ? 400 : 502,
+      redactSecrets(
+        `retrieveUserQuotaSummary failed (HTTP ${res.status}): ${text.slice(0, 240)}`,
+        [token]
+      )
+    );
+  }
+  let data = null;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    throw httpError(502, "retrieveUserQuotaSummary returned invalid JSON");
+  }
+  return { windows: parseAntigravityQuotaSummary(data), raw: data };
+}
+
+/**
+ * Plan + quota of a Cloud Code account in one call, shaped for the dashboard.
+ *
+ * On the Antigravity free tier Google's per-model numbers are not the real limit (missing
+ * fractions read as 0, or they mirror the weekly cap), so they are only returned for paid plans;
+ * the weekly / 5-hour windows are what actually runs out.
+ *
+ * @param {string} accessToken
+ * @param {{ projectId?: string, fetchImpl?: typeof globalThis.fetch, dispatcher?: any, flavor?: string }} [options]
+ */
+export async function fetchCloudCodeUsage(accessToken, options = {}) {
+  const { projectId: storedProject = "", fetchImpl, dispatcher } = options;
+  const flavor = getCloudCodeFlavor(options.flavor);
+  const common = {
+    ...(fetchImpl ? { fetchImpl } : {}),
+    ...(dispatcher ? { dispatcher } : {}),
+    flavor: flavor.id
+  };
+  const readQuota = (projectId) =>
+    Promise.all([
+      fetchGeminiCliQuota(accessToken, { ...common, projectId }).catch(() => null),
+      flavor.quotaSummaryUrl
+        ? fetchAntigravityQuotaSummary(accessToken, { ...common, projectId }).catch(() => null)
+        : Promise.resolve(null)
+    ]);
+
+  let plan;
+  let quota;
+  let summary;
+  if (storedProject) {
+    [plan, [quota, summary]] = await Promise.all([
+      loadGeminiCliProject(accessToken, common).catch(() => null),
+      readQuota(storedProject)
+    ]);
+  } else {
+    plan = await loadGeminiCliProject(accessToken, common).catch(() => null);
+    [quota, summary] = await readQuota(plan?.projectId || "");
+  }
+
+  const perModelReliable = flavor.id !== "antigravity" || plan?.tier === "paid";
+  const allBuckets = Array.isArray(quota?.buckets) ? quota.buckets : [];
+  return {
+    tier: plan?.tier || "",
+    tierLabel: plan?.tierLabel || "",
+    projectId: plan?.projectId || storedProject,
+    buckets: perModelReliable ? allBuckets : [],
+    windows: Array.isArray(summary?.windows) ? summary.windows : [],
+    perModelHidden: !perModelReliable && allBuckets.length > 0,
+    planOk: Boolean(plan),
+    quotaOk: Boolean(quota || summary)
+  };
+}
+
+/**
+ * Parse "1h2m3.5s" / "3600s" / "250ms" into milliseconds (0 when unparseable).
+ * @param {string} text
+ * @returns {number}
+ */
+function parseDurationMs(text) {
+  let total = 0;
+  for (const m of String(text || "").matchAll(/(\d+(?:\.\d+)?)\s*(ms|h|m|s)/g)) {
+    const n = Number(m[1]);
+    total += m[2] === "h" ? n * 3_600_000 : m[2] === "m" ? n * 60_000 : m[2] === "s" ? n * 1000 : n;
+  }
+  return Math.round(total);
+}
+
+/**
+ * Pull Google's rate-limit hints out of a 429 body: ErrorInfo reason, RetryInfo / quotaResetDelay /
+ * quotaResetTimeStamp, or "reset after 2h7m" in the message.
+ *
+ * @param {string} rawText
+ * @param {number} [nowMs]
+ * @returns {{ reason: string, message: string, resetAtMs: number | null }}
+ */
+export function parseCloudCodeRateLimit(rawText, nowMs = Date.now()) {
+  let err = null;
+  try {
+    const parsed = JSON.parse(rawText);
+    err = Array.isArray(parsed) ? parsed[0]?.error : parsed?.error;
+  } catch {
+    // non-JSON body
+  }
+  const message = typeof err?.message === "string" ? err.message : String(rawText || "");
+  const details = Array.isArray(err?.details) ? err.details : [];
+  let reason = "";
+  let resetAtMs = null;
+  for (const d of details) {
+    if (!d || typeof d !== "object") continue;
+    if (!reason && typeof d.reason === "string") reason = d.reason;
+    const stamp = d.metadata?.quotaResetTimeStamp;
+    if (!resetAtMs && typeof stamp === "string") {
+      const ms = Date.parse(stamp);
+      if (Number.isFinite(ms) && ms > nowMs) resetAtMs = ms;
+    }
+    const delay = d.retryDelay || d.metadata?.quotaResetDelay;
+    if (!resetAtMs && typeof delay === "string") {
+      const ms = parseDurationMs(delay);
+      if (ms > 0) resetAtMs = nowMs + ms;
+    }
+  }
+  if (!resetAtMs) {
+    const m = message.match(/reset(?:s)?\s+after\s+([\d.hms\s]+)/i);
+    const ms = m ? parseDurationMs(m[1]) : 0;
+    if (ms > 0) resetAtMs = nowMs + ms;
+  }
+  return { reason, message, resetAtMs };
+}
+
+/**
+ * Resolve within `ms`, or give up with null (the underlying request is simply ignored).
+ * @template T
+ * @param {Promise<T>} promise
+ * @param {number} ms
+ * @returns {Promise<T | null>}
+ */
+function withTimeout(promise, ms) {
+  let timer;
+  return Promise.race([
+    promise.catch(() => null),
+    new Promise((resolve) => {
+      timer = setTimeout(() => resolve(null), ms);
+    })
+  ]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * Explain a Cloud Code 429 in words the user can act on.
+ *
+ * Google often answers a bare "Resource has been exhausted (e.g. check quota)" with no reason. For
+ * Antigravity we then read the live weekly / 5-hour windows of the model's family: if the window is
+ * empty it is the quota; if quota is left, Google refused this particular request (a known trigger
+ * is a system prompt that names another client).
+ *
+ * @param {{
+ *   errText?: string,
+ *   accessToken?: string,
+ *   projectId?: string,
+ *   model?: string,
+ *   flavor?: string,
+ *   fetchImpl?: typeof globalThis.fetch,
+ *   dispatcher?: any,
+ *   nowMs?: number,
+ *   timeoutMs?: number
+ * }} options
+ * @returns {Promise<{ cause: "quota" | "capacity" | "request" | "unknown", resetAtMs: number | null, note: string, windows: any[] }>}
+ */
+export async function explainCloudCode429(options = {}) {
+  const { errText = "", accessToken = "", projectId = "", model = "", timeoutMs = 4000 } = options;
+  const nowMs = options.nowMs ?? Date.now();
+  const flavor = getCloudCodeFlavor(options.flavor);
+  const parsed = parseCloudCodeRateLimit(errText, nowMs);
+  const fmt = (ms) => new Date(ms).toISOString().replace(/\.\d{3}Z$/, "Z");
+
+  if (/capacity|high traffic|overloaded/i.test(`${parsed.reason} ${parsed.message}`)) {
+    return {
+      cause: "capacity",
+      resetAtMs: null,
+      windows: [],
+      note: "Google has no free capacity for this model right now (a server-side limit, not your quota). Retry in a minute or use another model."
+    };
+  }
+  if (parsed.resetAtMs) {
+    return {
+      cause: "quota",
+      resetAtMs: parsed.resetAtMs,
+      windows: [],
+      note: `Quota for this model is used up; Google says it resets at ${fmt(parsed.resetAtMs)}.`
+    };
+  }
+  if (flavor.id !== "antigravity" || !accessToken) {
+    return { cause: "unknown", resetAtMs: null, windows: [], note: "" };
+  }
+
+  const common = {
+    ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
+    ...(options.dispatcher ? { dispatcher: options.dispatcher } : {}),
+    flavor: flavor.id,
+    projectId
+  };
+  const summary = await withTimeout(fetchAntigravityQuotaSummary(accessToken, common), timeoutMs);
+  const windows = Array.isArray(summary?.windows) ? summary.windows : [];
+  const family = antigravityQuotaFamily(model);
+  const familyWindows = family ? windows.filter((w) => w.family === family.id) : [];
+
+  if (familyWindows.length === 0) {
+    return {
+      cause: "unknown",
+      resetAtMs: null,
+      windows,
+      note: "Google gave no reason and the weekly/5h quota could not be read. Run 'Chẩn đoán kết nối' on the Antigravity card: it shows the quota windows and sends one plain test chat."
+    };
+  }
+
+  const describe = (w) => `${w.label} ${Math.round(w.remainingFraction * 100)}%`;
+  const empty = familyWindows.filter((w) => w.remainingFraction <= 0);
+  if (empty.length > 0) {
+    const resets = empty.map((w) => Date.parse(w.resetTime)).filter((ms) => Number.isFinite(ms) && ms > nowMs);
+    const resetAtMs = resets.length ? Math.max(...resets) : null;
+    return {
+      cause: "quota",
+      resetAtMs,
+      windows,
+      note: `${empty.map((w) => w.label).join(" + ")} quota is used up (0% left)${
+        resetAtMs ? `, resets at ${fmt(resetAtMs)}` : ""
+      }. Models in another family draw from a separate pool (Gemini vs Claude & GPT).`
+    };
+  }
+
+  return {
+    cause: "request",
+    resetAtMs: null,
+    windows,
+    note: `Google still reports quota left (${familyWindows.map(describe).join(", ")}), so this is not your quota running out: Google refused this particular request. Known trigger: a system prompt that identifies another client (e.g. Claude Code's "x-anthropic-billing-header" line, "Claude Agent SDK", "OpenCode"). Try the same model with no system prompt.`
+  };
 }
 
 /**
@@ -1059,18 +1467,20 @@ export async function exchangeGeminiCliOAuth(options = {}) {
     // Best-effort profile
   }
 
-  // Quota buckets
-  let quota = { buckets: [], raw: null };
-  try {
-    quota = await fetchGeminiCliQuota(accessToken, {
-      projectId: projectInfo.projectId,
-      ...(fetchImpl ? { fetchImpl } : {}),
-      ...(dispatcher ? { dispatcher } : {}),
-      flavor: flavor.id
-    });
-  } catch {
-    // Best-effort quota
-  }
+  // Quota: per-model buckets, plus Antigravity's weekly / 5-hour windows (the real limit on free).
+  const quotaOpts = {
+    projectId: projectInfo.projectId,
+    ...(fetchImpl ? { fetchImpl } : {}),
+    ...(dispatcher ? { dispatcher } : {}),
+    flavor: flavor.id
+  };
+  const [quota, summary] = await Promise.all([
+    fetchGeminiCliQuota(accessToken, quotaOpts).catch(() => ({ buckets: [], raw: null })),
+    flavor.quotaSummaryUrl
+      ? fetchAntigravityQuotaSummary(accessToken, quotaOpts).catch(() => null)
+      : Promise.resolve(null)
+  ]);
+  const perModelReliable = flavor.id !== "antigravity" || projectInfo.tier === "paid";
 
   const oauthCredentials = {
     clientId: record.clientId,
@@ -1093,7 +1503,9 @@ export async function exchangeGeminiCliOAuth(options = {}) {
     projectId: projectInfo.projectId || "",
     tier: projectInfo.tier,
     tierLabel: projectInfo.tierLabel || `${flavor.label} · Google Account Connected`,
-    quotaBuckets: quota.buckets,
+    quotaBuckets: perModelReliable ? quota.buckets : [],
+    quotaWindows: Array.isArray(summary?.windows) ? summary.windows : [],
+    perModelHidden: !perModelReliable && quota.buckets.length > 0,
     checkedAt: new Date().toISOString()
   };
 

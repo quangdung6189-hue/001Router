@@ -315,10 +315,49 @@ export function QuotaPage() {
                         {item.cloudCodeQuota.email}
                       </p>
                     ) : null}
+                    {item.cloudCodeQuota.windows?.length ? (
+                      <div className="space-y-1.5 border-t border-[var(--border-subtle)] pt-2">
+                        <div className="text-[10.5px] font-medium text-[var(--text-secondary)]">
+                          Quota tuần / 5 giờ theo nhóm model (giới hạn thật của Antigravity)
+                        </div>
+                        {item.cloudCodeQuota.windows.map((w) => {
+                          const pct = Math.max(
+                            0,
+                            Math.min(100, Math.round((Number(w.remainingFraction) || 0) * 100))
+                          );
+                          const tone =
+                            pct >= 50 ? 'bg-emerald-500' : pct >= 20 ? 'bg-amber-500' : 'bg-red-500';
+                          const resetMs = Date.parse(w.resetTime || '');
+                          return (
+                            <div key={w.id} className="space-y-0.5">
+                              <div className="flex items-center justify-between gap-2 text-[10.5px]">
+                                <span className="truncate text-[var(--text-primary)]">{w.label}</span>
+                                <span className="shrink-0 font-semibold text-[var(--text-secondary)]">
+                                  {pct}%
+                                </span>
+                              </div>
+                              <div className="h-1.5 overflow-hidden rounded-full bg-[var(--bg-subtle)]">
+                                <div className={`h-full rounded-full ${tone}`} style={{ width: `${pct}%` }} />
+                              </div>
+                              {Number.isFinite(resetMs) ? (
+                                <div className="text-[10px] text-[var(--text-muted)]">
+                                  Reset: {new Date(resetMs).toLocaleString()}
+                                </div>
+                              ) : null}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ) : null}
+                    {item.cloudCodeQuota.perModelHidden ? (
+                      <p className="text-[10.5px] leading-relaxed text-[var(--text-muted)]">
+                        Gói miễn phí: con số theo từng model Google trả về không phải giới hạn thật nên được ẩn.
+                      </p>
+                    ) : null}
                     {item.cloudCodeQuota.buckets?.length ? (
                       <div className="space-y-1.5 border-t border-[var(--border-subtle)] pt-2">
                         <div className="text-[10.5px] font-medium text-[var(--text-secondary)]">
-                          Quota còn lại theo model (cloudcode-pa · retrieveUserQuota)
+                          Quota còn lại theo model
                         </div>
                         {item.cloudCodeQuota.buckets.map((bucket) => {
                           const pct = Math.max(
@@ -351,7 +390,7 @@ export function QuotaPage() {
                           );
                         })}
                       </div>
-                    ) : (
+                    ) : item.cloudCodeQuota.windows?.length || item.cloudCodeQuota.perModelHidden ? null : (
                       <p className="text-[11px] text-[var(--text-muted)]">
                         Chưa đọc được bucket quota (Google có thể đang giới hạn endpoint này).
                       </p>

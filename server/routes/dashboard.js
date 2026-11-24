@@ -86,7 +86,7 @@ import {
   getCloudCodeFlavor,
   getCloudCodeFlavorForKey,
   exchangeGeminiCliOAuth,
-  fetchGeminiCliQuota,
+  fetchCloudCodeUsage,
   getGeminiCliAccessToken,
   loadGeminiCliProject,
   peekGeminiCliState,
@@ -2141,6 +2141,78 @@ export function createDashboardRouter(storage, liveEvents = null) {
       });
     });
 
+    // Re-read plan + quota from Google for every account of this flavor and store it on the key,
+    // so the provider card shows the live plan and weekly / 5-hour windows.
+    router.post(`${base}/refresh`, async (req, res) => {
+      const provider = findProvider();
+      const keys = (provider?.apiKeys || []).filter(
+        (k) => k.enabled !== false && k.authMethod === flavor.id && k.oauthCredentials
+      );
+      if (keys.length === 0) {
+        return res.status(404).json({
+          error: `No ${cfg.label} connection found. Sign in with 'Đăng nhập ${cfg.label}' first.`
+        });
+      }
+
+      const dispatcher = getProxyDispatcher(provider, storage);
+      const googleOpts = extractGoogleOAuthOptions(req);
+      const fetchOpts = googleOpts.fetchImpl ? { fetchImpl: googleOpts.fetchImpl } : {};
+      const results = await Promise.all(
+        keys.map(async (k) => {
+          try {
+            const { accessToken } = await getGeminiCliAccessToken(k.oauthCredentials, {
+              ...fetchOpts,
+              ...(googleOpts.tokenUrl ? { tokenUrlOverride: googleOpts.tokenUrl } : {}),
+              ...(dispatcher ? { dispatcher } : {})
+            });
+            const usage = await fetchCloudCodeUsage(accessToken, {
+              ...fetchOpts,
+              ...(dispatcher ? { dispatcher } : {}),
+              projectId: k.oauthMeta?.projectId || "",
+              flavor: flavor.id
+            });
+            return { keyId: k.id, usage };
+          } catch (err) {
+            return { keyId: k.id, error: sanitizeSecrets(err?.message || "Refresh failed") };
+          }
+        })
+      );
+
+      const checkedAt = new Date().toISOString();
+      await storage.update((data) => {
+        const p = data.providers.find((x) => x.id === provider.id);
+        for (const r of results) {
+          const k = (p?.apiKeys || []).find((x) => x.id === r.keyId);
+          if (!k || !r.usage) continue;
+          const u = r.usage;
+          k.oauthMeta = {
+            ...(k.oauthMeta || {}),
+            ...(u.projectId ? { projectId: u.projectId } : {}),
+            ...(u.tier ? { tier: u.tier } : {}),
+            ...(u.tierLabel ? { tierLabel: u.tierLabel } : {}),
+            ...(u.quotaOk
+              ? {
+                  quotaBuckets: u.buckets,
+                  quotaWindows: u.windows,
+                  perModelHidden: u.perModelHidden
+                }
+              : {}),
+            checkedAt
+          };
+        }
+      });
+
+      const fresh = findProvider();
+      return res.json({
+        ok: true,
+        flavor: flavor.id,
+        accounts: results.map((r) => {
+          const k = (fresh?.apiKeys || []).find((x) => x.id === r.keyId);
+          return { keyId: r.keyId, oauthMeta: k?.oauthMeta || null, ...(r.error ? { error: r.error } : {}) };
+        })
+      });
+    });
+
     // Diagnostics: shows exactly what Google answers during project discovery.
     router.post(`${base}/diagnose`, async (req, res) => {
       const body = req.body || {};
@@ -2187,6 +2259,12 @@ export function createDashboardRouter(storage, liveEvents = null) {
         typeof body.tierId === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(body.tierId.trim())
           ? body.tierId.trim()
           : "";
+      const requestedProbe =
+        typeof body.probeModel === "string" && /^[A-Za-z0-9._-]{1,64}$/.test(body.probeModel.trim())
+          ? body.probeModel.trim()
+          : "";
+      const chatProbeModel =
+        body.chatProbe === false ? "" : requestedProbe || cfg.defaultProbeModel || "";
       let diagnosis;
       try {
         diagnosis = await diagnoseGeminiCliConnection(accessToken, {
@@ -2194,7 +2272,8 @@ export function createDashboardRouter(storage, liveEvents = null) {
           ...(dispatcher ? { dispatcher } : {}),
           flavor: flavor.id,
           tierId: requestedTier,
-          forceOnboard: body.forceOnboard === true
+          forceOnboard: body.forceOnboard === true,
+          chatProbeModel
         });
       } catch (err) {
         return res.status(Number(err?.status) || 502).json({
@@ -2226,7 +2305,9 @@ export function createDashboardRouter(storage, liveEvents = null) {
     routeSlug: "antigravity",
     flavor: "antigravity",
     preset: "antigravity",
-    label: "Antigravity"
+    label: "Antigravity",
+    // Diagnostics send one plain chat to this model (no system prompt, no tools).
+    defaultProbeModel: "gemini-3.8-flash"
   });
 
   async function refreshGoogleOAuthConnection(provider, keyEntry, req) {
@@ -4500,25 +4581,22 @@ export function createDashboardRouter(storage, liveEvents = null) {
             ...(dispatcher ? { dispatcher } : {})
           });
           const metaProject = cliKey.oauthMeta?.projectId || "";
-          const [plan, quota] = await Promise.all([
-            loadGeminiCliProject(accessToken, {
-              ...(dispatcher ? { dispatcher } : {}),
-              flavor: cliFlavor.id
-            }).catch(() => null),
-            fetchGeminiCliQuota(accessToken, {
-              projectId: metaProject,
-              ...(dispatcher ? { dispatcher } : {}),
-              flavor: cliFlavor.id
-            }).catch(() => null)
-          ]);
-          if (plan || quota) {
+          const usage = await fetchCloudCodeUsage(accessToken, {
+            projectId: metaProject,
+            ...(dispatcher ? { dispatcher } : {}),
+            flavor: cliFlavor.id
+          });
+          if (usage.planOk || usage.quotaOk) {
             cloudCodeQuota = {
-              tier: plan?.tier || cliKey.oauthMeta?.tier || "",
+              flavor: cliFlavor.id,
+              tier: usage.tier || cliKey.oauthMeta?.tier || "",
               tierLabel:
-                plan?.tierLabel || cliKey.oauthMeta?.tierLabel || `${cliFlavor.label} · Connected`,
-              projectId: plan?.projectId || metaProject,
+                usage.tierLabel || cliKey.oauthMeta?.tierLabel || `${cliFlavor.label} · Connected`,
+              projectId: usage.projectId || metaProject,
               email: cliKey.oauthMeta?.email || "",
-              buckets: Array.isArray(quota?.buckets) ? quota.buckets : []
+              buckets: usage.buckets,
+              windows: usage.windows,
+              perModelHidden: usage.perModelHidden
             };
           }
         } catch {
