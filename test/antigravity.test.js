@@ -946,6 +946,102 @@ describe("Antigravity routes + /v1 chat", () => {
       delete app.locals.cloudCodeFetchImpl;
     }
   });
+  it("12b. per-model Test sends one real chat and reports the model's own answer", async () => {
+    const provider = app.locals.storage.getProviders().find((p) => p.preset === "antigravity");
+    const upstream = [];
+    app.locals.cloudCodeFetchImpl = async (url, init = {}) => {
+      upstream.push({ url: String(url), headers: init.headers, body: JSON.parse(init.body) });
+      return new Response(
+        sseText([
+          { response: { candidates: [{ content: { role: "model", parts: [{ text: "O" }] } }] } },
+          {
+            response: {
+              candidates: [
+                { content: { role: "model", parts: [{ text: "K" }] }, finishReason: "STOP" }
+              ],
+              usageMetadata: { promptTokenCount: 9, candidatesTokenCount: 1 }
+            }
+          }
+        ]),
+        { status: 200, headers: { "content-type": "text/event-stream" } }
+      );
+    };
+
+    try {
+      const res = await apiFetch(`/api/providers/${provider.id}/test`, {
+        method: "POST",
+        body: { model: "claude-sonnet-5-5" }
+      });
+      assert.equal(res.status, 200);
+      const out = await res.json();
+      assert.equal(out.ok, true, out.message);
+      assert.equal(out.model, "claude-sonnet-5-5");
+      assert.equal(out.reply, "OK");
+      assert.deepEqual(out.usage, { promptTokens: 9, outputTokens: 1 });
+      assert.match(out.message, /answered/);
+      assert.match(out.message, /9 tokens in \/ 1 out/);
+
+      // One real chat on the streaming RPC the IDE uses — not a `loadCodeAssist` plan check.
+      assert.equal(upstream.length, 1);
+      assert.match(upstream[0].url, /:streamGenerateContent\?alt=sse$/);
+      assert.equal(upstream[0].body.model, "claude-sonnet-5-5");
+      assert.equal(upstream[0].body.project, "ag-project-1");
+      assert.equal(upstream[0].body.request.systemInstruction, undefined);
+      assert.equal(upstream[0].body.request.tools, undefined);
+      assert.deepEqual(upstream[0].body.request.contents[0].parts, [
+        { text: "Reply with the single word OK." }
+      ]);
+    } finally {
+      delete app.locals.cloudCodeFetchImpl;
+    }
+  });
+
+  it("12c. per-model Test explains a model outside the plan and a Google 429, without pretending success", async () => {
+    const provider = app.locals.storage.getProviders().find((p) => p.preset === "antigravity");
+    let calls = 0;
+    app.locals.cloudCodeFetchImpl = async () => {
+      calls += 1;
+      return new Response(
+        JSON.stringify({
+          error: {
+            code: 429,
+            message: "Resource has been exhausted (e.g. check quota).",
+            details: [{ reason: "RATE_LIMIT_EXCEEDED", retryDelay: "30s" }]
+          }
+        }),
+        { status: 429, headers: { "content-type": "application/json" } }
+      );
+    };
+
+    try {
+      // Not on the account's catalog: refused locally, Google is never called.
+      const offPlan = await apiFetch(`/api/providers/${provider.id}/test`, {
+        method: "POST",
+        body: { model: "gpt-5-not-on-plan" }
+      });
+      const offPlanOut = await offPlan.json();
+      assert.equal(offPlanOut.ok, false);
+      assert.equal(offPlanOut.status, 404);
+      assert.match(offPlanOut.message, /not on this account's plan/);
+      assert.equal(calls, 0, "a model outside the plan never reaches Google");
+
+      // On plan but Google refuses: the real status and Google's own words come back.
+      const refused = await apiFetch(`/api/providers/${provider.id}/test`, {
+        method: "POST",
+        body: { model: "claude-sonnet-5-5" }
+      });
+      const refusedOut = await refused.json();
+      assert.equal(refusedOut.ok, false);
+      assert.equal(refusedOut.status, 429);
+      assert.match(refusedOut.message, /Resource has been exhausted/);
+      assert.match(refusedOut.message, /official API/, "points at a working route instead of hiding it");
+      assert.equal(calls, 1);
+    } finally {
+      delete app.locals.cloudCodeFetchImpl;
+    }
+  });
+
+
 
   it("13. diagnose runs against the Antigravity key", async () => {
     const res = await apiFetch("/api/providers/oauth/antigravity/diagnose", {

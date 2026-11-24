@@ -83,6 +83,7 @@ import {
   startGenericOAuthPkce
 } from "../oauthFlows.js";
 import {
+  catalogChatModelIds,
   diagnoseGeminiCliConnection,
   getCloudCodeFlavor,
   getCloudCodeFlavorForKey,
@@ -91,11 +92,18 @@ import {
   getGeminiCliAccessToken,
   loadGeminiCliProject,
   mergeCloudCodeUsage,
+  parseCloudCodeRateLimit,
   peekGeminiCliState,
+  resolveCatalogModel,
   restoreGeminiCliState,
   startGeminiCliOAuth,
   syncProviderModelsWithCatalog
 } from "../geminiCliOAuth.js";
+import {
+  aggregateCloudCodeStream,
+  buildCloudCodeRequest,
+  unwrapCloudCodeResponse
+} from "../geminiCliTranslator.js";
 
 const VALID_COMBO_STRATEGIES = new Set(["fallback", "round-robin"]);
 const TEST_ALL_CONCURRENCY = 5;
@@ -423,7 +431,9 @@ function extractServiceAccountOptions(req) {
       : {}),
     allowLoopbackTokenUri: Boolean(
       locals.allowLoopbackTokenUri || locals.oauthAllowLoopback
-    )
+    ),
+    // Cloud Code chat probes (per-model Test on Gemini CLI / Antigravity keys) use this in tests.
+    ...(locals.cloudCodeFetchImpl ? { cloudCodeFetchImpl: locals.cloudCodeFetchImpl } : {})
   };
 }
 
@@ -637,6 +647,235 @@ function collectProviderSecrets(provider, extraSecret = "") {
 }
 
 /**
+ * Send one tiny real chat to a Cloud Code Assist key (Gemini CLI / Antigravity) and report what
+ * Google answered.
+ *
+ * These keys only speak `v1internal:*` RPCs, so `GET {baseUrl}/models` and `chat/completions` are
+ * not usable probes — which is why the generic branch in `runProviderConnectionTest` returns right
+ * after `loadCodeAssist` and never touches the requested model. This probe replays what the router
+ * actually sends for a chat (same envelope, same RPC, same model resolution), so a green result
+ * means that model really answers, and a red one carries Google's own reason.
+ *
+ * @param {any} keyEntry
+ * @param {string} accessToken
+ * @param {string} requestedModel model id as the dashboard shows it
+ * @param {{ dispatcher?: any, fetchImpl?: typeof globalThis.fetch, signal?: AbortSignal }} [options]
+ * @returns {Promise<{ ok: boolean, status: number, latencyMs: number, message: string, model?: string, reply?: string, usage?: any } | null>}
+ *   `null` when the key is not a Cloud Code key, so the caller keeps its generic probe.
+ */
+async function probeCloudCodeModel(keyEntry, accessToken, requestedModel, options = {}) {
+  const { dispatcher = null, fetchImpl = fetch, signal = undefined } = options;
+  const flavor = getCloudCodeFlavorForKey(keyEntry);
+  if (!flavor) return null;
+
+  const started = Date.now();
+  let projectId =
+    keyEntry?.oauthMeta?.projectId || keyEntry?.oauthCredentials?.projectId || "";
+
+  // An account that was never onboarded has no project; provision it the same way a chat would.
+  if (!projectId) {
+    try {
+      const plan = await loadGeminiCliProject(accessToken, {
+        ...(fetchImpl ? { fetchImpl } : {}),
+        ...(dispatcher ? { dispatcher } : {}),
+        flavor: flavor.id
+      });
+      projectId = plan.projectId || "";
+    } catch (err) {
+      return {
+        ok: false,
+        status: Number(err?.status) || 0,
+        latencyMs: Date.now() - started,
+        message: `Could not resolve the Cloud Code project: ${err?.message || "loadCodeAssist failed"}`
+      };
+    }
+  }
+  if (!projectId) {
+    return {
+      ok: false,
+      status: 0,
+      latencyMs: Date.now() - started,
+      message:
+        "This account has no Cloud Code project (Google did not provision one); sign in again."
+    };
+  }
+  return finishCloudCodeModelProbe({
+    flavor,
+    keyEntry,
+    accessToken,
+    requestedModel,
+    projectId,
+    started,
+    fetchImpl,
+    dispatcher,
+    signal
+  });
+}
+
+/**
+ * Second half of `probeCloudCodeModel`: pick a model the account can actually use, send the chat,
+ * and shape Google's answer into the `{ ok, status, latencyMs, message }` the UI already renders.
+ *
+ * @param {{
+ *   flavor: any, keyEntry: any, accessToken: string, requestedModel: string, projectId: string,
+ *   started: number, fetchImpl: typeof globalThis.fetch, dispatcher: any, signal?: AbortSignal
+ * }} ctx
+ * @returns {Promise<{ ok: boolean, status: number, latencyMs: number, message: string, model?: string, reply?: string, usage?: any }>}
+ */
+async function finishCloudCodeModelProbe(ctx) {
+  const {
+    flavor,
+    keyEntry,
+    accessToken,
+    requestedModel,
+    projectId,
+    started,
+    fetchImpl,
+    dispatcher,
+    signal
+  } = ctx;
+
+  // Antigravity plans differ per account: send an id from the account's own catalog when the
+  // requested one is not on the plan, instead of letting Google answer a misleading 429.
+  const catalog = Array.isArray(keyEntry?.oauthMeta?.availableModels)
+    ? keyEntry.oauthMeta.availableModels
+    : [];
+  const hasCatalog = flavor.id === "antigravity" && catalog.length > 0;
+  let model = requestedModel;
+  if (hasCatalog) {
+    const onPlan = resolveCatalogModel(requestedModel, catalog);
+    if (onPlan) {
+      model = onPlan;
+    } else {
+      const chatIds = catalogChatModelIds(catalog);
+      const suggestion = keyEntry?.oauthMeta?.defaultModelId || chatIds[0] || "";
+      return {
+        ok: false,
+        status: 404,
+        latencyMs: Date.now() - started,
+        model: requestedModel,
+        message: `Model '${requestedModel}' is not on this account's plan, so Google would only answer "429 check quota". Models on this plan: ${chatIds
+          .slice(0, 8)
+          .join(", ")}${chatIds.length > 8 ? ", …" : ""}.${
+          suggestion ? ` Try '${suggestion}'.` : ""
+        }`
+      };
+    }
+  }
+
+  const envelope = buildCloudCodeRequest(
+    model,
+    { messages: [{ role: "user", content: "Reply with the single word OK." }], max_tokens: 16 },
+    projectId,
+    { flavor, exactModel: hasCatalog }
+  );
+  const stream = flavor.chatAlwaysStream === true;
+  const url = stream ? flavor.streamUrl : flavor.generateUrl;
+
+  let res;
+  try {
+    res = await fetchImpl(url, {
+      method: "POST",
+      headers: {
+        ...flavor.chatHeaders(accessToken),
+        accept: stream ? "text/event-stream" : "application/json"
+      },
+      body: JSON.stringify(envelope),
+      ...(signal ? { signal } : {}),
+      ...(dispatcher ? { dispatcher } : {})
+    });
+  } catch (err) {
+    const aborted = err?.name === "AbortError" || err?.code === "ABORT_ERR";
+    return {
+      ok: false,
+      status: 0,
+      latencyMs: Date.now() - started,
+      model: envelope.model,
+      message: aborted
+        ? `The ${flavor.label} request timed out (check Settings → timeout, or your proxy).`
+        : `Could not reach ${flavor.label} (${err?.message || "network error"})`
+    };
+  }
+
+  const text = await res.text().catch(() => "");
+  const latencyMs = Date.now() - started;
+  const parsed = stream ? aggregateCloudCodeStream(text) : parseJsonOrNull(text);
+  return shapeCloudCodeProbeResult({
+    res,
+    text,
+    parsed,
+    envelope,
+    flavor,
+    latencyMs
+  });
+}
+
+
+
+/**
+ * Turn the Cloud Code chat answer into the test-result shape the dashboard renders.
+ *
+ * @param {{ res: any, text: string, parsed: any, envelope: any, flavor: any, latencyMs: number }} ctx
+ * @returns {{ ok: boolean, status: number, latencyMs: number, message: string, model?: string, reply?: string, usage?: any }}
+ */
+function shapeCloudCodeProbeResult({ res, text, parsed, envelope, flavor, latencyMs }) {
+  if (!res.ok) {
+    const errMessage = parsed?.error?.message || parsed?.error || text.slice(0, 240);
+    const errText = String(errMessage || `HTTP ${res.status}`)
+      .replace(/\s+/g, " ")
+      .trim();
+    const rate = parseCloudCodeRateLimit(
+      typeof errMessage === "string" && errMessage.trim().startsWith("{") ? errMessage : text
+    );
+    const hint =
+      res.status === 429
+        ? " Google is refusing this model for this account/client right now; 001Router cannot change that (retry later, use another account, or route this app to an official API: gemini/…, Vertex AI, OpenRouter, Anthropic, OpenAI)."
+        : "";
+    return {
+      ok: false,
+      status: res.status,
+      latencyMs,
+      model: envelope.model,
+      message: `HTTP ${res.status}: ${errText.slice(0, 240)}.${
+        rate?.resetAtMs ? ` Quota resets at ${new Date(rate.resetAtMs).toISOString()}.` : ""
+      }${hint}`
+    };
+  }
+
+  const payload = unwrapCloudCodeResponse(parsed);
+  const candidate = Array.isArray(payload?.candidates) ? payload.candidates[0] : null;
+  const reply = (Array.isArray(candidate?.content?.parts) ? candidate.content.parts : [])
+    .filter((p) => typeof p?.text === "string" && !p.thought)
+    .map((p) => p.text)
+    .join("")
+    .trim();
+  const usage = payload?.usageMetadata || null;
+  const promptTokens = Number(usage?.promptTokenCount) || 0;
+  const outputTokens = Number(usage?.candidatesTokenCount) || 0;
+
+  return {
+    ok: true,
+    status: res.status,
+    latencyMs,
+    model: envelope.model,
+    reply: reply.slice(0, 120),
+    ...(usage ? { usage: { promptTokens, outputTokens } } : {}),
+    message: `${flavor.label} model '${envelope.model}' answered in ${latencyMs}ms${
+      reply ? ` ("${reply.slice(0, 60)}")` : " (empty reply)"
+    }${usage ? ` · ${promptTokens} tokens in / ${outputTokens} out` : ""}`
+  };
+}
+
+/** JSON.parse that returns null instead of throwing. */
+function parseJsonOrNull(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Test connectivity to a single upstream provider using its active key.
  * @param {any} provider
  * @param {import("../storage.js").Storage} storage
@@ -690,6 +929,23 @@ async function runProviderConnectionTest(
     // `loadCodeAssist` instead, which returns the project + plan tier in one shot.
     const probeFlavor = getCloudCodeFlavorForKey(keyEntry);
     if (probeFlavor && resolvedSecret) {
+      // A per-model Test must actually talk to that model: `loadCodeAssist` only proves the account
+      // and would report "Connected" even when Google refuses every chat. Send one tiny chat over
+      // the same RPC the router uses; fall back to the plan probe when it cannot run.
+      if (requestedModel) {
+        const cloudProbe = await probeCloudCodeModel(keyEntry, resolvedSecret, requestedModel, {
+          ...(dispatcher ? { dispatcher } : {}),
+          fetchImpl: saOptions.cloudCodeFetchImpl || fetch,
+          signal: controller.signal
+        });
+        if (cloudProbe) {
+          clearTimeout(timer);
+          return {
+            ...cloudProbe,
+            message: sanitizeSecrets(cloudProbe.message, secrets)
+          };
+        }
+      }
       let probe;
       try {
         probe = await loadGeminiCliProject(resolvedSecret, {

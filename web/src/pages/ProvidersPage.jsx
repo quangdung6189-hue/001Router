@@ -2181,11 +2181,18 @@ export function ProvidersPage() {
       if (specificModel) {
         setModelTestResults((prev) => ({ ...prev, [specificModel]: res }));
       }
+      // A per-model test on a Cloud Code key (Gemini CLI / Antigravity) sends one real chat, so it
+      // carries the model's own answer and token usage; the generic probe only has a status line.
+      const usageLine =
+        res?.usage &&
+        `${res.usage.promptTokens ?? 0} tokens in / ${res.usage.outputTokens ?? 0} out`;
+      const replyLine =
+        res?.ok && res?.reply ? ` · reply: "${res.reply}"` : '';
       setModalFeedback({
         type: res?.ok ? 'success' : 'error',
         message: `${res?.ok ? 'Connected' : 'Failed'} (HTTP ${res?.status ?? 'ERR'}, ${
           res?.latencyMs ?? 0
-        }ms): ${res?.message || ''}${
+        }ms): ${res?.message || ''}${usageLine ? ` · ${usageLine}` : ''}${replyLine}${
           res?.modelsCount !== undefined ? ` · ${res.modelsCount} models` : ''
         }`,
       });
