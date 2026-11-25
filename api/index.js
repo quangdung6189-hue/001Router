@@ -1,6 +1,8 @@
 import { createApp, shouldEnforcePasswordChange } from "../server/index.js";
 
 let appPromise = null;
+let lastPgSyncAt = 0;
+const V1_PG_SYNC_TTL_MS = 1500;
 
 function getApp() {
   if (!appPromise) {
@@ -19,7 +21,13 @@ function getApp() {
 export default async function handler(req, res) {
   const app = await getApp();
   if (app?.storage?.pgPool) {
-    await app.storage.refreshFromPostgres();
+    const url = String(req?.url || "");
+    const isHotV1 = url.startsWith("/v1/") || url.startsWith("/v1beta/");
+    const now = Date.now();
+    if (!isHotV1 || now - lastPgSyncAt >= V1_PG_SYNC_TTL_MS) {
+      await app.storage.refreshFromPostgres();
+      lastPgSyncAt = Date.now();
+    }
   }
   return app(req, res);
 }

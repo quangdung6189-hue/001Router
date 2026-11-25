@@ -1,5 +1,7 @@
 import express from "express";
-import { createDashboardAuthMiddleware } from "../auth.js";
+import { createDashboardAuthMiddleware, isPublicDeployment, isSecureRequest } from "../auth.js";
+import { parseHostHeaderName } from "../security/headers.js";
+import { redactSecrets } from "../security/redact.js";
 import {
   applyCliToolConfig,
   getAllCliToolStatuses,
@@ -10,10 +12,10 @@ import {
 function extractCliToolsOptions(req) {
   const locals = req?.app?.locals || {};
   const port = Number(locals.port) || Number(req.socket?.localPort) || 20128;
-  const hostHeader = typeof req.headers?.host === "string" ? req.headers.host : "";
-  const baseUrl = hostHeader
-    ? `${req.protocol || "http"}://${hostHeader}`
-    : `http://127.0.0.1:${port}`;
+  const rawHost = typeof req.headers?.host === "string" ? req.headers.host.trim() : "";
+  const validHost = parseHostHeaderName(rawHost) && /^[a-zA-Z0-9.:\[\]-]+(?::\d{1,5})?$/.test(rawHost);
+  const proto = isSecureRequest(req) ? "https" : "http";
+  const baseUrl = validHost ? `${proto}://${rawHost}` : `http://127.0.0.1:${port}`;
   return {
     port,
     baseUrl,
@@ -24,12 +26,20 @@ function extractCliToolsOptions(req) {
 
 /**
  * Create the Express router for `/api/cli-tools/*` (tool detection, 1-click config apply, reset).
- * Protected by dashboard session auth when dashboard auth is active.
+ * Protected by dashboard session auth and disabled by default on public deployments.
  * @param {import("../storage.js").Storage} storage
  */
 export function createCliToolsRouter(storage) {
   const router = express.Router();
   router.use("/cli-tools", createDashboardAuthMiddleware(storage));
+  router.use("/cli-tools", (_req, res, next) => {
+    if (isPublicDeployment(storage) && process.env.ROUTER001_ENABLE_CLI_TOOLS !== "1") {
+      return res.status(403).json({
+        error: "CLI tool local config management is disabled on public deployments"
+      });
+    }
+    return next();
+  });
 
   router.get("/cli-tools/statuses", (req, res) => {
     try {
@@ -38,7 +48,7 @@ export function createCliToolsRouter(storage) {
     } catch (err) {
       return res
         .status(Number(err?.status) || 500)
-        .json({ error: err?.message || "Failed to inspect CLI tools" });
+        .json({ error: redactSecrets(err?.message || "Failed to inspect CLI tools") });
     }
   });
 
@@ -50,7 +60,7 @@ export function createCliToolsRouter(storage) {
     } catch (err) {
       return res
         .status(Number(err?.status) || 400)
-        .json({ error: err?.message || "Failed to read CLI tool configuration" });
+        .json({ error: redactSecrets(err?.message || "Failed to read CLI tool configuration") });
     }
   });
 
@@ -67,7 +77,7 @@ export function createCliToolsRouter(storage) {
     } catch (err) {
       return res
         .status(Number(err?.status) || 400)
-        .json({ error: err?.message || "Failed to apply CLI tool configuration" });
+        .json({ error: redactSecrets(err?.message || "Failed to apply CLI tool configuration") });
     }
   });
 
@@ -79,7 +89,7 @@ export function createCliToolsRouter(storage) {
     } catch (err) {
       return res
         .status(Number(err?.status) || 400)
-        .json({ error: err?.message || "Failed to reset CLI tool configuration" });
+        .json({ error: redactSecrets(err?.message || "Failed to reset CLI tool configuration") });
     }
   });
 

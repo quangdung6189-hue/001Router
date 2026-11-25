@@ -97,22 +97,28 @@ export function formatAnthropicSSE(eventName, data) {
 
 /**
  * Create an incremental SSE frame parser capable of handling arbitrary TCP/stream chunk splits.
+ * Uses O(K) cursor scanning (zero quadratic reslicing) and enforces a safety byte cap per event.
  * @param {(evt: { event: string, data: string }) => void} onEvent
+ * @param {{ maxEventChars?: number }} [options]
  */
-export function createSSEParser(onEvent) {
+export function createSSEParser(onEvent, options = {}) {
+  const maxEventChars = Math.max(65_536, Number(options.maxEventChars) || 8 * 1024 * 1024);
   let buffer = "";
   let currentEvent = "";
   let dataLines = [];
+  let dataChars = 0;
 
   const dispatch = () => {
     if (dataLines.length === 0) {
       currentEvent = "";
+      dataChars = 0;
       return;
     }
-    const payload = dataLines.join("\n");
+    const payload = dataLines.length === 1 ? dataLines[0] : dataLines.join("\n");
     const eventName = currentEvent || "message";
     currentEvent = "";
     dataLines = [];
+    dataChars = 0;
     onEvent({ event: eventName, data: payload });
   };
 
@@ -131,18 +137,29 @@ export function createSSEParser(onEvent) {
     }
     if (line.startsWith("data:")) {
       const val = line.slice(5);
-      dataLines.push(val.startsWith(" ") ? val.slice(1) : val);
+      const content = val.startsWith(" ") ? val.slice(1) : val;
+      if (dataChars + content.length <= maxEventChars) {
+        dataLines.push(content);
+        dataChars += content.length;
+      }
     }
   };
 
   return {
     feed(chunkText) {
+      if (!chunkText) return;
       buffer += chunkText;
+      let start = 0;
       let newlineIdx;
-      while ((newlineIdx = buffer.indexOf("\n")) !== -1) {
-        const line = buffer.slice(0, newlineIdx);
-        buffer = buffer.slice(newlineIdx + 1);
-        processLine(line);
+      while ((newlineIdx = buffer.indexOf("\n", start)) !== -1) {
+        processLine(buffer.slice(start, newlineIdx));
+        start = newlineIdx + 1;
+      }
+      if (start > 0) {
+        buffer = buffer.slice(start);
+      }
+      if (buffer.length > maxEventChars) {
+        buffer = buffer.slice(-maxEventChars);
       }
     },
     flush() {

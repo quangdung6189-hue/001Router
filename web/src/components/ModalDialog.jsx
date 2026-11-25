@@ -1,9 +1,39 @@
-import { useEffect, useId, useRef } from 'react';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { X } from 'lucide-react';
+
+let cachedDisplayTransitionSupport;
+function canTransitionDisplay() {
+  if (cachedDisplayTransitionSupport !== undefined) return cachedDisplayTransitionSupport;
+  if (
+    typeof window === 'undefined' ||
+    !window.CSS?.supports?.('transition-behavior', 'allow-discrete') ||
+    !document.body
+  ) {
+    return false;
+  }
+  const probe = document.createElement('div');
+  probe.style.cssText = 'transition: display 1s allow-discrete !important; display: block;';
+  document.body.appendChild(probe);
+  getComputedStyle(probe).display;
+  probe.style.display = 'none';
+  cachedDisplayTransitionSupport = getComputedStyle(probe).display === 'block';
+  probe.remove();
+  return cachedDisplayTransitionSupport;
+}
+
+function supportsTopLayerExit() {
+  return (
+    typeof window !== 'undefined' &&
+    Boolean(window.CSS?.supports?.('overlay', 'auto')) &&
+    canTransitionDisplay()
+  );
+}
 
 /**
  * Accessible native <dialog> modal wrapper.
- * Uses showModal() for top-layer modality, Esc dismissal, and focus restoration.
+ * Follows modern-web-guidance: dialog & animate-to-from-top-layer.
+ * Uses showModal() for top-layer modality, Esc dismissal, focus restoration,
+ * and animated top-layer entry/exit (with Firefox/Safari exit fallback).
  */
 export function ModalDialog({
   open,
@@ -19,21 +49,74 @@ export function ModalDialog({
   const titleId = useId();
   const pressedOutsideRef = useRef(false);
   const programmaticCloseRef = useRef(false);
+  const unmountTimerRef = useRef(null);
+  const [rendered, setRendered] = useState(Boolean(open));
+
+  useEffect(() => {
+    return () => {
+      if (unmountTimerRef.current) clearTimeout(unmountTimerRef.current);
+    };
+  }, []);
+
+  const animateCloseDialog = useCallback(async (dialog) => {
+    if (!dialog || !dialog.open) return;
+    if (!supportsTopLayerExit()) {
+      dialog.setAttribute('data-closing', '');
+      const animations = dialog.getAnimations?.({ subtree: false }) || [];
+      if (animations.length > 0) {
+        await Promise.race([
+          Promise.allSettled(animations.map((a) => a.finished)),
+          new Promise((r) => setTimeout(r, 400)),
+        ]);
+      }
+      if (!dialog.hasAttribute('data-closing')) return;
+      dialog.removeAttribute('data-closing');
+    }
+    if (dialog.open) {
+      dialog.close();
+    }
+  }, []);
 
   useEffect(() => {
     const dialog = dialogRef.current;
     if (!dialog) return;
 
-    if (open && !dialog.open) {
-      programmaticCloseRef.current = false;
-      dialog.returnValue = '';
-      dialog.showModal();
-    } else if (!open && dialog.open) {
+    if (open) {
+      if (unmountTimerRef.current) {
+        clearTimeout(unmountTimerRef.current);
+        unmountTimerRef.current = null;
+      }
+      setRendered(true);
+      dialog.removeAttribute('data-closing');
+      if (!dialog.open) {
+        programmaticCloseRef.current = false;
+        dialog.returnValue = '';
+        dialog.showModal();
+      }
+    } else if (dialog.open) {
       programmaticCloseRef.current = true;
-      dialog.close();
-      dialog.returnValue = '';
+      animateCloseDialog(dialog).then(() => {
+        if (dialogRef.current && !dialogRef.current.open) {
+          dialogRef.current.returnValue = '';
+        }
+      });
+    } else {
+      setRendered(false);
     }
-  }, [open]);
+  }, [open, animateCloseDialog]);
+
+  // Intercept native cancel (Esc / closedby light dismiss) so exit animates on browsers without overlay transition
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (!dialog) return;
+    const onCancel = (event) => {
+      if (supportsTopLayerExit()) return;
+      event.preventDefault();
+      animateCloseDialog(dialog);
+    };
+    dialog.addEventListener('cancel', onCancel);
+    return () => dialog.removeEventListener('cancel', onCancel);
+  }, [animateCloseDialog]);
 
   // Fallback for browsers without <dialog closedby="any">
   useEffect(() => {
@@ -51,7 +134,7 @@ export function ModalDialog({
 
     const onPointerUp = (e) => {
       if (pressedOutsideRef.current && isOutside(e)) {
-        dialog.close();
+        animateCloseDialog(dialog);
       }
       pressedOutsideRef.current = false;
     };
@@ -62,11 +145,27 @@ export function ModalDialog({
       dialog.removeEventListener('pointerdown', onPointerDown);
       dialog.removeEventListener('pointerup', onPointerUp);
     };
-  }, [lightDismiss]);
+  }, [lightDismiss, animateCloseDialog]);
 
   const handleClose = () => {
     const dialog = dialogRef.current;
-    if (dialog) dialog.returnValue = '';
+    if (dialog) {
+      dialog.removeAttribute('data-closing');
+      dialog.returnValue = '';
+    }
+    if (unmountTimerRef.current) clearTimeout(unmountTimerRef.current);
+    // Keep content visible during native top-layer CSS exit transition before unmounting
+    const delayMs = supportsTopLayerExit() ? 230 : 0;
+    if (delayMs > 0) {
+      unmountTimerRef.current = setTimeout(() => {
+        unmountTimerRef.current = null;
+        if (dialogRef.current && !dialogRef.current.open) {
+          setRendered(false);
+        }
+      }, delayMs);
+    } else {
+      setRendered(false);
+    }
     if (programmaticCloseRef.current) {
       programmaticCloseRef.current = false;
       return;
@@ -82,7 +181,7 @@ export function ModalDialog({
       closedby={lightDismiss ? 'any' : 'closerequest'}
       onClose={handleClose}
     >
-      {open ? (
+      {rendered ? (
         <div className="flex max-h-[min(90dvh,52rem)] flex-col">
           <div className="flex items-start justify-between gap-4 border-b border-[var(--border-subtle)] px-5 py-4">
             <div className="min-w-0">
@@ -95,7 +194,7 @@ export function ModalDialog({
             </div>
             <button
               type="button"
-              onClick={() => dialogRef.current?.close()}
+              onClick={() => animateCloseDialog(dialogRef.current)}
               aria-label="Close modal"
               className="rounded-lg p-1.5 text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)] focus-visible:outline-2 focus-visible:outline-[#E56A4A]"
             >

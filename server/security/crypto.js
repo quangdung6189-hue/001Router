@@ -230,14 +230,53 @@ export function constantTimeEqual(a, b) {
   return crypto.timingSafeEqual(bufA, bufB);
 }
 
+const MAX_PASSPHRASE_BYTES = 1024;
+const MAX_CONCURRENT_KDF = 2;
+let activeKdfOps = 0;
+/** @type {Array<() => void>} */
+const kdfWaiters = [];
+
+function deriveScryptKeyAsync(passphrase, salt) {
+  if (typeof passphrase !== "string" || passphrase.length < 1) {
+    return Promise.reject(new Error("Passphrase is required"));
+  }
+  if (Buffer.byteLength(passphrase, "utf8") > MAX_PASSPHRASE_BYTES) {
+    return Promise.reject(new Error("Passphrase exceeds maximum length (1024 bytes)"));
+  }
+  return new Promise((resolve, reject) => {
+    const run = () => {
+      activeKdfOps += 1;
+      crypto.scrypt(passphrase, salt, 32, { N: 16384, r: 8, p: 1 }, (err, derivedKey) => {
+        activeKdfOps -= 1;
+        const next = kdfWaiters.shift();
+        if (next) next();
+        if (err) reject(err);
+        else resolve(derivedKey);
+      });
+    };
+    if (activeKdfOps < MAX_CONCURRENT_KDF) {
+      run();
+    } else if (kdfWaiters.length >= 16) {
+      const busyErr = new Error("Too many concurrent encryption operations; try again shortly");
+      busyErr.status = 429;
+      reject(busyErr);
+    } else {
+      kdfWaiters.push(run);
+    }
+  });
+}
+
 /**
- * Encrypt an export bundle object with a user passphrase using scrypt + AES-256-GCM.
+ * Encrypt an export bundle object with a user passphrase using scrypt + AES-256-GCM (sync).
  * @param {object} bundle
  * @param {string} passphrase
  */
 export function encryptExportBundle(bundle, passphrase) {
   if (typeof passphrase !== "string" || passphrase.length < 1) {
     throw new Error("Passphrase is required for encrypted export");
+  }
+  if (Buffer.byteLength(passphrase, "utf8") > MAX_PASSPHRASE_BYTES) {
+    throw new Error("Passphrase exceeds maximum length (1024 bytes)");
   }
   const salt = crypto.randomBytes(16);
   const key = crypto.scryptSync(passphrase, salt, 32, { N: 16384, r: 8, p: 1 });
@@ -262,12 +301,85 @@ export function encryptExportBundle(bundle, passphrase) {
 }
 
 /**
- * Decrypt an encrypted export bundle using the user passphrase.
+ * Non-blocking concurrency-capped version of `encryptExportBundle` for HTTP request handlers.
+ * @param {object} bundle
+ * @param {string} passphrase
+ */
+export async function encryptExportBundleAsync(bundle, passphrase) {
+  if (typeof passphrase !== "string" || passphrase.length < 1) {
+    throw new Error("Passphrase is required for encrypted export");
+  }
+  const salt = crypto.randomBytes(16);
+  const key = await deriveScryptKeyAsync(passphrase, salt);
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
+  const plaintext = Buffer.from(JSON.stringify(bundle), "utf8");
+  const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+  const tag = cipher.getAuthTag();
+
+  return {
+    encrypted: true,
+    version: 1,
+    secretsMode: "encrypted",
+    exportedAt: new Date().toISOString(),
+    kdf: "scrypt",
+    cipher: "aes-256-gcm",
+    salt: salt.toString("base64url"),
+    iv: iv.toString("base64url"),
+    tag: tag.toString("base64url"),
+    data: ciphertext.toString("base64url")
+  };
+}
+
+/**
+ * Decrypt an encrypted export bundle using the user passphrase (sync).
  * @param {any} envelope
  * @param {string} passphrase
  * @returns {any}
  */
 export function decryptExportBundle(envelope, passphrase) {
+  if (!envelope || typeof envelope !== "object" || envelope.encrypted !== true) {
+    throw new Error("Invalid encrypted bundle envelope");
+  }
+  if (typeof passphrase !== "string" || !passphrase) {
+    throw new Error("Passphrase is required to decrypt bundle");
+  }
+  if (Buffer.byteLength(passphrase, "utf8") > MAX_PASSPHRASE_BYTES) {
+    throw new Error("Passphrase exceeds maximum length (1024 bytes)");
+  }
+  const { salt, iv, tag, data } = envelope;
+  if (
+    typeof salt !== "string" ||
+    typeof iv !== "string" ||
+    typeof tag !== "string" ||
+    typeof data !== "string"
+  ) {
+    throw new Error("Malformed encrypted bundle fields");
+  }
+
+  const saltBuf = Buffer.from(salt, "base64url");
+  const ivBuf = Buffer.from(iv, "base64url");
+  const tagBuf = Buffer.from(tag, "base64url");
+  const cipherBuf = Buffer.from(data, "base64url");
+
+  if (saltBuf.length < 8 || ivBuf.length !== 12 || tagBuf.length !== 16) {
+    throw new Error("Invalid salt, IV, or authentication tag in encrypted bundle");
+  }
+
+  const key = crypto.scryptSync(passphrase, saltBuf, 32, { N: 16384, r: 8, p: 1 });
+  const decipher = crypto.createDecipheriv("aes-256-gcm", key, ivBuf);
+  decipher.setAuthTag(tagBuf);
+  const decrypted = Buffer.concat([decipher.update(cipherBuf), decipher.final()]);
+  return JSON.parse(decrypted.toString("utf8"));
+}
+
+/**
+ * Non-blocking concurrency-capped version of `decryptExportBundle` for HTTP request handlers.
+ * @param {any} envelope
+ * @param {string} passphrase
+ * @returns {Promise<any>}
+ */
+export async function decryptExportBundleAsync(envelope, passphrase) {
   if (!envelope || typeof envelope !== "object" || envelope.encrypted !== true) {
     throw new Error("Invalid encrypted bundle envelope");
   }
@@ -293,7 +405,7 @@ export function decryptExportBundle(envelope, passphrase) {
     throw new Error("Invalid salt, IV, or authentication tag in encrypted bundle");
   }
 
-  const key = crypto.scryptSync(passphrase, saltBuf, 32, { N: 16384, r: 8, p: 1 });
+  const key = await deriveScryptKeyAsync(passphrase, saltBuf);
   const decipher = crypto.createDecipheriv("aes-256-gcm", key, ivBuf);
   decipher.setAuthTag(tagBuf);
   const decrypted = Buffer.concat([decipher.update(cipherBuf), decipher.final()]);

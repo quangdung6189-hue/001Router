@@ -34,12 +34,16 @@ export function ConfirmDialog({
             type="button"
             onClick={onConfirm}
             disabled={busy}
-            className={`rounded-lg px-3.5 py-2 text-sm font-semibold transition-colors disabled:opacity-50 ${
-              destructive
-                ? 'bg-red-600 text-white hover:bg-red-500'
-                : 'bg-[#E56A4A] text-white hover:bg-[#cc5236]'
+            className={`inline-flex items-center gap-2 px-3.5 py-2 text-sm ${
+              destructive ? 'r-btn-danger' : 'r-btn-primary'
             }`}
           >
+            {busy ? (
+              <span
+                className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/40 border-t-white motion-reduce:animate-none"
+                aria-hidden="true"
+              />
+            ) : null}
             {busy ? t('common.saving') : confirmLabel || t('common.save')}
           </button>
         </>

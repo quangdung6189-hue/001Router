@@ -81,9 +81,61 @@ const KNOWN_KEY_PATTERN =
 const BEARER_PATTERN = /\b(Bearer\s+)([A-Za-z0-9._~+/=-]{6,})/gi;
 const HEADER_KEY_PATTERN = /\b(x-api-key|api-key|apikey)(\s*[:=]\s*["']?)([A-Za-z0-9._~+/=-]{6,})(["']?)/gi;
 const PROXY_CRED_PATTERN = /((?:https?|socks5h?):\/\/)([^/\s:@]+:[^/\s@]+)@/gi;
-const PEM_PRIVATE_KEY_PATTERN =
-  /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----/g;
 const LONG_TOKEN_PATTERN = /\b([A-Za-z0-9+/=_-]{36,})\b/g;
+
+/**
+ * Linear-time PEM private key block redactor (avoids O(n^2) ReDoS on repeated unclosed headers).
+ * @param {string} text
+ * @returns {string}
+ */
+function stripPemPrivateKeys(text) {
+  if (!text.includes("-----BEGIN ") || !text.includes("PRIVATE KEY-----")) {
+    return text;
+  }
+  let out = "";
+  let pos = 0;
+  while (pos < text.length) {
+    const start = text.indexOf("-----BEGIN ", pos);
+    if (start === -1) {
+      out += text.slice(pos);
+      break;
+    }
+    const headerEnd = text.indexOf("PRIVATE KEY-----", start + 11);
+    if (headerEnd === -1 || headerEnd - start > 64) {
+      out += text.slice(pos, start + 11);
+      pos = start + 11;
+      continue;
+    }
+    const headerLabel = text.slice(start + 11, headerEnd);
+    if (!/^[A-Z0-9 ]*$/.test(headerLabel)) {
+      out += text.slice(pos, start + 11);
+      pos = start + 11;
+      continue;
+    }
+    const afterHeader = headerEnd + "PRIVATE KEY-----".length;
+    const endMarkerStart = text.indexOf("-----END ", afterHeader);
+    if (endMarkerStart === -1) {
+      // No closing END marker anywhere in the rest of the string: stop scanning (O(n))
+      out += text.slice(pos);
+      break;
+    }
+    const endMarkerEnd = text.indexOf("PRIVATE KEY-----", endMarkerStart + 9);
+    if (endMarkerEnd === -1 || endMarkerEnd - endMarkerStart > 64) {
+      out += text.slice(pos, afterHeader);
+      pos = afterHeader;
+      continue;
+    }
+    const endLabel = text.slice(endMarkerStart + 9, endMarkerEnd);
+    if (!/^[A-Z0-9 ]*$/.test(endLabel)) {
+      out += text.slice(pos, afterHeader);
+      pos = afterHeader;
+      continue;
+    }
+    out += text.slice(pos, start) + "[REDACTED PRIVATE KEY]";
+    pos = endMarkerEnd + "PRIVATE KEY-----".length;
+  }
+  return out;
+}
 
 /**
  * Redact known secrets and common API key / Bearer / proxy credential patterns from a string.
@@ -103,7 +155,7 @@ export function redactSecrets(message, secrets = []) {
     }
   }
 
-  out = out.replace(PEM_PRIVATE_KEY_PATTERN, "[REDACTED PRIVATE KEY]");
+  out = stripPemPrivateKeys(out);
   out = out.replace(PROXY_CRED_PATTERN, "$1***:***@");
   out = out.replace(KNOWN_KEY_PATTERN, (match) => maskKey(match));
   out = out.replace(BEARER_PATTERN, (_full, prefix, token) => `${prefix}${maskKey(token)}`);
@@ -136,6 +188,64 @@ export function containsUnredactedSecret(text) {
   BEARER_PATTERN.lastIndex = 0;
   if (BEARER_PATTERN.test(text)) return true;
   return false;
+}
+
+/**
+ * Check whether a user-supplied string is safe to use as a plain-object dictionary key.
+ * Rejects prototype-pollution keys (`__proto__`, `constructor`, `prototype`).
+ * @param {unknown} key
+ * @returns {boolean}
+ */
+export function isSafePropertyKey(key) {
+  return (
+    typeof key === "string" &&
+    key.length > 0 &&
+    key.length <= 256 &&
+    !FORBIDDEN_PROTO_KEYS.has(key)
+  );
+}
+
+/**
+ * Recursively sanitize an already-fresh parsed JSON object/array in-place to strip
+ * prototype-pollution keys and enforce `MAX_JSON_DEPTH` with zero object allocations on clean inputs.
+ * @template T
+ * @param {T} input
+ * @returns {T}
+ */
+export function sanitizePrototypePollutionInPlace(input) {
+  sanitizeInPlaceAt(input, 0);
+  return input;
+}
+
+function sanitizeInPlaceAt(input, depth) {
+  if (input === null || typeof input !== "object") {
+    return;
+  }
+  if (depth > MAX_JSON_DEPTH) {
+    const err = new Error("JSON nesting too deep");
+    err.status = 400;
+    err.type = "entity.parse.failed";
+    throw err;
+  }
+  if (Array.isArray(input)) {
+    for (let i = 0; i < input.length; i++) {
+      sanitizeInPlaceAt(input[i], depth + 1);
+    }
+    return;
+  }
+  const proto = Object.getPrototypeOf(input);
+  if (proto !== Object.prototype && proto !== null) {
+    return;
+  }
+  const keys = Object.keys(input);
+  for (let i = 0; i < keys.length; i++) {
+    const key = keys[i];
+    if (FORBIDDEN_PROTO_KEYS.has(key)) {
+      delete input[key];
+      continue;
+    }
+    sanitizeInPlaceAt(input[key], depth + 1);
+  }
 }
 
 /**
@@ -291,18 +401,21 @@ function classifyIPv4Octets(octets, label) {
   if (a === 127) {
     return { isMetadataOrLinkLocal: false, isPrivateLan: false, isLoopback: true };
   }
-  // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10 (CGNAT)
+  // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10 (CGNAT),
+  // 198.18.0.0/15 (benchmarking), 224.0.0.0/4 (multicast), 240.0.0.0/4 (reserved)
   if (
     a === 10 ||
     (a === 172 && b >= 16 && b <= 31) ||
     (a === 192 && b === 168) ||
-    (a === 100 && b >= 64 && b <= 127)
+    (a === 100 && b >= 64 && b <= 127) ||
+    (a === 198 && (b === 18 || b === 19)) ||
+    a >= 224
   ) {
     return {
       isMetadataOrLinkLocal: false,
       isPrivateLan: true,
       isLoopback: false,
-      reason: `Private network address '${label}' is not allowed for cloud provider`
+      reason: `Private or non-routable network address '${label}' is not allowed for cloud provider`
     };
   }
   return { isMetadataOrLinkLocal: false, isPrivateLan: false, isLoopback: false };
@@ -354,17 +467,62 @@ export function classifyHostForSSRF(rawHostname) {
     if (first12Zero && v6.slice(12, 15).every((x) => x === 0) && v6[15] === 1) {
       return { isMetadataOrLinkLocal: false, isPrivateLan: false, isLoopback: true };
     }
-    // Embedded IPv4: ::ffff:a.b.c.d, ::a.b.c.d, 64:ff9b::a.b.c.d, 2002:aabb:ccdd::
+    // Embedded IPv4: ::ffff:a.b.c.d, ::ffff:0:a.b.c.d (RFC 2765), ::a.b.c.d,
+    // 64:ff9b::a.b.c.d (RFC 6052), 64:ff9b:1::/48 (RFC 8215), 2002:aabb:ccdd:: (6to4), 2001:0000::/32 (Teredo)
     const mapped =
       v6.slice(0, 10).every((x) => x === 0) && v6[10] === 0xff && v6[11] === 0xff;
-    const nat64 =
+    const translated =
+      v6.slice(0, 8).every((x) => x === 0) &&
+      v6[8] === 0xff &&
+      v6[9] === 0xff &&
+      v6[10] === 0x00 &&
+      v6[11] === 0x00;
+    const nat64WellKnown =
       v6[0] === 0x00 && v6[1] === 0x64 && v6[2] === 0xff && v6[3] === 0x9b &&
       v6.slice(4, 12).every((x) => x === 0);
-    if (mapped || nat64 || first12Zero) {
+    const nat64Local =
+      v6[0] === 0x00 && v6[1] === 0x64 && v6[2] === 0xff && v6[3] === 0x9b &&
+      v6[4] === 0x00 && v6[5] === 0x01;
+    if (mapped || translated || nat64WellKnown || first12Zero) {
       return classifyIPv4Octets(v6.slice(12, 16), rawHostname);
+    }
+    if (nat64Local) {
+      const embedded = classifyIPv4Octets(v6.slice(12, 16), rawHostname);
+      if (embedded.isMetadataOrLinkLocal || embedded.isLoopback || embedded.isPrivateLan) {
+        return embedded;
+      }
+      return {
+        isMetadataOrLinkLocal: false,
+        isPrivateLan: true,
+        isLoopback: false,
+        reason: `Local-use NAT64 IPv6 address '${host}'`
+      };
     }
     if (v6[0] === 0x20 && v6[1] === 0x02) {
       return classifyIPv4Octets(v6.slice(2, 6), rawHostname);
+    }
+    // 2001:0000::/32 Teredo (embedded client IPv4 in bytes 12..15 XOR 0xff)
+    if (v6[0] === 0x20 && v6[1] === 0x01 && v6[2] === 0x00 && v6[3] === 0x00) {
+      const teredoClient = [v6[12] ^ 0xff, v6[13] ^ 0xff, v6[14] ^ 0xff, v6[15] ^ 0xff];
+      const embedded = classifyIPv4Octets(teredoClient, rawHostname);
+      if (embedded.isMetadataOrLinkLocal || embedded.isLoopback || embedded.isPrivateLan) {
+        return embedded;
+      }
+      return {
+        isMetadataOrLinkLocal: false,
+        isPrivateLan: true,
+        isLoopback: false,
+        reason: `Teredo tunneled IPv6 address '${host}'`
+      };
+    }
+    // ff00::/8 multicast
+    if (v6[0] === 0xff) {
+      return {
+        isMetadataOrLinkLocal: false,
+        isPrivateLan: true,
+        isLoopback: false,
+        reason: `Multicast IPv6 address '${host}'`
+      };
     }
     // fd00:ec2::/32 (AWS IMDS over IPv6)
     if (v6[0] === 0xfd && v6[1] === 0x00 && v6[2] === 0x0e && v6[3] === 0xc2) {

@@ -19,17 +19,24 @@ import {
 export { maskProxyUrl };
 
 const VALID_PROXY_PROTOCOLS = new Set(["http:", "https:", "socks5:", "socks5h:"]);
+const DNS_CACHE_TTL_MS = 30_000;
+const DNS_CACHE_MAX_ENTRIES = 512;
+
+/** @type {Map<string, { addrs: Array<{ address: string, family: number }>, expiresAt: number }>} */
+const dnsCache = new Map();
 
 /** @type {Map<string, ProxyAgent>} */
 const dispatcherCache = new Map();
+/** @type {Map<string, import("undici").Dispatcher>} */
+const poolIdDispatcherCache = new Map();
 /** @type {Agent | null} */
 let defaultUpstreamAgent = null;
 
 /**
  * Return a tuned default undici Agent for direct upstream requests:
- * - Fast IPv4/IPv6 Happy Eyeballs (500ms attempt timeout) + 15s connect timeout to prevent 120s Windows IPv6 stalls
+ * - Fast IPv4/IPv6 Happy Eyeballs (250ms attempt timeout) + 15s connect timeout
  * - Disabled bodyTimeout (0) so long SSE streams never get killed mid-generation
- * - Clean keepAlive bounds to avoid stale half-open sockets
+ * - Extended keepAlive (90s / 300s) so multi-turn coding agent sessions reuse warm TLS sockets
  * @returns {Agent}
  */
 export function getDefaultUpstreamDispatcher() {
@@ -38,12 +45,12 @@ export function getDefaultUpstreamDispatcher() {
       connect: {
         timeout: 15_000,
         autoSelectFamily: true,
-        autoSelectFamilyAttemptTimeout: 500
+        autoSelectFamilyAttemptTimeout: 250
       },
       headersTimeout: 120_000,
       bodyTimeout: 0,
-      keepAliveTimeout: 30_000,
-      keepAliveMaxTimeout: 60_000
+      keepAliveTimeout: 90_000,
+      keepAliveMaxTimeout: 300_000
     });
   }
   return defaultUpstreamAgent;
@@ -52,11 +59,36 @@ export function getDefaultUpstreamDispatcher() {
 /** @type {Map<string, Agent>} */
 const guardedAgents = new Map();
 
+function lookupWithShortCache(hostname, options, callback) {
+  const key = `${String(hostname).toLowerCase()}:${options?.family || 0}`;
+  const now = Date.now();
+  const cached = dnsCache.get(key);
+  if (cached && cached.expiresAt > now) {
+    return callback(null, cached.addrs);
+  }
+  dns.lookup(hostname, { ...options, all: true }, (err, addrs) => {
+    if (err) return callback(err);
+    if (!Array.isArray(addrs) || addrs.length === 0) {
+      const noAddrErr = new Error(`DNS lookup returned no addresses for '${hostname}'`);
+      noAddrErr.code = "ENOTFOUND";
+      return callback(noAddrErr);
+    }
+    dnsCache.delete(key);
+    dnsCache.set(key, { addrs, expiresAt: now + DNS_CACHE_TTL_MS });
+    while (dnsCache.size > DNS_CACHE_MAX_ENTRIES) {
+      const oldest = dnsCache.keys().next().value;
+      if (oldest === undefined) break;
+      dnsCache.delete(oldest);
+    }
+    return callback(null, addrs);
+  });
+}
+
 /**
  * Create an undici Agent that validates the DESTINATION ADDRESS of every outbound connection:
- * - hostnames are resolved here and every returned address is checked (defeats `*.nip.io`, wildcard DNS
- *   and DNS-rebinding style names pointing at 169.254.169.254 / private ranges),
- * - IP literals are checked too, which also covers HTTP redirects to `http://169.254.169.254/`.
+ * - hostnames are resolved (with short 30s cache) and every returned address is ALWAYS checked
+ *   against `policy` (defeats `*.nip.io`, wildcard DNS, and DNS-rebinding),
+ * - IP literals are checked too, covering redirects to `http://169.254.169.254/`.
  * Cloud-metadata / link-local is always blocked; private LAN / loopback follow `policy`.
  * @param {{ blockPrivate: boolean, blockLoopback: boolean }} policy
  */
@@ -66,8 +98,13 @@ export function createGuardedAgent(policy) {
       callback = options;
       options = {};
     }
-    dns.lookup(hostname, { ...options, all: true }, (err, addrs) => {
+    lookupWithShortCache(hostname, options, (err, addrs) => {
       if (err) return callback(err);
+      if (!Array.isArray(addrs) || addrs.length === 0) {
+        const noAddrErr = new Error(`SSRF guard: '${hostname}' resolved to no addresses`);
+        noAddrErr.code = "ENOTFOUND";
+        return callback(noAddrErr);
+      }
       for (const a of addrs) {
         const reason = checkAddressAgainstPolicy(a.address, policy);
         if (reason) {
@@ -83,7 +120,7 @@ export function createGuardedAgent(policy) {
   const connector = buildConnector({
     timeout: 15_000,
     autoSelectFamily: true,
-    autoSelectFamilyAttemptTimeout: 500,
+    autoSelectFamilyAttemptTimeout: 250,
     lookup
   });
   return new GuardedAgent({
@@ -101,8 +138,8 @@ export function createGuardedAgent(policy) {
     },
     headersTimeout: 120_000,
     bodyTimeout: 0,
-    keepAliveTimeout: 30_000,
-    keepAliveMaxTimeout: 60_000
+    keepAliveTimeout: 90_000,
+    keepAliveMaxTimeout: 300_000
   });
 }
 
@@ -128,60 +165,115 @@ function redirectRefusedError() {
 }
 
 /**
- * Wrap an undici handler (both the legacy `onConnect/onHeaders` API used by Node's built-in `fetch`
- * and the new `onResponseStart` API used by the npm `undici.fetch`) so that cross-origin redirects are refused.
- * LLM provider APIs do not need them, and following one would forward provider credentials sent in custom
- * headers (`x-api-key`, `api-key`, `x-goog-api-key`; fetch only strips `Authorization`) to another host.
- * Same-origin redirects (e.g. `/v1/x` -> `/v1/y`) are still followed.
+ * Lightweight zero-Proxy wrapper around an undici handler (supporting both legacy `onConnect/onHeaders`
+ * and undici v7+ `onResponseStart`) so cross-origin redirects are refused without ES6 Proxy trap or
+ * per-chunk `.bind()` allocations on `onResponseData`.
  */
 function guardRedirectHandler(handler, requestOrigin) {
   let legacyAbort = null;
-  return new Proxy(handler, {
-    get(target, prop) {
-      if (prop === "onConnect") {
-        return (abort, ...rest) => {
-          legacyAbort = abort;
-          return target.onConnect?.(abort, ...rest);
-        };
-      }
-      if (prop === "onHeaders") {
-        if (typeof target.onHeaders !== "function") return undefined;
-        return (statusCode, rawHeaders, ...rest) => {
-          if (REDIRECT_STATUSES.has(statusCode) && Array.isArray(rawHeaders)) {
-            for (let i = 0; i + 1 < rawHeaders.length; i += 2) {
-              if (String(rawHeaders[i]).toLowerCase() === "location") {
-                if (isCrossOriginRedirect(requestOrigin, String(rawHeaders[i + 1])) && legacyAbort) {
-                  legacyAbort(redirectRefusedError());
-                  return true;
-                }
-                break;
-              }
+  const wrapped = Object.create(handler);
+
+  if (typeof handler.onConnect === "function") {
+    wrapped.onConnect = function (abort, ...rest) {
+      legacyAbort = abort;
+      return handler.onConnect(abort, ...rest);
+    };
+  }
+  if (typeof handler.onHeaders === "function") {
+    wrapped.onHeaders = function (statusCode, rawHeaders, ...rest) {
+      if (REDIRECT_STATUSES.has(statusCode) && Array.isArray(rawHeaders)) {
+        for (let i = 0; i + 1 < rawHeaders.length; i += 2) {
+          if (String(rawHeaders[i]).toLowerCase() === "location") {
+            if (isCrossOriginRedirect(requestOrigin, String(rawHeaders[i + 1])) && legacyAbort) {
+              legacyAbort(redirectRefusedError());
+              return true;
             }
+            break;
           }
-          return target.onHeaders(statusCode, rawHeaders, ...rest);
-        };
+        }
       }
-      if (prop === "onResponseStart") {
-        if (typeof target.onResponseStart !== "function") return undefined;
-        return (controller, statusCode, headers, statusMessage) => {
-          const location = headers && (headers.location || headers.Location);
-          if (REDIRECT_STATUSES.has(statusCode) && location && isCrossOriginRedirect(requestOrigin, location)) {
-            controller.abort(redirectRefusedError());
-            return;
-          }
-          return target.onResponseStart(controller, statusCode, headers, statusMessage);
-        };
+      return handler.onHeaders(statusCode, rawHeaders, ...rest);
+    };
+  }
+  if (typeof handler.onResponseStart === "function") {
+    wrapped.onResponseStart = function (controller, statusCode, headers, statusMessage) {
+      const location = headers && (headers.location || headers.Location);
+      if (
+        REDIRECT_STATUSES.has(statusCode) &&
+        location &&
+        isCrossOriginRedirect(requestOrigin, location)
+      ) {
+        controller.abort(redirectRefusedError());
+        return;
       }
-      const v = target[prop];
-      return typeof v === "function" ? v.bind(target) : v;
-    }
-  });
+      return handler.onResponseStart(controller, statusCode, headers, statusMessage);
+    };
+  }
+  if (typeof handler.onResponseData === "function") {
+    wrapped.onResponseData = function (controller, chunk) {
+      return handler.onResponseData(controller, chunk);
+    };
+  }
+  if (typeof handler.onData === "function") {
+    wrapped.onData = function (chunk) {
+      return handler.onData(chunk);
+    };
+  }
+  if (typeof handler.onResponseEnd === "function") {
+    wrapped.onResponseEnd = function (controller, trailers) {
+      return handler.onResponseEnd(controller, trailers);
+    };
+  }
+  if (typeof handler.onComplete === "function") {
+    wrapped.onComplete = function (trailers) {
+      return handler.onComplete(trailers);
+    };
+  }
+  if (typeof handler.onResponseError === "function") {
+    wrapped.onResponseError = function (controller, err) {
+      return handler.onResponseError(controller, err);
+    };
+  }
+  if (typeof handler.onError === "function") {
+    wrapped.onError = function (err) {
+      return handler.onError(err);
+    };
+  }
+  return wrapped;
 }
 
 class GuardedAgent extends Agent {
   dispatch(opts, handler) {
     return super.dispatch(opts, guardRedirectHandler(handler, String(opts.origin || "")));
   }
+}
+
+class GuardedProxyAgent extends ProxyAgent {
+  dispatch(opts, handler) {
+    return super.dispatch(opts, guardRedirectHandler(handler, String(opts.origin || "")));
+  }
+}
+
+/**
+ * Return a cached `GuardedAgent` for an explicit SSRF policy `{ blockPrivate, blockLoopback }`.
+ * @param {{ blockPrivate: boolean, blockLoopback: boolean }} policy
+ */
+export function getPolicyGuardedDispatcher(policy) {
+  const key = `${policy.blockPrivate ? 1 : 0}${policy.blockLoopback ? 1 : 0}`;
+  let agent = guardedAgents.get(key);
+  if (!agent) {
+    agent = createGuardedAgent(policy);
+    guardedAgents.set(key, agent);
+  }
+  return agent;
+}
+
+/**
+ * Strict outbound dispatcher blocking cloud metadata, private LAN, and loopback addresses.
+ * Suitable for OAuth token exchanges, catalog sync, and external public APIs.
+ */
+export function getStrictGuardedDispatcher() {
+  return getPolicyGuardedDispatcher({ blockPrivate: true, blockLoopback: true });
 }
 
 /**
@@ -196,13 +288,63 @@ export function getGuardedUpstreamDispatcher(provider, storage) {
     category: getPreset(presetKey)?.category,
     allowPrivateUpstreams: storage?.getSettings?.()?.allowPrivateUpstreams
   });
-  const key = `${policy.blockPrivate ? 1 : 0}${policy.blockLoopback ? 1 : 0}`;
-  let agent = guardedAgents.get(key);
-  if (!agent) {
-    agent = createGuardedAgent(policy);
-    guardedAgents.set(key, agent);
+  return getPolicyGuardedDispatcher(policy);
+}
+
+/**
+ * Read a Fetch `Response` body as UTF-8 text with a hard byte cap and optional idle timeout
+ * so hostile or misbehaving upstreams cannot OOM the process via decompression bombs or huge bodies.
+ * @param {Response} res
+ * @param {number} [maxBytes]
+ * @param {number} [idleTimeoutMs]
+ * @returns {Promise<string>}
+ */
+export async function readResponseTextBounded(
+  res,
+  maxBytes = 10 * 1024 * 1024,
+  idleTimeoutMs = 30_000
+) {
+  if (!res) return "";
+  if (!res.body || typeof res.body.getReader !== "function") {
+    const text = await res.text();
+    if (Buffer.byteLength(text, "utf8") > maxBytes) {
+      throw new Error(`Upstream response exceeded ${maxBytes} byte safety limit`);
+    }
+    return text;
   }
-  return agent;
+  const reader = res.body.getReader();
+  const chunks = [];
+  let total = 0;
+  try {
+    while (true) {
+      let timer = null;
+      const readPromise = reader.read();
+      const result =
+        idleTimeoutMs > 0
+          ? await Promise.race([
+              readPromise,
+              new Promise((_, reject) => {
+                timer = setTimeout(() => reject(new Error("Upstream response body read timed out")), idleTimeoutMs);
+              })
+            ])
+          : await readPromise;
+      if (timer) clearTimeout(timer);
+      const { value, done } = result;
+      if (done) break;
+      if (value && value.byteLength > 0) {
+        total += value.byteLength;
+        if (total > maxBytes) {
+          await reader.cancel().catch(() => {});
+          throw new Error(`Upstream response exceeded ${maxBytes} byte safety limit`);
+        }
+        chunks.push(Buffer.from(value.buffer, value.byteOffset, value.byteLength));
+      }
+    }
+    return Buffer.concat(chunks, total).toString("utf8");
+  } catch (err) {
+    await reader.cancel().catch(() => {});
+    throw err;
+  }
 }
 
 /**
@@ -343,8 +485,8 @@ export function getProxyPoolById(storage, poolId) {
 }
 
 /**
- * Return an `undici` `ProxyAgent` dispatcher for a provider when `provider.proxyPoolId`
- * references an enabled proxy pool; otherwise returns the SSRF-guarded direct dispatcher.
+ * Return a tuned, redirect-guarded `undici` `ProxyAgent` dispatcher for a provider when
+ * `provider.proxyPoolId` references an enabled proxy pool; otherwise returns the SSRF-guarded direct dispatcher.
  * @param {any} provider
  * @param {any} storage
  * @returns {import("undici").Dispatcher}
@@ -352,6 +494,10 @@ export function getProxyPoolById(storage, poolId) {
 export function getProxyDispatcher(provider, storage) {
   const poolId = provider?.proxyPoolId;
   if (!poolId || typeof poolId !== "string") return getGuardedUpstreamDispatcher(provider, storage);
+
+  const cachedByPoolId = poolIdDispatcherCache.get(poolId);
+  if (cachedByPoolId) return cachedByPoolId;
+
   const pool = getProxyPoolById(storage, poolId);
   if (!pool || pool.enabled === false) return getGuardedUpstreamDispatcher(provider, storage);
 
@@ -369,12 +515,22 @@ export function getProxyDispatcher(provider, storage) {
   let agent = dispatcherCache.get(effectiveUrl);
   if (!agent) {
     try {
-      agent = new ProxyAgent(effectiveUrl);
+      agent = new GuardedProxyAgent({
+        uri: effectiveUrl,
+        headersTimeout: 120_000,
+        bodyTimeout: 0,
+        keepAliveTimeout: 90_000,
+        keepAliveMaxTimeout: 300_000,
+        connectTimeout: 15_000,
+        proxyTls: { autoSelectFamily: true, autoSelectFamilyAttemptTimeout: 250 },
+        requestTls: { autoSelectFamily: true, autoSelectFamilyAttemptTimeout: 250 }
+      });
       dispatcherCache.set(effectiveUrl, agent);
     } catch {
       return getFailClosedDispatcher("Proxy pool could not be initialised");
     }
   }
+  poolIdDispatcherCache.set(poolId, agent);
   return agent;
 }
 
@@ -410,10 +566,12 @@ export function clearProxyDispatcherCache() {
     }
   }
   dispatcherCache.clear();
+  poolIdDispatcherCache.clear();
 }
 
 /**
- * Test connectivity to a proxy pool endpoint via TCP handshake (and optional target fetch).
+ * Test connectivity to a proxy pool endpoint via DNS-validated TCP handshake.
+ * Resolves all DNS addresses and validates them against SSRF policy before connecting.
  * Never exposes credentials in returned messages.
  * @param {any} pool
  * @param {any} [storage]
@@ -434,9 +592,55 @@ export async function testProxyPoolConnection(pool, storage, timeoutMs = 5000) {
   const started = Date.now();
   const host = parsed.host.replace(/^\[|\]$/g, "");
   const port = parsed.port;
+  const allowPrivate = storage?.getSettings?.()?.allowPrivateUpstreams;
+  const policy = {
+    blockPrivate: allowPrivate !== true,
+    blockLoopback: allowPrivate === false
+  };
+
+  let targetIp = host;
+  if (net.isIP(host)) {
+    const reason = checkAddressAgainstPolicy(host, policy);
+    if (reason) {
+      return {
+        ok: false,
+        latencyMs: Date.now() - started,
+        message: `SSRF guard: proxy connection blocked (${reason})`
+      };
+    }
+  } else {
+    let addrs;
+    try {
+      addrs = await dns.promises.lookup(host, { all: true });
+    } catch (err) {
+      return {
+        ok: false,
+        latencyMs: Date.now() - started,
+        message: `Proxy DNS resolution failed: ${err?.message || "host not found"}`
+      };
+    }
+    if (!Array.isArray(addrs) || addrs.length === 0) {
+      return {
+        ok: false,
+        latencyMs: Date.now() - started,
+        message: "Proxy DNS resolution returned no addresses"
+      };
+    }
+    for (const a of addrs) {
+      const reason = checkAddressAgainstPolicy(a.address, policy);
+      if (reason) {
+        return {
+          ok: false,
+          latencyMs: Date.now() - started,
+          message: `SSRF guard: proxy host resolves to blocked address (${reason})`
+        };
+      }
+    }
+    targetIp = addrs[0].address;
+  }
 
   return new Promise((resolve) => {
-    const socket = net.createConnection({ host, port });
+    const socket = net.createConnection({ host: targetIp, port });
     let settled = false;
 
     const finish = (ok, message) => {

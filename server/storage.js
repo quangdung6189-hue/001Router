@@ -13,7 +13,7 @@ import {
   isEncrypted,
   loadOrCreateMasterKey
 } from "./security/crypto.js";
-import { redactSecrets } from "./security/redact.js";
+import { isSafePropertyKey, redactSecrets } from "./security/redact.js";
 
 export const MAX_LOGS = 5000;
 /** Debounce / max-wait for coalesced hot-path persistence (request logs, cooldown clears). */
@@ -203,6 +203,99 @@ export class Storage {
     this._deferredWaiters = [];
     this._pgUpdatedAt = 0;
     this._pgSyncInFlight = null;
+    this._lastCheckedPasswordHash = null;
+    this._dirEnsured = false;
+    /** @type {Map<string, string>} cached AES-256-GCM ciphertext per plaintext secret */
+    this._encCache = new Map();
+    /** @type {string[] | null} */
+    this._redactionSecretsCache = null;
+    this._customPricingVersion = 0;
+    /** @type {Map<string, any> | null} */
+    this._providersById = null;
+    /** @type {Map<string, any> | null} */
+    this._providersBySlug = null;
+    /** @type {Map<string, any> | null} */
+    this._keysByHash = null;
+  }
+
+  _invalidateIndexes() {
+    this._providersById = null;
+    this._providersBySlug = null;
+    this._keysByHash = null;
+    this._redactionSecretsCache = null;
+  }
+
+  _ensureProviderIndexes() {
+    if (this._providersById && this._providersBySlug) return;
+    const byId = new Map();
+    const bySlug = new Map();
+    for (const p of this.data?.providers || []) {
+      if (p?.id) byId.set(p.id, p);
+      if (p?.slug) bySlug.set(p.slug, p);
+    }
+    this._providersById = byId;
+    this._providersBySlug = bySlug;
+  }
+
+  getKeysByHashIndex() {
+    if (!this._keysByHash) {
+      const map = new Map();
+      for (const k of this.data?.keys || []) {
+        if (k && k.enabled !== false && typeof k.keyHash === "string" && k.keyHash) {
+          map.set(k.keyHash, k);
+        }
+      }
+      this._keysByHash = map;
+    }
+    return this._keysByHash;
+  }
+
+  getCustomPricingVersion() {
+    return this._customPricingVersion;
+  }
+
+  getRedactionSecrets() {
+    if (this._redactionSecretsCache) return this._redactionSecretsCache;
+    const secrets = [];
+    for (const p of this.data?.providers || []) {
+      for (const k of p.apiKeys || []) {
+        if (k?.key) secrets.push(k.key);
+        if (typeof k?.serviceAccountJson === "string" && k.serviceAccountJson) {
+          secrets.push(k.serviceAccountJson);
+          try {
+            const sa = JSON.parse(k.serviceAccountJson);
+            if (sa?.private_key) secrets.push(sa.private_key);
+          } catch {
+            // ignore non-JSON
+          }
+        }
+        if (typeof k?.oauthCredentials === "string" && k.oauthCredentials) {
+          secrets.push(k.oauthCredentials);
+          try {
+            const oc = JSON.parse(k.oauthCredentials);
+            if (oc?.refreshToken) secrets.push(oc.refreshToken);
+            if (oc?.clientSecret) secrets.push(oc.clientSecret);
+            if (oc?.accessToken) secrets.push(oc.accessToken);
+          } catch {
+            // ignore non-JSON
+          }
+        }
+      }
+    }
+    this._redactionSecretsCache = secrets;
+    return secrets;
+  }
+
+  _encryptCached(plaintext) {
+    if (typeof plaintext !== "string" || !plaintext) return "";
+    const hit = this._encCache.get(plaintext);
+    if (hit) return hit;
+    const enc = encryptSecret(plaintext, this.masterKey);
+    if (this._encCache.size >= 512) {
+      this._encCache.delete(this._encCache.keys().next().value);
+    }
+    this._encCache.set(plaintext, enc);
+    return enc;
   }
 
   _decryptLoadedSecrets(loaded) {
@@ -271,23 +364,33 @@ export class Storage {
     this._pgSyncInFlight = (async () => {
       try {
         const res = await this.pgPool.query(
-          "SELECT payload, EXTRACT(EPOCH FROM updated_at) AS ts FROM router001_state WHERE id = 'primary' LIMIT 1"
+          this.data && this._pgUpdatedAt
+            ? "SELECT CASE WHEN EXTRACT(EPOCH FROM updated_at) = $1 THEN NULL ELSE payload END AS payload, EXTRACT(EPOCH FROM updated_at) AS ts FROM router001_state WHERE id = 'primary' LIMIT 1"
+            : "SELECT payload, EXTRACT(EPOCH FROM updated_at) AS ts FROM router001_state WHERE id = 'primary' LIMIT 1",
+          this.data && this._pgUpdatedAt ? [this._pgUpdatedAt] : undefined
         );
         const row = res.rows[0];
-        if (!row?.payload) return;
+        if (!row) return;
         const remoteTs = Number(row.ts) || 0;
         if (remoteTs && remoteTs === this._pgUpdatedAt && this.data) {
           return;
         }
+        if (!row.payload) return;
         const parsed = JSON.parse(row.payload);
         if (parsed && typeof parsed === "object") {
           this._decryptLoadedSecrets(parsed);
           this.data = parsed;
           this._pgUpdatedAt = remoteTs;
-          try {
-            this._isDefaultPassword = await bcrypt.compare("1234", parsed.passwordHash || "");
-          } catch {
-            this._isDefaultPassword = false;
+          this._customPricingVersion += 1;
+          this._invalidateIndexes();
+          const nextPwHash = parsed.passwordHash || "";
+          if (nextPwHash !== this._lastCheckedPasswordHash) {
+            try {
+              this._isDefaultPassword = await bcrypt.compare("1234", nextPwHash);
+            } catch {
+              this._isDefaultPassword = false;
+            }
+            this._lastCheckedPasswordHash = nextPwHash;
           }
         }
       } catch {
@@ -645,7 +748,7 @@ export class Storage {
       }
     }
 
-    // Build encrypted disk clone
+    // Build encrypted disk clone (reuses cached ciphertexts so log-only flushes do 0 AES encrypts)
     const diskClone = {
       ...data,
       providers: Array.isArray(data.providers)
@@ -657,20 +760,14 @@ export class Storage {
                 ...k,
                 key:
                   typeof k.key === "string" && k.key
-                    ? encryptSecret(k.key, this.masterKey)
+                    ? this._encryptCached(k.key)
                     : ""
               };
               if (typeof k.serviceAccountJson === "string" && k.serviceAccountJson) {
-                cloned.serviceAccountJson = encryptSecret(
-                  k.serviceAccountJson,
-                  this.masterKey
-                );
+                cloned.serviceAccountJson = this._encryptCached(k.serviceAccountJson);
               }
               if (typeof k.oauthCredentials === "string" && k.oauthCredentials) {
-                cloned.oauthCredentials = encryptSecret(
-                  k.oauthCredentials,
-                  this.masterKey
-                );
+                cloned.oauthCredentials = this._encryptCached(k.oauthCredentials);
               }
               return cloned;
             })
@@ -682,7 +779,7 @@ export class Storage {
           ...pool,
           url:
             typeof pool.url === "string" && pool.url
-              ? encryptSecret(pool.url, this.masterKey)
+              ? this._encryptCached(pool.url)
               : ""
         }))
         : [],
@@ -695,7 +792,7 @@ export class Storage {
         : []
     };
 
-    return JSON.stringify(diskClone, null, 2);
+    return JSON.stringify(diskClone);
   }
 
   async _writePayload(payload) {
@@ -714,7 +811,10 @@ export class Storage {
       return;
     }
 
-    await fs.mkdir(this.dataDir, { recursive: true });
+    if (!this._dirEnsured) {
+      await fs.mkdir(this.dataDir, { recursive: true });
+      this._dirEnsured = true;
+    }
     const tmpPath = `${this.dbPath}.${process.pid}.${Date.now()}.${Math.random()
       .toString(36)
       .slice(2, 8)}.tmp`;
@@ -756,6 +856,7 @@ export class Storage {
         await this.refreshFromPostgres();
       }
       const result = await mutator(this.data);
+      this._invalidateIndexes();
       const payload = this._prepareDiskPayload();
       await this._writePayload(payload);
       return result;
@@ -907,11 +1008,15 @@ export class Storage {
   }
 
   getProviderById(id) {
-    return this.data.providers.find((p) => p.id === id) || null;
+    if (!id) return null;
+    this._ensureProviderIndexes();
+    return this._providersById.get(id) || null;
   }
 
   getProviderBySlug(slug) {
-    return this.data.providers.find((p) => p.slug === slug) || null;
+    if (!slug) return null;
+    this._ensureProviderIndexes();
+    return this._providersBySlug.get(slug) || null;
   }
 
   getCombos() {
@@ -923,6 +1028,9 @@ export class Storage {
   }
 
   async setModelAlias(alias, target) {
+    if (!isSafePropertyKey(alias)) {
+      throw Object.assign(new Error("Invalid alias key"), { status: 400 });
+    }
     return this.update((data) => {
       if (!data.modelAliases || typeof data.modelAliases !== "object") data.modelAliases = {};
       data.modelAliases[alias] = target;
@@ -931,6 +1039,7 @@ export class Storage {
   }
 
   async deleteModelAlias(alias) {
+    if (!isSafePropertyKey(alias)) return false;
     return this.update((data) => {
       if (!data.modelAliases || typeof data.modelAliases !== "object") return false;
       if (!Object.prototype.hasOwnProperty.call(data.modelAliases, alias)) return false;
@@ -948,11 +1057,17 @@ export class Storage {
   }
 
   isModelDisabled(providerSlug, modelId) {
-    const list = this.data.disabledModels?.[providerSlug];
+    if (!isSafePropertyKey(providerSlug)) return false;
+    const list = Object.hasOwn(this.data.disabledModels || {}, providerSlug)
+      ? this.data.disabledModels[providerSlug]
+      : null;
     return Array.isArray(list) && list.includes(modelId);
   }
 
   async disableModels(providerSlug, modelIds) {
+    if (!isSafePropertyKey(providerSlug)) {
+      throw Object.assign(new Error("Invalid provider slug"), { status: 400 });
+    }
     return this.update((data) => {
       if (!data.disabledModels || typeof data.disabledModels !== "object") data.disabledModels = {};
       const prev = Array.isArray(data.disabledModels[providerSlug]) ? data.disabledModels[providerSlug] : [];
@@ -962,6 +1077,7 @@ export class Storage {
   }
 
   async enableModel(providerSlug, modelId) {
+    if (!isSafePropertyKey(providerSlug)) return [];
     return this.update((data) => {
       if (!data.disabledModels || !Array.isArray(data.disabledModels[providerSlug])) return [];
       data.disabledModels[providerSlug] = data.disabledModels[providerSlug].filter((id) => id !== modelId);
@@ -982,15 +1098,22 @@ export class Storage {
   }
 
   async setCustomPricing(providerSlug, modelId, rate) {
+    if (!isSafePropertyKey(providerSlug) || !isSafePropertyKey(modelId)) {
+      throw Object.assign(new Error("Invalid provider or model key"), { status: 400 });
+    }
     return this.update((data) => {
       if (!data.customPricing || typeof data.customPricing !== "object") data.customPricing = {};
       if (!data.customPricing[providerSlug]) data.customPricing[providerSlug] = {};
       data.customPricing[providerSlug][modelId] = rate;
+      this._customPricingVersion += 1;
       return { ...data.customPricing[providerSlug][modelId] };
     });
   }
 
   async resetCustomPricing(providerSlug = "", modelId = "") {
+    if ((providerSlug && !isSafePropertyKey(providerSlug)) || (modelId && !isSafePropertyKey(modelId))) {
+      throw Object.assign(new Error("Invalid provider or model key"), { status: 400 });
+    }
     return this.update((data) => {
       if (!data.customPricing || typeof data.customPricing !== "object") data.customPricing = {};
       if (!providerSlug) {
@@ -1003,6 +1126,7 @@ export class Storage {
           delete data.customPricing[providerSlug];
         }
       }
+      this._customPricingVersion += 1;
       return true;
     });
   }
@@ -1016,10 +1140,14 @@ export class Storage {
   }
 
   getQuota(providerId) {
-    return this.data.quotas?.[providerId] || null;
+    if (!isSafePropertyKey(providerId)) return null;
+    return Object.hasOwn(this.data.quotas || {}, providerId) ? this.data.quotas[providerId] : null;
   }
 
   async setQuota(providerId, budget) {
+    if (!isSafePropertyKey(providerId)) {
+      throw Object.assign(new Error("Invalid providerId"), { status: 400 });
+    }
     return this.update((data) => {
       if (!data.quotas || typeof data.quotas !== "object" || Array.isArray(data.quotas)) {
         data.quotas = {};
@@ -1043,39 +1171,12 @@ export class Storage {
 
   /**
    * Prepend a request log entry and enforce the 5000-entry retention cap.
-   * Never stores prompt/response bodies or headers; passes error strings through the redactor.
-   * Also optionally updates router key requestCount and lastUsedAt in the same atomic write.
+   * Never stores prompt/response bodies or headers; lazily collects redaction secrets ONLY when errors exist.
    * @param {any} entry
    * @param {string | null} [usedKeyId]
    */
   async recordRequestLog(entry, usedKeyId = null) {
     return this.updateDeferred((data) => {
-      const secrets = [];
-      for (const p of data.providers || []) {
-        for (const k of p.apiKeys || []) {
-          if (k?.key) secrets.push(k.key);
-          if (typeof k?.serviceAccountJson === "string" && k.serviceAccountJson) {
-            secrets.push(k.serviceAccountJson);
-            try {
-              const sa = JSON.parse(k.serviceAccountJson);
-              if (sa?.private_key) secrets.push(sa.private_key);
-            } catch {
-              // ignore non-JSON
-            }
-          }
-          if (typeof k?.oauthCredentials === "string" && k.oauthCredentials) {
-            secrets.push(k.oauthCredentials);
-            try {
-              const oc = JSON.parse(k.oauthCredentials);
-              if (oc?.refreshToken) secrets.push(oc.refreshToken);
-              if (oc?.clientSecret) secrets.push(oc.clientSecret);
-            } catch {
-              // ignore non-JSON
-            }
-          }
-        }
-      }
-
       const sanitizedEntry = { ...entry };
       delete sanitizedEntry.prompt;
       delete sanitizedEntry.messages;
@@ -1086,23 +1187,37 @@ export class Storage {
       delete sanitizedEntry.requestHeaders;
       delete sanitizedEntry.responseHeaders;
 
-      if (typeof sanitizedEntry.error === "string" && sanitizedEntry.error) {
-        sanitizedEntry.error = redactSecrets(sanitizedEntry.error, secrets);
+      if (typeof sanitizedEntry.requestedModel === "string" && sanitizedEntry.requestedModel.length > 256) {
+        sanitizedEntry.requestedModel = sanitizedEntry.requestedModel.slice(0, 256);
+      }
+
+      const hasTopError = typeof sanitizedEntry.error === "string" && sanitizedEntry.error.length > 0;
+      const hasTrailError =
+        Array.isArray(sanitizedEntry.attemptTrail) &&
+        sanitizedEntry.attemptTrail.some((h) => h && typeof h.error === "string" && h.error.length > 0);
+      const secrets = hasTopError || hasTrailError ? this.getRedactionSecrets() : null;
+
+      if (hasTopError) {
+        sanitizedEntry.error = redactSecrets(sanitizedEntry.error, secrets).slice(0, 1024);
       }
 
       if (Array.isArray(sanitizedEntry.attemptTrail)) {
-        sanitizedEntry.attemptTrail = sanitizedEntry.attemptTrail.map((hop) => {
+        const boundedTrail =
+          sanitizedEntry.attemptTrail.length > 16
+            ? sanitizedEntry.attemptTrail.slice(-16)
+            : sanitizedEntry.attemptTrail;
+        sanitizedEntry.attemptTrail = boundedTrail.map((hop) => {
           if (!hop || typeof hop !== "object") return hop;
           const cleanHop = {
-            target: hop.target || "",
+            target: String(hop.target || "").slice(0, 256),
             providerSlug: hop.providerSlug || null,
-            model: hop.model || "",
+            model: String(hop.model || "").slice(0, 256),
             keyId: hop.keyId ?? null,
             status: hop.status ?? 0,
             latencyMs: hop.latencyMs ?? 0
           };
           if (typeof hop.error === "string" && hop.error) {
-            cleanHop.error = redactSecrets(hop.error, secrets);
+            cleanHop.error = redactSecrets(hop.error, secrets).slice(0, 512);
           }
           return cleanHop;
         });
@@ -1129,7 +1244,8 @@ export class Storage {
   }
 
   async markProviderKeyCooldown(providerId, keyId, cooldownUntil, lastError) {
-    return this.update((data) => {
+    // Hot failover path: update in-memory cooldown immediately and coalesce disk write
+    return this.updateDeferred((data) => {
       const provider = data.providers.find((p) => p.id === providerId);
       if (!provider) return;
       const keyEntry = (provider.apiKeys || []).find((k) => k.id === keyId);
@@ -1143,10 +1259,10 @@ export class Storage {
 
   async clearProviderKeyCooldown(providerId, keyId) {
     // Hot path: called after every successful upstream call. Skip the DB write entirely when
-    // the key has no cooldown/error to clear (the overwhelmingly common case).
+    // the in-memory key has no cooldown/error to clear (avoids redundant Postgres/disk rewrites).
     const current = this.getProviderById(providerId);
     const currentKey = (current?.apiKeys || []).find((k) => k.id === keyId);
-    if (!this.pgPool && (!currentKey || (!currentKey.cooldownUntil && !currentKey.lastError))) {
+    if (!currentKey || (!currentKey.cooldownUntil && !currentKey.lastError)) {
       return;
     }
     return this.updateDeferred((data) => {

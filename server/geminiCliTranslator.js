@@ -277,7 +277,7 @@ function normalizeSchemaNode(input, depth) {
  * @returns {Record<string, any>}
  */
 function cleanSchema(schema) {
-  const root = isPlainObject(schema) ? JSON.parse(JSON.stringify(schema)) : {};
+  const root = isPlainObject(schema) ? schema : {};
   const defs = {
     ...(isPlainObject(root.definitions) ? root.definitions : {}),
     ...(isPlainObject(root.$defs) ? root.$defs : {})

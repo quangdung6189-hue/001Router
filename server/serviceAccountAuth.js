@@ -230,6 +230,13 @@ export function buildVertexOpenAiBaseUrl(projectId, location = "us-central1") {
  * }} [options]
  * @returns {Promise<string>}
  */
+/** @type {Map<string, any>} */
+const parsedSaCache = new Map();
+const PARSED_SA_CACHE_MAX = 256;
+const TOKEN_CACHE_MAX = 1000;
+const TOKEN_SOFT_REFRESH_BUFFER_MS = 10 * 60 * 1000;
+const TOKEN_HARD_REFRESH_BUFFER_MS = TOKEN_REFRESH_BUFFER_MS;
+
 export async function getServiceAccountAccessToken(saJsonStringOrObj, options = {}) {
   const {
     fetchImpl = upstreamFetch,
@@ -241,18 +248,29 @@ export async function getServiceAccountAccessToken(saJsonStringOrObj, options = 
     nowFn = Date.now
   } = options;
 
-  let rawObj = saJsonStringOrObj;
+  const allowLoopback = allowLoopbackTokenUri || Boolean(tokenUriOverride);
+  let sa;
   if (typeof saJsonStringOrObj === "string") {
-    try {
-      rawObj = JSON.parse(saJsonStringOrObj);
-    } catch {
-      throw createHttpError(400, "Stored service account JSON is malformed");
+    const saKey = `${allowLoopback ? 1 : 0}\0${saJsonStringOrObj}`;
+    sa = parsedSaCache.get(saKey);
+    if (!sa) {
+      let rawObj;
+      try {
+        rawObj = JSON.parse(saJsonStringOrObj);
+      } catch {
+        throw createHttpError(400, "Stored service account JSON is malformed");
+      }
+      sa = validateGoogleServiceAccountJson(rawObj, { allowLoopbackTokenUri: allowLoopback });
+      parsedSaCache.set(saKey, sa);
+      while (parsedSaCache.size > PARSED_SA_CACHE_MAX) {
+        parsedSaCache.delete(parsedSaCache.keys().next().value);
+      }
     }
+  } else {
+    sa = validateGoogleServiceAccountJson(saJsonStringOrObj, {
+      allowLoopbackTokenUri: allowLoopback
+    });
   }
-
-  const sa = validateGoogleServiceAccountJson(rawObj, {
-    allowLoopbackTokenUri: allowLoopbackTokenUri || Boolean(tokenUriOverride)
-  });
 
   const effectiveTokenUri =
     typeof tokenUriOverride === "string" && tokenUriOverride.trim()
@@ -263,7 +281,17 @@ export async function getServiceAccountAccessToken(saJsonStringOrObj, options = 
   const now = nowFn();
   if (!forceRefresh) {
     const cached = tokenCache.get(cacheKey);
-    if (cached && cached.expiresAt - TOKEN_REFRESH_BUFFER_MS > now) {
+    if (cached && cached.expiresAt - TOKEN_HARD_REFRESH_BUFFER_MS > now) {
+      // Soft pre-emptive background refresh when <10 min remain (zero TTFT stall)
+      if (
+        cached.expiresAt - TOKEN_SOFT_REFRESH_BUFFER_MS <= now &&
+        !inFlightRequests.has(cacheKey)
+      ) {
+        getServiceAccountAccessToken(sa, {
+          ...options,
+          forceRefresh: true
+        }).catch(() => {});
+      }
       return cached.accessToken;
     }
 
@@ -322,6 +350,7 @@ export async function getServiceAccountAccessToken(saJsonStringOrObj, options = 
     try {
       tokenRes = await fetchImpl(effectiveTokenUri, {
         method: "POST",
+        signal: AbortSignal.timeout(15_000),
         headers: {
           "content-type": "application/x-www-form-urlencoded",
           accept: "application/json"
@@ -378,6 +407,9 @@ export async function getServiceAccountAccessToken(saJsonStringOrObj, options = 
       accessToken,
       expiresAt: nowFn() + expiresInSec * 1000
     });
+    while (tokenCache.size > TOKEN_CACHE_MAX) {
+      tokenCache.delete(tokenCache.keys().next().value);
+    }
 
     return accessToken;
   })();
@@ -653,10 +685,15 @@ export function coerceFlexibleJsonInput(rawInput) {
     throw createHttpError(400, "JSON input is empty");
   }
 
-  // Strip surrounding markdown code fences (```json ... ``` or ``` ... ```)
-  const fenceMatch = text.match(/^```(?:json|jsonc|js|env|text)?\s*([\s\S]*?)\s*```$/i);
-  if (fenceMatch) {
-    text = fenceMatch[1].trim();
+  // Strip surrounding markdown code fences (```json ... ``` or ``` ... ```) in linear O(n) time
+  if (text.startsWith("```") && text.endsWith("```") && text.length >= 6) {
+    let bodyStart = 3;
+    const afterOpen = text.slice(3, 16);
+    const langMatch = /^(?:jsonc|json|js|env|text)\b/i.exec(afterOpen);
+    if (langMatch) {
+      bodyStart += langMatch[0].length;
+    }
+    text = text.slice(bodyStart, text.length - 3).trim();
   }
 
   // Normalize smart/curly double quotes to ASCII double quotes

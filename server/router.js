@@ -949,9 +949,20 @@ export class RouterService {
     if (!until) return false;
     if (until <= now) {
       this.modelCooldowns.delete(k);
+      this.modelCooldownNotes.delete(k);
       return false;
     }
     return true;
+  }
+
+  _setBoundedMapEntry(map, key, value, maxEntries = 2000) {
+    map.delete(key);
+    map.set(key, value);
+    while (map.size > maxEntries) {
+      const oldest = map.keys().next().value;
+      if (oldest === undefined) break;
+      map.delete(oldest);
+    }
   }
 
   getOrderedActiveKeys(provider, model = null) {
@@ -1010,30 +1021,13 @@ export class RouterService {
    * Collect all plaintext upstream keys across providers so error logs never leak secrets.
    */
   _allSecretKeys() {
+    if (typeof this.storage.getRedactionSecrets === "function") {
+      return [...this.storage.getRedactionSecrets()];
+    }
     const secrets = [];
     for (const p of this.storage.getProviders()) {
       for (const k of p.apiKeys || []) {
         if (k?.key) secrets.push(k.key);
-        if (typeof k?.serviceAccountJson === "string" && k.serviceAccountJson) {
-          secrets.push(k.serviceAccountJson);
-          try {
-            const sa = JSON.parse(k.serviceAccountJson);
-            if (sa?.private_key) secrets.push(sa.private_key);
-          } catch {
-            // ignore non-JSON
-          }
-        }
-        if (typeof k?.oauthCredentials === "string" && k.oauthCredentials) {
-          secrets.push(k.oauthCredentials);
-          try {
-            const oc = JSON.parse(k.oauthCredentials);
-            if (oc?.refreshToken) secrets.push(oc.refreshToken);
-            if (oc?.clientSecret) secrets.push(oc.clientSecret);
-            if (oc?.accessToken) secrets.push(oc.accessToken);
-          } catch {
-            // ignore non-JSON
-          }
-        }
       }
     }
     return secrets;
@@ -1155,9 +1149,22 @@ export class RouterService {
 
     // Apply Capacity Adapter (Vision / Audio auto-adapter when target model lacks modality)
     const requiredCaps = isEmbeddings ? [] : this.detectRequiredCapabilities(baseRequestBody);
-    const { targets: adaptedTargets, adapterUsed } = isEmbeddings
+    const rawAdapted = isEmbeddings
       ? { targets: resolution.targets, adapterUsed: null }
       : this.applyCapacityAdapter(resolution.targets, requiredCaps, settings);
+    // Re-enforce per-key model restriction so restricted keys cannot escalate to disallowed adapter models
+    let adaptedTargets = rawAdapted.targets;
+    let adapterUsed = rawAdapted.adapterUsed;
+    if (routerKey?.access?.restricted === true && adapterUsed) {
+      const origSet = new Set(resolution.targets.map((t) => t.raw));
+      const allowedTargets = rawAdapted.targets.filter(
+        (t) => origSet.has(t.raw) || isRouterKeyModelAllowed(routerKey, t.raw)
+      );
+      if (allowedTargets.length === resolution.targets.length) {
+        adapterUsed = null;
+      }
+      adaptedTargets = allowedTargets;
+    }
 
     // Apply Token Saver stack (RTK -> Headroom -> Caveman -> Ponytail -> Custom Prompt), unless bypassed via header
     const bypassTokenSaver = isEmbeddings || isTokenSaverBypassed(req);
@@ -1235,7 +1242,11 @@ export class RouterService {
     let cachedTokens = 0;
     let finalStatus = 502;
     let hasSentBytesToClient = false;
-    const pricingMap = getMergedPricingMap(PRESETS, this.storage.getCustomPricing?.() || {});
+    const pricingMap = getMergedPricingMap(
+      PRESETS,
+      this.storage.getCustomPricing?.() || {},
+      this.storage.getCustomPricingVersion?.() ?? -1
+    );
 
     const clientAnthropicVersion =
       typeof req.headers["anthropic-version"] === "string"
@@ -1243,7 +1254,8 @@ export class RouterService {
         : undefined;
 
     try {
-      outerLoop: for (const target of adaptedTargets) {
+      outerLoop: for (let targetIdx = 0; targetIdx < adaptedTargets.length; targetIdx++) {
+        const target = adaptedTargets[targetIdx];
         if (clientAborted) break;
 
         const provider = this.storage.getProviderBySlug(target.providerSlug);
@@ -1357,9 +1369,19 @@ export class RouterService {
 
         const allowSingleKeyTransientRetry =
           adaptedTargets.length === 1 && keySelection.keys.length === 1;
+        let cachedUpstreamBody = null;
+        const getUpstreamBody = () => {
+          if (cachedUpstreamBody === null) {
+            cachedUpstreamBody = JSON.stringify(upstreamPayload);
+          }
+          return cachedUpstreamBody;
+        };
 
-        for (const keyEntry of keySelection.keys) {
+        for (let keyIdx = 0; keyIdx < keySelection.keys.length; keyIdx++) {
+          const keyEntry = keySelection.keys[keyIdx];
           if (clientAborted) break outerLoop;
+          const hasFallbackRemaining =
+            keyIdx + 1 < keySelection.keys.length || targetIdx + 1 < adaptedTargets.length;
 
           const maxAttemptsForKey = allowSingleKeyTransientRetry ? 2 : 1;
           for (let keyAttempt = 0; keyAttempt < maxAttemptsForKey; keyAttempt++) {
@@ -1410,7 +1432,7 @@ export class RouterService {
               let cloudCodeEnvelope = null;
               /** A non-streaming client served from the streaming Cloud Code RPC. */
               let cloudCodeFoldStream = false;
-              let effectiveBody = JSON.stringify(upstreamPayload);
+              let effectiveBody = null;
               let effectiveHeaders = headers;
               if (isGeminiCliKey) {
                 let cloudProject =
@@ -1481,7 +1503,9 @@ export class RouterService {
                 // account's own catalog (fetchAvailableModels) offers, and refuse others here.
                 const cloudCodeBody =
                   normalizedClientFormat === "anthropic"
-                    ? claudeToOpenAIRequest(savedBody, target.upstreamModel)
+                    ? upstreamFormat === "openai"
+                      ? upstreamPayload
+                      : claudeToOpenAIRequest(savedBody, target.upstreamModel)
                     : savedBody;
                 let catalogModel = "";
                 if (cloudCodeFlavor.id === "antigravity") {
@@ -1657,6 +1681,10 @@ export class RouterService {
                 }
               }
 
+              if (effectiveBody === null) {
+                effectiveBody = getUpstreamBody();
+              }
+
               let upstreamRes = await (cloudCodeFetch || upstreamFetch)(effectiveUrl, {
                 method: "POST",
                 headers: effectiveHeaders,
@@ -1674,11 +1702,12 @@ export class RouterService {
                 !clientAborted
               ) {
                 const firstErrText = await upstreamRes.text().catch(() => "");
+                const errHead = firstErrText.slice(0, 4096).toLowerCase();
                 const looksLikeModelError =
                   upstreamRes.status === 404 ||
-                  /not_found_error|\bmodel\b.*(invalid|not\s+found|unsupported|unavailable|unknown)/i.test(
-                    firstErrText
-                  );
+                  errHead.includes("not_found_error") ||
+                  (/\bmodel\b/.test(errHead) &&
+                    /\b(invalid|not\s+found|unsupported|unavailable|unknown)\b/.test(errHead));
                 if (looksLikeModelError) {
                   const candidates = getClaudeFallbackCandidates(
                     claudeSentModel,
@@ -1767,17 +1796,30 @@ export class RouterService {
 
                   const retryVariants = [];
                   if (fullSysText && Array.isArray(cloudCodeEnvelope.request.contents)) {
-                    const folded = structuredClone(cloudCodeEnvelope);
-                    delete folded.request.systemInstruction;
-                    const firstUser = folded.request.contents.find((t) => t?.role === "user");
-                    if (firstUser && Array.isArray(firstUser.parts)) {
-                      firstUser.parts = [{ text: `${fullSysText}\n\n` }, ...firstUser.parts];
-                      retryVariants.push(folded);
+                    const { systemInstruction: _dropSys, ...reqWithoutSys } = cloudCodeEnvelope.request;
+                    const firstUserIdx = cloudCodeEnvelope.request.contents.findIndex(
+                      (t) => t?.role === "user" && Array.isArray(t.parts)
+                    );
+                    if (firstUserIdx >= 0) {
+                      const nextContents = cloudCodeEnvelope.request.contents.slice();
+                      const firstUser = nextContents[firstUserIdx];
+                      nextContents[firstUserIdx] = {
+                        ...firstUser,
+                        parts: [{ text: `${fullSysText}\n\n` }, ...firstUser.parts]
+                      };
+                      retryVariants.push({
+                        ...cloudCodeEnvelope,
+                        request: { ...reqWithoutSys, contents: nextContents }
+                      });
                     }
                   }
-                  const stripped = structuredClone(cloudCodeEnvelope);
-                  delete stripped.request.systemInstruction;
-                  retryVariants.push(stripped);
+                  {
+                    const { systemInstruction: _dropSys2, ...reqWithoutSys2 } = cloudCodeEnvelope.request;
+                    retryVariants.push({
+                      ...cloudCodeEnvelope,
+                      request: reqWithoutSys2
+                    });
+                  }
 
                   for (const retryEnv of retryVariants) {
                     if (clientAborted) break;
@@ -1825,7 +1867,7 @@ export class RouterService {
                   upstreamRes = await upstreamFetch(upstreamUrl, {
                     method: "POST",
                     headers: altHeaders,
-                    body: JSON.stringify(upstreamPayload),
+                    body: getUpstreamBody(),
                     signal: controller.signal,
                     ...(dispatcher ? { dispatcher } : {})
                   });
@@ -1844,9 +1886,9 @@ export class RouterService {
                   ? this._modelCooldownKey(provider.id, keyEntry.id, target.upstreamModel)
                   : "";
                 const cachedProbe = probeKey ? this.cloudCodeProbes.get(probeKey) : null;
-                const cloudCodeVerdict =
+                const explainOpts =
                   isGeminiCliKey && upstreamRes.status === 429
-                    ? await explainCloudCode429({
+                    ? {
                         errText,
                         accessToken: resolvedSecret,
                         projectId: cloudCodeCtx?.projectId || "",
@@ -1863,8 +1905,42 @@ export class RouterService {
                             : Boolean(probeKey && !clientAborted),
                         ...(cloudCodeFetch ? { fetchImpl: cloudCodeFetch } : {}),
                         ...(dispatcher ? { dispatcher } : {})
-                      }).catch(() => null)
+                      }
                     : null;
+
+                // Fast failover: when backup keys or fallback targets are immediately available,
+                // do NOT stall 4-16s waiting on quota/bare-chat probes — fail over in <1ms and
+                // run the diagnostic probe detached in the background to refine future cooldowns.
+                let cloudCodeVerdict = null;
+                if (explainOpts && hasFallbackRemaining) {
+                  explainCloudCode429(explainOpts)
+                    .then((verdict) => {
+                      if (!verdict) return;
+                      if (verdict.probeFresh && probeKey) {
+                        this.cloudCodeProbes.delete(probeKey);
+                        this.cloudCodeProbes.set(probeKey, { at: Date.now(), probe: verdict.probe });
+                        while (this.cloudCodeProbes.size > CLOUD_CODE_PROBE_CACHE_MAX) {
+                          this.cloudCodeProbes.delete(this.cloudCodeProbes.keys().next().value);
+                        }
+                      }
+                      if (verdict.cause === "model" && !keyEntry.isAnonymous) {
+                        this._storeCloudCodeCatalog(provider.id, keyEntry.id, verdict.catalog).catch(() => {});
+                      }
+                      if (probeKey && verdict.resetAtMs && verdict.resetAtMs > Date.now()) {
+                        const refinedUntil = Math.min(
+                          Math.max(verdict.resetAtMs, Date.now() + COOLDOWN_MS),
+                          Date.now() + MAX_CLOUD_CODE_COOLDOWN_MS
+                        );
+                        this._setBoundedMapEntry(this.modelCooldowns, probeKey, refinedUntil);
+                        if (verdict.note) {
+                          this._setBoundedMapEntry(this.modelCooldownNotes, probeKey, verdict.note);
+                        }
+                      }
+                    })
+                    .catch(() => {});
+                } else if (explainOpts) {
+                  cloudCodeVerdict = await explainCloudCode429(explainOpts).catch(() => null);
+                }
                 if (cloudCodeVerdict?.probeFresh && probeKey) {
                   this.cloudCodeProbes.delete(probeKey);
                   this.cloudCodeProbes.set(probeKey, { at: Date.now(), probe: cloudCodeVerdict.probe });
@@ -1896,7 +1972,7 @@ export class RouterService {
                     strikePause = true;
                     cloudCodeVerdict.note += ` Paused this model on this account for 15 minutes after ${count} refusals in a row.`;
                   } else {
-                    this.cloudCodeStrikes.set(sk, { count, since });
+                    this._setBoundedMapEntry(this.cloudCodeStrikes, sk, { count, since });
                   }
                 }
                 // Prefix with provenance: the text is the PROVIDER's own message, not 001Router's.
@@ -1957,9 +2033,9 @@ export class RouterService {
                 } else if (!keyEntry.isAnonymous && keyEntry.id && cooldownScope === "model") {
                   // Per-model rate/capacity limit: keep the key usable for every other model.
                   const mk = this._modelCooldownKey(provider.id, keyEntry.id, target.upstreamModel);
-                  this.modelCooldowns.set(mk, cooldownUntil);
+                  this._setBoundedMapEntry(this.modelCooldowns, mk, cooldownUntil);
                   const noteText = cloudCodeVerdict?.note || cleanMsg.slice(0, 260);
-                  if (noteText) this.modelCooldownNotes.set(mk, noteText);
+                  if (noteText) this._setBoundedMapEntry(this.modelCooldownNotes, mk, noteText);
                   else this.modelCooldownNotes.delete(mk);
                 }
 
@@ -2110,15 +2186,11 @@ export class RouterService {
 
                 if (!keyEntry.isAnonymous && keyEntry.id) {
                   await this.storage.clearProviderKeyCooldown(provider.id, keyEntry.id);
-                  this.modelCooldowns.delete(
-                    this._modelCooldownKey(provider.id, keyEntry.id, target.upstreamModel)
-                  );
-                  this.cloudCodeStrikes.delete(
-                    this._modelCooldownKey(provider.id, keyEntry.id, target.upstreamModel)
-                  );
-                  this.cloudCodeProbes.delete(
-                    this._modelCooldownKey(provider.id, keyEntry.id, target.upstreamModel)
-                  );
+                  const mk = this._modelCooldownKey(provider.id, keyEntry.id, target.upstreamModel);
+                  this.modelCooldowns.delete(mk);
+                  this.modelCooldownNotes.delete(mk);
+                  this.cloudCodeStrikes.delete(mk);
+                  this.cloudCodeProbes.delete(mk);
                 }
 
                 const logId = nanoid();
@@ -2147,7 +2219,9 @@ export class RouterService {
                 this.liveEvents?.log(
                   "info",
                   "proxy",
-                  `200 ${endpoint} ${target.providerSlug}/${target.upstreamModel} (${promptTokens}in/${completionTokens}out, $${estCost.toFixed(4)}, ${totalLatency}ms)`
+                  `200 ${endpoint} ${target.providerSlug}/${target.upstreamModel} (${promptTokens}in/${completionTokens}out, $${estCost.toFixed(4)}, ${totalLatency}ms)`,
+                  [],
+                  { skipRedact: true }
                 );
 
                 await this.storage.recordRequestLog(
@@ -2368,15 +2442,11 @@ export class RouterService {
                 });
                 if (!keyEntry.isAnonymous && keyEntry.id) {
                   await this.storage.clearProviderKeyCooldown(provider.id, keyEntry.id);
-                  this.modelCooldowns.delete(
-                    this._modelCooldownKey(provider.id, keyEntry.id, target.upstreamModel)
-                  );
-                  this.cloudCodeStrikes.delete(
-                    this._modelCooldownKey(provider.id, keyEntry.id, target.upstreamModel)
-                  );
-                  this.cloudCodeProbes.delete(
-                    this._modelCooldownKey(provider.id, keyEntry.id, target.upstreamModel)
-                  );
+                  const mk = this._modelCooldownKey(provider.id, keyEntry.id, target.upstreamModel);
+                  this.modelCooldowns.delete(mk);
+                  this.modelCooldownNotes.delete(mk);
+                  this.cloudCodeStrikes.delete(mk);
+                  this.cloudCodeProbes.delete(mk);
                 }
               }
 
@@ -2855,9 +2925,18 @@ export class RouterService {
     }
 
     // Passthrough SSE (same format on client and upstream)
+    // Ultra-low-latency path: write raw upstream bytes to client socket FIRST, then inspect
+    // usage metadata lazily (skipping JSON.parse on non-usage token frames — ~3.2x less CPU).
     if (clientFormat === upstreamFormat) {
       const usageParser = createSSEParser(({ event, data }) => {
         if (!data || data === "[DONE]") return;
+        if (upstreamFormat === "anthropic") {
+          if (event !== "message_start" && event !== "message_delta" && !data.includes('"usage"')) {
+            return;
+          }
+        } else if (!data.includes('"usage"')) {
+          return;
+        }
         try {
           const parsed = JSON.parse(data);
           if (upstreamFormat === "anthropic") {
@@ -2897,8 +2976,8 @@ export class RouterService {
 
           if (value && value.length > 0) {
             clearTtfbTimer();
-            usageParser.feed(decoder.decode(value, { stream: true }));
             writeToClient(value);
+            usageParser.feed(decoder.decode(value, { stream: true }));
           }
         }
 

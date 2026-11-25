@@ -1,6 +1,56 @@
+import crypto from "node:crypto";
 import { applyRtkStructuredFilter, RTK_FILTER_CATALOG } from "./rtkFilters.js";
+import {
+  getPolicyGuardedDispatcher,
+  readResponseTextBounded,
+  upstreamFetch
+} from "./proxy.js";
 
 export { RTK_FILTER_CATALOG };
+
+const COMPRESS_CACHE_MAX_ENTRIES = 256;
+const COMPRESS_CACHE_MAX_CHARS = 6_000_000;
+/** @type {Map<string, { text: string, savedChars: number, filter: string | null, weight: number }>} */
+const compressLruCache = new Map();
+let compressLruChars = 0;
+
+/** @type {Map<string, { failures: number, openUntil: number }>} */
+const headroomCircuitBreakers = new Map();
+const HEADROOM_BREAKER_THRESHOLD = 2;
+const HEADROOM_BREAKER_COOLDOWN_MS = 30_000;
+
+function makeCompressCacheKey(text, limit) {
+  const digest = crypto.createHash("sha256").update(text).digest("base64url");
+  return `${limit}:${text.length}:${digest}`;
+}
+
+function getCachedCompression(key) {
+  const hit = compressLruCache.get(key);
+  if (!hit) return null;
+  compressLruCache.delete(key);
+  compressLruCache.set(key, hit);
+  return hit;
+}
+
+function setCachedCompression(key, value) {
+  const weight = value.text.length;
+  if (weight > 512_000) return;
+  if (compressLruCache.has(key)) {
+    compressLruChars -= compressLruCache.get(key).weight;
+    compressLruCache.delete(key);
+  }
+  compressLruCache.set(key, { ...value, weight });
+  compressLruChars += weight;
+  while (
+    compressLruCache.size > COMPRESS_CACHE_MAX_ENTRIES ||
+    compressLruChars > COMPRESS_CACHE_MAX_CHARS
+  ) {
+    const oldestKey = compressLruCache.keys().next().value;
+    if (oldestKey === undefined) break;
+    compressLruChars -= compressLruCache.get(oldestKey).weight;
+    compressLruCache.delete(oldestKey);
+  }
+}
 
 export const DEFAULT_MAX_CHARS = 20000;
 export const DEFAULT_USER_THRESHOLD = 2000;
@@ -180,6 +230,24 @@ export function compressText(text, maxChars = DEFAULT_MAX_CHARS) {
       ? Math.floor(maxChars)
       : DEFAULT_MAX_CHARS;
 
+  // Fast path: short single-line clean outputs cannot benefit from RTK/dedup/truncation
+  if (originalLen < 300 && originalLen <= limit && text.indexOf("\n") === -1 && text.indexOf("\r") === -1) {
+    const lastCh = text.charCodeAt(originalLen - 1);
+    if (lastCh !== 32 && lastCh !== 9) {
+      return { text, savedChars: 0, filter: null };
+    }
+  }
+
+  const useCache = originalLen >= 1024;
+  let cacheKey = "";
+  if (useCache) {
+    cacheKey = makeCompressCacheKey(text, limit);
+    const cached = getCachedCompression(cacheKey);
+    if (cached) {
+      return { text: cached.text, savedChars: cached.savedChars, filter: cached.filter };
+    }
+  }
+
   // Step 0: Try structured 12-filter RTK auto-detector (git-diff, git-status, git-log, grep, find, ls, tree, build-output, etc.)
   let working = text;
   let matchedFilter = null;
@@ -189,54 +257,54 @@ export function compressText(text, maxChars = DEFAULT_MAX_CHARS) {
     matchedFilter = rtkRes.filter;
   }
 
-  // Step 1: Normalize line endings and strip trailing spaces/tabs per line
-  const rawLines = working.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
-  // Linear-time trailing trim (the regex form `/[ \t]+$/` is O(n^2) on a long run of blanks → ReDoS).
-  const trimmedLines = rawLines.map((line) => {
-    let end = line.length;
-    while (end > 0 && (line.charCodeAt(end - 1) === 32 || line.charCodeAt(end - 1) === 9)) end--;
-    return end === line.length ? line : line.slice(0, end);
-  });
-
-  // Step 2: Collapse >2 consecutive blank lines down to 2 blank lines
-  const collapsedLines = [];
+  // Steps 1 + 2 + 3 fused into a single linear pass:
+  // normalize CRLF (only when '\r' present), strip trailing spaces/tabs, collapse >2 blank lines,
+  // and deduplicate 3+ consecutive identical non-empty lines.
+  const normalized = working.indexOf("\r") !== -1
+    ? working.replace(/\r\n/g, "\n").replace(/\r/g, "\n")
+    : working;
+  const rawLines = normalized.split("\n");
+  const outLines = [];
   let blankRun = 0;
-  for (const line of trimmedLines) {
-    if (line === "") {
-      blankRun += 1;
-      if (blankRun <= 2) {
-        collapsedLines.push(line);
-      }
-    } else {
-      blankRun = 0;
-      collapsedLines.push(line);
-    }
-  }
+  let prevLine = null;
+  let sameRun = 0;
 
-  // Step 3: Deduplicate 3+ consecutive identical non-empty lines
-  const dedupedLines = [];
-  let idx = 0;
-  while (idx < collapsedLines.length) {
-    const line = collapsedLines[idx];
-    let runEnd = idx + 1;
-    if (line !== "") {
-      while (runEnd < collapsedLines.length && collapsedLines[runEnd] === line) {
-        runEnd += 1;
-      }
-    }
-    const runLen = runEnd - idx;
-    if (line !== "" && runLen >= 3) {
-      dedupedLines.push(line, line, `... (${runLen - 2} similar lines)`);
+  const flushRun = () => {
+    if (prevLine === null) return;
+    if (sameRun >= 3) {
+      outLines.push(prevLine, prevLine, `... (${sameRun - 2} similar lines)`);
       if (!matchedFilter) matchedFilter = "dedup-log";
     } else {
-      for (let k = idx; k < runEnd; k++) {
-        dedupedLines.push(collapsedLines[k]);
-      }
+      for (let k = 0; k < sameRun; k++) outLines.push(prevLine);
     }
-    idx = runEnd;
-  }
+    prevLine = null;
+    sameRun = 0;
+  };
 
-  let result = dedupedLines.join("\n");
+  for (let i = 0; i < rawLines.length; i++) {
+    const raw = rawLines[i];
+    let end = raw.length;
+    while (end > 0 && (raw.charCodeAt(end - 1) === 32 || raw.charCodeAt(end - 1) === 9)) end--;
+    const line = end === raw.length ? raw : raw.slice(0, end);
+
+    if (line === "") {
+      flushRun();
+      blankRun += 1;
+      if (blankRun <= 2) outLines.push("");
+      continue;
+    }
+    blankRun = 0;
+    if (line === prevLine) {
+      sameRun += 1;
+    } else {
+      flushRun();
+      prevLine = line;
+      sameRun = 1;
+    }
+  }
+  flushRun();
+
+  let result = outLines.join("\n");
 
   // Step 4: Truncate exceeding maxChars keeping head (60%) and tail (35%)
   if (result.length > limit) {
@@ -262,15 +330,19 @@ export function compressText(text, maxChars = DEFAULT_MAX_CHARS) {
     }
   }
 
-  if (result.length >= originalLen) {
-    return { text, savedChars: 0, filter: null };
-  }
+  const finalOut =
+    result.length >= originalLen
+      ? { text, savedChars: 0, filter: null }
+      : {
+          text: result,
+          savedChars: originalLen - result.length,
+          filter: matchedFilter || "normalize"
+        };
 
-  return {
-    text: result,
-    savedChars: originalLen - result.length,
-    filter: matchedFilter || "normalize"
-  };
+  if (useCache) {
+    setCachedCompression(cacheKey, finalOut);
+  }
+  return finalOut;
 }
 
 /**
@@ -460,7 +532,23 @@ export async function applyHeadroomCompression(body, format = "openai", settings
     Number.isFinite(Number(settings.headroomTimeoutMs)) && Number(settings.headroomTimeoutMs) >= 200
       ? Math.min(Number(settings.headroomTimeoutMs), 30000)
       : 3000;
-  const fetchFn = opts.fetchImpl || globalThis.fetch;
+  const fetchFn = opts.fetchImpl || upstreamFetch;
+  const useCustomFetch = Boolean(opts.fetchImpl);
+
+  // Fast fail-open circuit breaker when local Headroom daemon is offline
+  if (!useCustomFetch) {
+    const breaker = headroomCircuitBreakers.get(baseUrl);
+    if (breaker && breaker.openUntil > Date.now()) {
+      return { body, headroomApplied: false, tokensSaved: 0 };
+    }
+  }
+
+  const dispatcher = !useCustomFetch
+    ? getPolicyGuardedDispatcher({
+        blockPrivate: settings.allowPrivateUpstreams !== true,
+        blockLoopback: settings.allowPrivateUpstreams === false
+      })
+    : undefined;
 
   try {
     const endpoint = `${baseUrl}/v1/compress`;
@@ -475,12 +563,21 @@ export async function applyHeadroomCompression(body, format = "openai", settings
         messages: body.messages,
         model: body.model || "gpt-4o"
       }),
-      signal: AbortSignal.timeout(timeoutMs)
+      signal: AbortSignal.timeout(timeoutMs),
+      ...(dispatcher ? { dispatcher } : {})
     });
+    headroomCircuitBreakers.delete(baseUrl);
     if (!res.ok) {
+      await res.body?.cancel?.().catch(() => {});
       return { body, headroomApplied: false, tokensSaved: 0 };
     }
-    const data = await res.json().catch(() => null);
+    const text = await readResponseTextBounded(res, 15 * 1024 * 1024, timeoutMs).catch(() => "");
+    let data = null;
+    try {
+      data = text ? JSON.parse(text) : null;
+    } catch {
+      data = null;
+    }
     if (!Array.isArray(data?.messages) || data.messages.length === 0) {
       return { body, headroomApplied: false, tokensSaved: 0 };
     }
@@ -490,27 +587,49 @@ export async function applyHeadroomCompression(body, format = "openai", settings
       tokensSaved: Number(data.tokens_saved) || 0
     };
   } catch {
+    if (!useCustomFetch) {
+      const prev = headroomCircuitBreakers.get(baseUrl) || { failures: 0, openUntil: 0 };
+      const failures = prev.failures + 1;
+      headroomCircuitBreakers.set(baseUrl, {
+        failures,
+        openUntil: failures >= HEADROOM_BREAKER_THRESHOLD ? Date.now() + HEADROOM_BREAKER_COOLDOWN_MS : 0
+      });
+    }
     // Fail-open by design
     return { body, headroomApplied: false, tokensSaved: 0 };
   }
 }
 
 /**
- * Probe Headroom external proxy health (`GET /health` or `/v1/models`).
+ * Probe Headroom external proxy health (`GET /health`).
  * @param {string} url
  * @param {typeof globalThis.fetch} [fetchImpl]
+ * @param {{ allowPrivateUpstreams?: boolean }} [policyOpts]
  */
-export async function checkHeadroomStatus(url = "http://localhost:8787", fetchImpl = globalThis.fetch) {
+export async function checkHeadroomStatus(
+  url = "http://localhost:8787",
+  fetchImpl = null,
+  policyOpts = {}
+) {
   const base = String(url || "http://localhost:8787").trim().replace(/\/+$/, "");
   if (!/^https?:\/\//i.test(base)) {
     return { running: false, url: base, error: "Invalid URL" };
   }
+  const fn = fetchImpl || upstreamFetch;
+  const dispatcher = !fetchImpl
+    ? getPolicyGuardedDispatcher({
+        blockPrivate: policyOpts.allowPrivateUpstreams !== true,
+        blockLoopback: policyOpts.allowPrivateUpstreams === false
+      })
+    : undefined;
   const started = Date.now();
   try {
-    const res = await fetchImpl(`${base}/health`, {
+    const res = await fn(`${base}/health`, {
       method: "GET",
-      signal: AbortSignal.timeout(2500)
+      signal: AbortSignal.timeout(2500),
+      ...(dispatcher ? { dispatcher } : {})
     });
+    await res.body?.cancel?.().catch(() => {});
     return {
       running: res.ok,
       online: res.ok,

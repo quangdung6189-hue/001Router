@@ -1777,12 +1777,26 @@ const RAW_PRESETS = [
 
 export const PRESETS = RAW_PRESETS.map(enrichPresetWithCatalog);
 
+/** @type {Map<string, any>} */
+const PRESETS_BY_KEY = new Map();
+
+function rebuildPresetIndex() {
+  PRESETS_BY_KEY.clear();
+  for (const p of PRESETS) {
+    if (p.preset) PRESETS_BY_KEY.set(p.preset, p);
+    if (p.id && !PRESETS_BY_KEY.has(p.id)) PRESETS_BY_KEY.set(p.id, p);
+  }
+}
+
+rebuildPresetIndex();
+
 /**
  * Rebuild all enriched PRESETS entries in-place after `modelCatalog.json` is updated.
  */
 export function refreshPresets() {
   const next = RAW_PRESETS.map(enrichPresetWithCatalog);
   PRESETS.splice(0, PRESETS.length, ...next);
+  rebuildPresetIndex();
   return PRESETS;
 }
 
@@ -1791,11 +1805,12 @@ onCatalogReload(refreshPresets);
 export const VALID_FORMAT_TYPES = new Set(["openai", "anthropic", "gemini-openai"]);
 
 /**
- * Look up a preset definition by id/preset key.
+ * Look up a preset definition by id/preset key in O(1).
  * @param {string} presetId
  */
 export function getPreset(presetId) {
-  return PRESETS.find((p) => p.preset === presetId || p.id === presetId) || null;
+  if (typeof presetId !== "string" || !presetId) return null;
+  return PRESETS_BY_KEY.get(presetId) || null;
 }
 
 /**

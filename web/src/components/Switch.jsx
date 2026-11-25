@@ -1,4 +1,5 @@
-import { useId } from 'react';
+/* Stretchy tactile switch adapted from Lucian UX/UI Prompt #433 · MIT License (c) 2026 Seokwoooo · https://lucianlabs.dev/uxui-prompt/#433 */
+import { useId, useState } from 'react';
 
 export function Switch({
   checked,
@@ -11,14 +12,24 @@ export function Switch({
 }) {
   const autoId = useId();
   const id = customId || autoId;
-  const trackSize = size === 'sm' ? 'h-5 w-9' : 'h-6 w-11';
-  const thumbSize = size === 'sm' ? 'h-3.5 w-3.5' : 'h-4 w-4';
-  const thumbTranslate = size === 'sm' ? 'translate-x-4' : 'translate-x-5';
+  const [pressed, setPressed] = useState(false);
+  const isChecked = Boolean(checked);
+
+  const release = () => setPressed(false);
 
   return (
     <label
       htmlFor={id}
-      className={`inline-flex items-center gap-2.5 select-none ${
+      data-checked={isChecked ? 'true' : 'false'}
+      data-pressed={pressed ? 'true' : 'false'}
+      data-disabled={disabled ? 'true' : 'false'}
+      onPointerDown={(e) => {
+        if (!disabled && e.button === 0) setPressed(true);
+      }}
+      onPointerUp={release}
+      onPointerLeave={release}
+      onPointerCancel={release}
+      className={`r-switch-root inline-flex items-center gap-2.5 select-none ${
         disabled ? 'cursor-not-allowed opacity-50' : 'cursor-pointer'
       }`}
     >
@@ -27,26 +38,19 @@ export function Switch({
           id={id}
           type="checkbox"
           role="switch"
-          checked={Boolean(checked)}
+          checked={isChecked}
           disabled={disabled}
           aria-label={ariaLabel}
           onChange={(e) => onChange?.(e.target.checked)}
-          className="peer sr-only"
+          onKeyDown={(e) => {
+            if (!disabled && e.key === ' ') setPressed(true);
+          }}
+          onKeyUp={release}
+          onBlur={release}
+          className="r-switch-input peer sr-only"
         />
-        <span
-          aria-hidden="true"
-          className={`${trackSize} rounded-full border transition-colors ${
-            checked
-              ? 'border-[#E56A4A] bg-[#E56A4A]'
-              : 'border-[var(--border-strong)] bg-[var(--bg-subtle)]'
-          } peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-[#E56A4A]`}
-        />
-        <span
-          aria-hidden="true"
-          className={`pointer-events-none absolute left-1 rounded-full shadow-xs transition-transform motion-reduce:transition-none ${thumbSize} ${
-            checked ? `${thumbTranslate} bg-white` : 'translate-x-0 bg-[var(--text-muted)]'
-          }`}
-        />
+        <span aria-hidden="true" data-size={size} className="r-switch-track" />
+        <span aria-hidden="true" data-size={size} className="r-switch-thumb" />
       </span>
       {label ? <span className="text-sm text-[var(--text-primary)]">{label}</span> : null}
     </label>

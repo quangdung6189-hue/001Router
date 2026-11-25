@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import { constantTimeEqual, hashRouterKey } from "./security/crypto.js";
 import { isLoopbackHost } from "./security/headers.js";
+import { BoundedRateLimiter, extractClientIp } from "./security/ratelimit.js";
 import { maskKey as redactMaskKey, redactSecrets } from "./security/redact.js";
 
 export const SESSION_COOKIE_NAME = "r001_session";
@@ -50,17 +51,32 @@ export function parseCookies(cookieHeader) {
 }
 
 /**
- * Determine whether the incoming request arrived over HTTPS or behind an HTTPS reverse proxy.
+ * Determine whether the incoming request arrived over HTTPS or behind a trusted HTTPS reverse proxy.
  * @param {import("express").Request} [req]
  * @returns {boolean}
  */
 export function isSecureRequest(req) {
   if (!req) return false;
-  if (req.secure === true) return true;
-  const proto = req.headers?.["x-forwarded-proto"];
-  if (typeof proto === "string") {
-    const first = proto.split(",")[0].trim().toLowerCase();
-    if (first === "https") return true;
+  if (req.secure === true || req.socket?.encrypted === true) return true;
+  // Trust X-Forwarded-Proto when Express `trust proxy` is enabled, on Vercel, or when forwarded
+  // from a local loopback reverse proxy (127.0.0.1 / ::1); refuse spoofed headers from external IPs.
+  const hasApp = Boolean(req.app && typeof req.app.get === "function");
+  const remoteAddr = String(req.socket?.remoteAddress || "");
+  const isLoopbackPeer =
+    remoteAddr === "127.0.0.1" ||
+    remoteAddr === "::1" ||
+    remoteAddr === "::ffff:127.0.0.1";
+  const trustForwarded = Boolean(
+    process.env.VERCEL ||
+      isLoopbackPeer ||
+      (hasApp ? req.app.get("trust proxy") : true)
+  );
+  if (trustForwarded) {
+    const proto = req.headers?.["x-forwarded-proto"];
+    if (typeof proto === "string") {
+      const first = proto.split(",")[0].trim().toLowerCase();
+      if (first === "https") return true;
+    }
   }
   return false;
 }
@@ -151,11 +167,7 @@ export function verifySessionToken(token, secret, expectedVersion) {
     if (!payload || typeof payload.exp !== "number" || payload.exp <= Date.now()) {
       return { valid: false };
     }
-    if (
-      typeof expectedVersion === "number" &&
-      typeof payload.ver === "number" &&
-      payload.ver !== expectedVersion
-    ) {
+    if (typeof expectedVersion === "number" && payload.ver !== expectedVersion) {
       return { valid: false };
     }
     return { valid: true, payload };
@@ -260,8 +272,12 @@ function isPasswordChangeAllowedPath(req) {
   return pathname === "/api/settings/password";
 }
 
+/** @type {WeakMap<any, Set<string>>} */
+const allowListSetCache = new WeakMap();
+
 /**
  * Check whether a router API key's per-key access restriction permits calling `requestedModel`.
+ * Uses cached lowercase Set for O(1) lookup on hot path.
  * @param {any} routerKey
  * @param {string} requestedModel
  * @returns {boolean}
@@ -274,7 +290,17 @@ export function isRouterKeyModelAllowed(routerKey, requestedModel) {
   if (allowList.length === 0) return false;
   const reqNorm = String(requestedModel || "").trim().toLowerCase();
   if (!reqNorm) return false;
-  return allowList.some((entry) => String(entry || "").trim().toLowerCase() === reqNorm);
+
+  let set = allowListSetCache.get(allowList);
+  if (!set) {
+    set = new Set();
+    for (let i = 0; i < allowList.length; i++) {
+      const s = String(allowList[i] || "").trim().toLowerCase();
+      if (s) set.add(s);
+    }
+    allowListSetCache.set(allowList, set);
+  }
+  return set.has(reqNorm);
 }
 
 /**
@@ -294,21 +320,37 @@ export function extractRouterApiKey(req) {
   if (typeof xApiKey === "string" && xApiKey.trim()) {
     return xApiKey.trim();
   }
+  const xGoogApiKey = req.headers?.["x-goog-api-key"];
+  if (typeof xGoogApiKey === "string" && xGoogApiKey.trim()) {
+    return xGoogApiKey.trim();
+  }
   return "";
 }
 
 /**
  * Match an incoming plaintext router API key against stored hashed (or legacy) router keys
- * using constant-time SHA-256 hash comparison.
+ * using O(1) hash-index lookup (when available) + constant-time SHA-256 comparison.
  * @param {string} token
  * @param {any[]} keys
+ * @param {Map<string, any>} [keysByHash]
  * @returns {any | null}
  */
-export function matchRouterApiKey(token, keys) {
+export function matchRouterApiKey(token, keys, keysByHash = null) {
   if (typeof token !== "string" || !token || !Array.isArray(keys)) {
     return null;
   }
   const incomingHash = hashRouterKey(token);
+  if (keysByHash && keysByHash.size > 0) {
+    const candidate = keysByHash.get(incomingHash);
+    if (
+      candidate &&
+      candidate.enabled !== false &&
+      typeof candidate.keyHash === "string" &&
+      constantTimeEqual(incomingHash, candidate.keyHash)
+    ) {
+      return candidate;
+    }
+  }
   let matched = null;
   for (const k of keys) {
     if (!k || k.enabled === false) continue;
@@ -327,16 +369,41 @@ export function matchRouterApiKey(token, keys) {
 
 /**
  * Express middleware authenticating external CLI/IDE requests to `/v1/*`.
+ * Skips redundant re-verification if already verified on this request, and throttles repeated
+ * invalid-key brute-force attempts per IP.
  * @param {import("./storage.js").Storage} storage
+ * @param {{ authFailureLimiter?: BoundedRateLimiter }} [options]
  */
-export function createRouterAuthMiddleware(storage) {
+export function createRouterAuthMiddleware(storage, options = {}) {
+  const failureLimiter =
+    options.authFailureLimiter ||
+    new BoundedRateLimiter({
+      windowMs: 60_000,
+      maxRequests: Number(process.env.ROUTER001_V1_AUTH_FAIL_RPM) || 60
+    });
+
   return (req, res, next) => {
+    if (req._routerAuthVerified) {
+      return next();
+    }
     const token = extractRouterApiKey(req);
     const keys = storage.getKeys();
-    const matched = token ? matchRouterApiKey(token, keys) : null;
+    const keysByHash = storage.getKeysByHashIndex?.() || null;
+    const matched = token ? matchRouterApiKey(token, keys, keysByHash) : null;
 
     if (isRouterKeyRequired(storage)) {
       if (!matched) {
+        const ip = extractClientIp(req);
+        const failCheck = failureLimiter.consume(ip);
+        if (!failCheck.allowed) {
+          res.setHeader("Retry-After", String(failCheck.retryAfterSec));
+          return res.status(429).json({
+            error: {
+              message: "Too many failed authentication attempts. Please retry later.",
+              type: "rate_limit_error"
+            }
+          });
+        }
         return res.status(401).json({
           error: {
             message: "Invalid or missing router API key",
@@ -347,6 +414,7 @@ export function createRouterAuthMiddleware(storage) {
     }
 
     req.routerKey = matched;
+    req._routerAuthVerified = true;
     next();
   };
 }

@@ -6,7 +6,11 @@ import { DEFAULT_PORT, createStorage } from "./storage.js";
 import { RouterService } from "./router.js";
 import { LiveEventsHub } from "./liveEvents.js";
 import { AGENT_SKILLS, renderSkillMarkdown } from "./skillsData.js";
-import { createRouterAuthMiddleware } from "./auth.js";
+import {
+  createRouterAuthMiddleware,
+  isRouterKeyModelAllowed,
+  isSecureRequest
+} from "./auth.js";
 import { createDashboardRouter } from "./routes/dashboard.js";
 import { createCatalogRouter } from "./routes/catalog.js";
 import { createCliToolsRouter } from "./routes/cliTools.js";
@@ -18,11 +22,45 @@ import {
   createCsrfMiddleware,
   createHostGuardMiddleware,
   createSecurityHeadersMiddleware,
-  isLoopbackHost
+  isLoopbackHost,
+  parseHostHeaderName
 } from "./security/headers.js";
-import { redactSecrets, stripPrototypePollution } from "./security/redact.js";
+import { createRateLimitMiddleware } from "./security/ratelimit.js";
+import {
+  redactSecrets,
+  sanitizePrototypePollutionInPlace
+} from "./security/redact.js";
 
 export const DEFAULT_HOST = "127.0.0.1";
+
+/**
+ * Apply hardened HTTP server timeouts, connection caps, and TCP_NODELAY for both
+ * Slowloris/keep-alive flood resilience and minimum SSE token delivery latency.
+ * @param {import("node:http").Server} server
+ * @param {{
+ *   keepAliveTimeout?: number,
+ *   headersTimeout?: number,
+ *   requestTimeout?: number,
+ *   maxHeadersCount?: number,
+ *   maxRequestsPerSocket?: number,
+ *   maxConnections?: number
+ * }} [opts]
+ */
+export function configureHttpServer(server, opts = {}) {
+  if (!server || typeof server !== "object") return server;
+  const keepAliveMs = Number(opts.keepAliveTimeout) || 15_000;
+  server.keepAliveTimeout = keepAliveMs;
+  server.headersTimeout = Math.max(keepAliveMs + 5_000, Number(opts.headersTimeout) || 20_000);
+  server.requestTimeout = Number(opts.requestTimeout) || 300_000;
+  server.maxHeadersCount = Number(opts.maxHeadersCount) || 100;
+  server.maxRequestsPerSocket = Number(opts.maxRequestsPerSocket) || 1000;
+  server.maxConnections =
+    Number(opts.maxConnections) || Number(process.env.ROUTER001_MAX_CONNECTIONS) || 512;
+  server.on("connection", (socket) => {
+    socket.setNoDelay(true);
+  });
+  return server;
+}
 
 /**
  * Parse `ROUTER001_TRUST_PROXY`: "" -> false, "true"/"false", a hop count ("1"), or an Express trust list.
@@ -104,6 +142,8 @@ export async function createApp(options = {}) {
 
   const app = express();
   app.disable("x-powered-by");
+  // Disable automatic SHA-1 ETag hashing on JSON API/POST responses (express.static still sets static ETags)
+  app.set("etag", false);
   // Optional reverse-proxy awareness so `req.ip` (login lockout) is the real client, not the proxy.
   // e.g. ROUTER001_TRUST_PROXY=1 (one hop) | loopback | 10.0.0.0/8. Unset = never trust forwarded headers.
   const trustProxy = parseTrustProxy(process.env.ROUTER001_TRUST_PROXY);
@@ -193,15 +233,25 @@ export async function createApp(options = {}) {
   app.use(createHostGuardMiddleware({ bindHost }));
   app.use(createCorsMiddleware());
 
-  // Body size caps: /api 6 MB, /v1 25 MB (Section 9.8 #9)
-  app.use("/api", express.json({ limit: "6mb" }));
-  app.use("/v1", express.json({ limit: "25mb" }));
-  app.use(express.json({ limit: "6mb" }));
+  // Pre-auth flood guard (runs BEFORE body parsing so DDoS bursts cannot trigger 25 MB JSON parses)
+  const globalFloodLimit = createRateLimitMiddleware({
+    windowMs: Number(options.rateLimits?.windowMs) || 60_000,
+    maxRequests:
+      Number(options.rateLimits?.globalMaxRequests) ||
+      Number(process.env.ROUTER001_GLOBAL_RPM) ||
+      600,
+    skip: (req) => req.path === "/health" || req.method === "OPTIONS"
+  });
+  app.use(["/api", "/v1", "/v1beta"], globalFloodLimit);
 
-  // Prototype-pollution safe JSON body normalization
+  // Body size caps: /api 6 MB, /v1 and /v1beta 25 MB (Section 9.8 #9)
+  app.use("/api", express.json({ limit: "6mb" }));
+  app.use(["/v1", "/v1beta"], express.json({ limit: "25mb" }));
+
+  // In-place prototype-pollution & nesting-depth sanitization (0 extra object allocations on clean bodies)
   app.use((req, _res, next) => {
     if (req.body && typeof req.body === "object") {
-      req.body = stripPrototypePollution(req.body);
+      req.body = sanitizePrototypePollutionInPlace(req.body);
     }
     next();
   });
@@ -247,11 +297,17 @@ export async function createApp(options = {}) {
 
   // Public Agent Skills endpoints (readable directly by AI agents without browser session)
   function buildSafeRequestOrigin(req) {
+    const configured = String(process.env.ROUTER001_PUBLIC_ORIGIN || "").trim().replace(/\/+$/, "");
+    if (configured && /^https?:\/\/[a-zA-Z0-9.-]+(?::\d{1,5})?$/.test(configured)) {
+      return configured;
+    }
     const rawHost = String(req.get("host") || "").trim();
-    const safeHost = /^[a-zA-Z0-9.-]+(?::\d{1,5})?$/.test(rawHost)
-      ? rawHost
-      : `localhost:${port}`;
-    const proto = req.secure || req.headers?.["x-forwarded-proto"] === "https" ? "https" : "http";
+    const parsedHost = parseHostHeaderName(rawHost);
+    const safeHost =
+      parsedHost && /^[a-zA-Z0-9.:\[\]-]+(?::\d{1,5})?$/.test(rawHost)
+        ? rawHost
+        : `localhost:${port}`;
+    const proto = isSecureRequest(req) ? "https" : "http";
     return `${proto}://${safeHost}`;
   }
 
@@ -288,10 +344,12 @@ export async function createApp(options = {}) {
   // Google Gemini `/v1beta/models` compatibility endpoint (9Router parity)
   const v1betaRouter = express.Router();
   v1betaRouter.use(createRouterAuthMiddleware(storage));
-  v1betaRouter.get("/models", (_req, res) => {
+  v1betaRouter.get("/models", (req, res) => {
+    const routerKey = req.routerKey || null;
     const models = [];
     for (const combo of storage.getCombos()) {
       if (combo.enabled === false || !combo.name) continue;
+      if (routerKey && !isRouterKeyModelAllowed(routerKey, combo.name)) continue;
       models.push({
         name: `models/${combo.name}`,
         displayName: combo.name,
@@ -302,8 +360,10 @@ export async function createApp(options = {}) {
       if (provider.enabled === false) continue;
       for (const m of provider.models || []) {
         if (storage.isModelDisabled?.(provider.slug, m)) continue;
+        const fullId = `${provider.slug}/${m}`;
+        if (routerKey && !isRouterKeyModelAllowed(routerKey, fullId)) continue;
         models.push({
-          name: `models/${provider.slug}/${m}`,
+          name: `models/${fullId}`,
           displayName: `${provider.name} / ${m}`,
           supportedGenerationMethods: ["generateContent", "streamGenerateContent"]
         });
@@ -372,9 +432,14 @@ export async function createApp(options = {}) {
     } else {
       const origWrite = res.write.bind(res);
       const origEnd = res.end.bind(res);
+      const utf8Decoder = new TextDecoder("utf-8");
       let sseBuf = "";
+      const MAX_V1BETA_SSE_BUF = 1024 * 1024;
       const translateLines = (chunkStr) => {
         sseBuf += chunkStr;
+        if (sseBuf.length > MAX_V1BETA_SSE_BUF) {
+          sseBuf = sseBuf.slice(-MAX_V1BETA_SSE_BUF);
+        }
         const lines = sseBuf.split(/\r?\n/);
         sseBuf = lines.pop() || "";
         for (const rawLine of lines) {
@@ -422,7 +487,10 @@ export async function createApp(options = {}) {
       res.write = (chunk, encoding, cb) => {
         const ct = String(res.getHeader("Content-Type") || "");
         if (ct.includes("text/event-stream")) {
-          const text = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk || "");
+          const text =
+            Buffer.isBuffer(chunk) || chunk instanceof Uint8Array
+              ? utf8Decoder.decode(chunk, { stream: true })
+              : String(chunk || "");
           translateLines(text);
           if (typeof encoding === "function") encoding();
           else if (typeof cb === "function") cb();
@@ -433,10 +501,15 @@ export async function createApp(options = {}) {
       res.end = (chunk, encoding, cb) => {
         const ct = String(res.getHeader("Content-Type") || "");
         if (ct.includes("text/event-stream")) {
-          if (chunk) {
-            const text = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
+          if (chunk && typeof chunk !== "function") {
+            const text =
+              Buffer.isBuffer(chunk) || chunk instanceof Uint8Array
+                ? utf8Decoder.decode(chunk, { stream: true })
+                : String(chunk);
             translateLines(text);
           }
+          const tail = utf8Decoder.decode();
+          if (tail) translateLines(tail);
           if (sseBuf.trim()) translateLines("\n");
           return origEnd(typeof chunk === "function" ? chunk : typeof encoding === "function" ? encoding : cb);
         }
@@ -468,22 +541,26 @@ export async function createApp(options = {}) {
     });
   }
 
-  // Fallback global error handler (redacts any secret patterns from error messages)
+  // Fallback global error handler (redacts any secret patterns and hides internal 5xx details)
   app.use((err, req, res, _next) => {
     const status = Number(err?.status) || 500;
-    const message = redactSecrets(err?.message || "Internal server error");
+    const redacted = redactSecrets(err?.message || "Internal server error");
+    if (status >= 500) {
+      liveEvents.log("error", "server", `HTTP ${status} ${req.method} ${req.path}: ${redacted}`);
+    }
+    const clientMessage = status >= 500 ? "Internal server error" : redacted;
     if (res.headersSent) {
       return res.end();
     }
     if (req.path.startsWith("/v1")) {
       return res.status(status).json({
         error: {
-          message,
+          message: clientMessage,
           type: "api_error"
         }
       });
     }
-    return res.status(status).json({ error: message });
+    return res.status(status).json({ error: clientMessage });
   });
 
   return app;
@@ -523,7 +600,7 @@ if (isDirectRun) {
   process.once("SIGINT", () => flushAndExit(0));
   process.once("SIGTERM", () => flushAndExit(0));
 
-  app.listen(port, host, () => {
+  const server = app.listen(port, host, () => {
     console.log(`001Router listening on http://${host}:${port}`);
     if (initialKey && initialKey.key) {
       console.log(
@@ -532,4 +609,5 @@ if (isDirectRun) {
     }
     startDailyCatalogScheduler(app.storage);
   });
+  configureHttpServer(server);
 }

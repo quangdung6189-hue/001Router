@@ -817,6 +817,13 @@ export async function exchangeGoogleOAuthPkce({
  * }} [options]
  * @returns {Promise<{ accessToken: string, projectId: string }>}
  */
+const GOOGLE_CRED_CACHE_MAX = 256;
+const GOOGLE_TOKEN_CACHE_MAX = 1000;
+const GOOGLE_TOKEN_SOFT_REFRESH_MS = 10 * 60 * 1000;
+const GOOGLE_TOKEN_HARD_REFRESH_MS = GOOGLE_TOKEN_REFRESH_BUFFER_MS;
+/** @type {Map<string, { clientId: string, clientSecret: string, refreshToken: string, projectId: string, effectiveTokenUri: string, cacheKey: string }>} */
+const googleCredDescriptorCache = new Map();
+
 export async function getGoogleOAuthAccessToken(oauthCredsStringOrObj, options = {}) {
   const {
     fetchImpl = upstreamFetch,
@@ -827,51 +834,89 @@ export async function getGoogleOAuthAccessToken(oauthCredsStringOrObj, options =
     forceRefresh = false
   } = options;
 
-  let rawObj = oauthCredsStringOrObj;
-  if (typeof oauthCredsStringOrObj === "string") {
-    try {
-      rawObj = JSON.parse(oauthCredsStringOrObj);
-    } catch {
-      throw createHttpError(400, "Stored Google OAuth credentials JSON is malformed");
+  let clientId;
+  let clientSecret;
+  let refreshToken;
+  let projectId;
+  let effectiveTokenUri;
+  let cacheKey;
+
+  const descriptorKey =
+    typeof oauthCredsStringOrObj === "string"
+      ? `${allowLoopbackTokenUri ? 1 : 0}\0${tokenUrlOverride || ""}\0${oauthCredsStringOrObj}`
+      : "";
+  const cachedDesc = descriptorKey ? googleCredDescriptorCache.get(descriptorKey) : null;
+
+  if (cachedDesc) {
+    ({ clientId, clientSecret, refreshToken, projectId, effectiveTokenUri, cacheKey } = cachedDesc);
+  } else {
+    let rawObj = oauthCredsStringOrObj;
+    if (typeof oauthCredsStringOrObj === "string") {
+      try {
+        rawObj = JSON.parse(oauthCredsStringOrObj);
+      } catch {
+        throw createHttpError(400, "Stored Google OAuth credentials JSON is malformed");
+      }
+    }
+
+    if (!rawObj || typeof rawObj !== "object" || Array.isArray(rawObj)) {
+      throw createHttpError(400, "Stored Google OAuth credentials must be a JSON object");
+    }
+
+    const creds = stripPrototypePollution(rawObj);
+    clientId = typeof creds.clientId === "string" ? creds.clientId.trim() : "";
+    clientSecret = typeof creds.clientSecret === "string" ? creds.clientSecret.trim() : "";
+    refreshToken = typeof creds.refreshToken === "string" ? creds.refreshToken.trim() : "";
+    projectId = normalizeProjectId(creds.projectId || "");
+
+    if (!clientId || !clientSecret || !refreshToken) {
+      throw createHttpError(
+        400,
+        "Stored Google OAuth credentials are incomplete (missing clientId, clientSecret, or refreshToken)"
+      );
+    }
+
+    const rawTokenUri =
+      typeof tokenUrlOverride === "string" && tokenUrlOverride.trim()
+        ? tokenUrlOverride.trim()
+        : typeof creds.tokenUri === "string" && creds.tokenUri.trim()
+          ? creds.tokenUri.trim()
+          : DEFAULT_GOOGLE_TOKEN_URL;
+
+    const parsedTokenUrl = validateGoogleEndpointUrl(rawTokenUri, "tokenUri", {
+      allowLoopback: Boolean(allowLoopbackTokenUri || tokenUrlOverride)
+    });
+    effectiveTokenUri = parsedTokenUrl.toString();
+    cacheKey = buildGoogleTokenCacheKey(clientId, refreshToken, effectiveTokenUri);
+
+    if (descriptorKey) {
+      googleCredDescriptorCache.set(descriptorKey, {
+        clientId,
+        clientSecret,
+        refreshToken,
+        projectId,
+        effectiveTokenUri,
+        cacheKey
+      });
+      while (googleCredDescriptorCache.size > GOOGLE_CRED_CACHE_MAX) {
+        googleCredDescriptorCache.delete(googleCredDescriptorCache.keys().next().value);
+      }
     }
   }
 
-  if (!rawObj || typeof rawObj !== "object" || Array.isArray(rawObj)) {
-    throw createHttpError(400, "Stored Google OAuth credentials must be a JSON object");
-  }
-
-  const creds = stripPrototypePollution(rawObj);
-  const clientId = typeof creds.clientId === "string" ? creds.clientId.trim() : "";
-  const clientSecret =
-    typeof creds.clientSecret === "string" ? creds.clientSecret.trim() : "";
-  const refreshToken =
-    typeof creds.refreshToken === "string" ? creds.refreshToken.trim() : "";
-  const projectId = normalizeProjectId(creds.projectId || "");
-
-  if (!clientId || !clientSecret || !refreshToken) {
-    throw createHttpError(
-      400,
-      "Stored Google OAuth credentials are incomplete (missing clientId, clientSecret, or refreshToken)"
-    );
-  }
-
-  const rawTokenUri =
-    typeof tokenUrlOverride === "string" && tokenUrlOverride.trim()
-      ? tokenUrlOverride.trim()
-      : typeof creds.tokenUri === "string" && creds.tokenUri.trim()
-        ? creds.tokenUri.trim()
-        : DEFAULT_GOOGLE_TOKEN_URL;
-
-  const parsedTokenUrl = validateGoogleEndpointUrl(rawTokenUri, "tokenUri", {
-    allowLoopback: Boolean(allowLoopbackTokenUri || tokenUrlOverride)
-  });
-  const effectiveTokenUri = parsedTokenUrl.toString();
-
-  const cacheKey = buildGoogleTokenCacheKey(clientId, refreshToken, effectiveTokenUri);
   const now = nowFn();
   if (!forceRefresh) {
     const cached = googleTokenCache.get(cacheKey);
-    if (cached && cached.expiresAt - GOOGLE_TOKEN_REFRESH_BUFFER_MS > now) {
+    if (cached && cached.expiresAt - GOOGLE_TOKEN_HARD_REFRESH_MS > now) {
+      if (
+        cached.expiresAt - GOOGLE_TOKEN_SOFT_REFRESH_MS <= now &&
+        !googleInFlightRefreshes.has(cacheKey)
+      ) {
+        getGoogleOAuthAccessToken(oauthCredsStringOrObj, {
+          ...options,
+          forceRefresh: true
+        }).catch(() => {});
+      }
       return { accessToken: cached.accessToken, projectId };
     }
   }
@@ -893,6 +938,7 @@ export async function getGoogleOAuthAccessToken(oauthCredsStringOrObj, options =
     try {
       tokenRes = await fetchImpl(effectiveTokenUri, {
         method: "POST",
+        signal: AbortSignal.timeout(15_000),
         headers: {
           "content-type": "application/x-www-form-urlencoded",
           accept: "application/json"
@@ -951,6 +997,9 @@ export async function getGoogleOAuthAccessToken(oauthCredsStringOrObj, options =
       accessToken,
       expiresAt: nowFn() + expiresInSec * 1000
     });
+    while (googleTokenCache.size > GOOGLE_TOKEN_CACHE_MAX) {
+      googleTokenCache.delete(googleTokenCache.keys().next().value);
+    }
 
     return { accessToken, projectId };
   })();

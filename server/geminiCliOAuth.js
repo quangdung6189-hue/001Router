@@ -263,6 +263,10 @@ export function buildAntigravityHeaders(accessToken) {
 export const GEMINI_CLI_PKCE_TTL_MS = 600_000;
 export const GEMINI_CLI_PKCE_TTL_SEC = Math.floor(GEMINI_CLI_PKCE_TTL_MS / 1000);
 export const GEMINI_CLI_TOKEN_REFRESH_BUFFER_MS = 5 * 60 * 1000;
+const GEMINI_CLI_TOKEN_SOFT_REFRESH_MS = 10 * 60 * 1000;
+const GEMINI_CLI_TOKEN_HARD_REFRESH_MS = GEMINI_CLI_TOKEN_REFRESH_BUFFER_MS;
+const GEMINI_CLI_CRED_CACHE_MAX = 256;
+const GEMINI_CLI_TOKEN_CACHE_MAX = 1000;
 const MAX_PENDING_STATES = 200;
 
 /** @type {Map<string, { codeVerifier: string, redirectUri: string, clientId: string, clientSecret: string, createdAt: number, expiresAt: number }>} */
@@ -271,8 +275,42 @@ const pendingStates = new Map();
 /** @type {Map<string, { accessToken: string, expiresAt: number }>} */
 const tokenCache = new Map();
 
-/** @type {Map<string, Promise<{ accessToken: string }>>} */
+/** @type {Map<string, { clientId: string, clientSecret: string, refreshToken: string, projectId: string, tokenUri: string, cacheKey: string }>} */
+const credDescriptorCache = new Map();
+
+/** @type {Map<string, Promise<{ accessToken: string, projectId?: string }>>} */
 const inflightRefreshes = new Map();
+
+function validateGeminiCliTokenUri(rawUri, allowLoopback = false) {
+  const trimmed = typeof rawUri === "string" ? rawUri.trim() : "";
+  if (!trimmed) return GEMINI_CLI_TOKEN_URL;
+  let parsed;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    throw httpError(400, "Stored Gemini CLI tokenUri is not a valid URL");
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw httpError(400, "Stored Gemini CLI tokenUri must use http or https");
+  }
+  if (parsed.username || parsed.password) {
+    throw httpError(400, "Stored Gemini CLI tokenUri must not embed credentials");
+  }
+  const ssrf = classifyHostForSSRF(parsed.hostname);
+  if (ssrf.isMetadataOrLinkLocal || ssrf.isPrivateLan) {
+    throw httpError(400, `SSRF guard: Gemini CLI tokenUri blocked (${ssrf.reason || "forbidden host"})`);
+  }
+  if (ssrf.isLoopback) {
+    if (!allowLoopback) {
+      throw httpError(400, "SSRF guard: Gemini CLI tokenUri cannot target loopback addresses");
+    }
+    return parsed.toString();
+  }
+  if (parsed.protocol !== "https:") {
+    throw httpError(400, "Gemini CLI tokenUri must use https://");
+  }
+  return parsed.toString();
+}
 
 /**
  * Create an Error carrying an HTTP status code.
@@ -464,6 +502,7 @@ export function restoreGeminiCliState(state, record) {
 export function clearGeminiCliStore() {
   pendingStates.clear();
   tokenCache.clear();
+  credDescriptorCache.clear();
   inflightRefreshes.clear();
 }
 
@@ -1990,48 +2029,91 @@ export async function getGeminiCliAccessToken(credentials, options = {}) {
   const {
     fetchImpl = upstreamFetch,
     tokenUrlOverride,
+    allowLoopbackTokenUri = false,
     dispatcher,
     nowFn = Date.now,
     forceRefresh = false
   } = options;
 
-  let raw = credentials;
-  if (typeof credentials === "string") {
-    try {
-      raw = JSON.parse(credentials);
-    } catch {
-      throw httpError(400, "Stored Gemini CLI credentials JSON is malformed");
+  let clientId;
+  let clientSecret;
+  let refreshToken;
+  let projectId;
+  let tokenUri;
+  let cacheKey;
+
+  const allowLoopback = Boolean(allowLoopbackTokenUri || tokenUrlOverride);
+  const descriptorKey =
+    typeof credentials === "string"
+      ? `${allowLoopback ? 1 : 0}\0${tokenUrlOverride || ""}\0${credentials}`
+      : "";
+  const cachedDesc = descriptorKey ? credDescriptorCache.get(descriptorKey) : null;
+
+  if (cachedDesc) {
+    ({ clientId, clientSecret, refreshToken, projectId, tokenUri, cacheKey } = cachedDesc);
+  } else {
+    let raw = credentials;
+    if (typeof credentials === "string") {
+      try {
+        raw = JSON.parse(credentials);
+      } catch {
+        throw httpError(400, "Stored Gemini CLI credentials JSON is malformed");
+      }
+    }
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      throw httpError(400, "Stored Gemini CLI credentials must be a JSON object");
+    }
+
+    const creds = stripPrototypePollution(raw);
+    clientId = typeof creds.clientId === "string" ? creds.clientId.trim() : "";
+    clientSecret =
+      typeof creds.clientSecret === "string" ? creds.clientSecret.trim() : "";
+    refreshToken =
+      typeof creds.refreshToken === "string" ? creds.refreshToken.trim() : "";
+    projectId = typeof creds.projectId === "string" ? creds.projectId.trim() : "";
+
+    if (!clientId || !refreshToken) {
+      throw httpError(
+        400,
+        "Stored Gemini CLI credentials are incomplete (missing clientId or refreshToken)"
+      );
+    }
+
+    const rawTokenUri =
+      (typeof tokenUrlOverride === "string" && tokenUrlOverride.trim()) ||
+      (typeof creds.tokenUri === "string" && creds.tokenUri.trim()) ||
+      GEMINI_CLI_TOKEN_URL;
+    tokenUri = validateGeminiCliTokenUri(rawTokenUri, allowLoopback);
+    cacheKey = buildCacheKey(clientId, refreshToken, tokenUri);
+
+    if (descriptorKey) {
+      credDescriptorCache.set(descriptorKey, {
+        clientId,
+        clientSecret,
+        refreshToken,
+        projectId,
+        tokenUri,
+        cacheKey
+      });
+      while (credDescriptorCache.size > GEMINI_CLI_CRED_CACHE_MAX) {
+        credDescriptorCache.delete(credDescriptorCache.keys().next().value);
+      }
     }
   }
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-    throw httpError(400, "Stored Gemini CLI credentials must be a JSON object");
-  }
 
-  const creds = stripPrototypePollution(raw);
-  const clientId = typeof creds.clientId === "string" ? creds.clientId.trim() : "";
-  const clientSecret =
-    typeof creds.clientSecret === "string" ? creds.clientSecret.trim() : "";
-  const refreshToken =
-    typeof creds.refreshToken === "string" ? creds.refreshToken.trim() : "";
-  const projectId = typeof creds.projectId === "string" ? creds.projectId.trim() : "";
-
-  if (!clientId || !refreshToken) {
-    throw httpError(
-      400,
-      "Stored Gemini CLI credentials are incomplete (missing clientId or refreshToken)"
-    );
-  }
-
-  const tokenUri =
-    (typeof tokenUrlOverride === "string" && tokenUrlOverride.trim()) ||
-    (typeof creds.tokenUri === "string" && creds.tokenUri.trim()) ||
-    GEMINI_CLI_TOKEN_URL;
-
-  const cacheKey = buildCacheKey(clientId, refreshToken, tokenUri);
   const now = nowFn();
   if (!forceRefresh) {
     const cached = tokenCache.get(cacheKey);
-    if (cached && cached.expiresAt - GEMINI_CLI_TOKEN_REFRESH_BUFFER_MS > now) {
+    if (cached && cached.expiresAt - GEMINI_CLI_TOKEN_HARD_REFRESH_MS > now) {
+      if (
+        cached.expiresAt - GEMINI_CLI_TOKEN_SOFT_REFRESH_MS <= now &&
+        !inflightRefreshes.has(cacheKey)
+      ) {
+        getGeminiCliAccessToken(credentials, {
+          ...options,
+          forceRefresh: true
+        }).catch(() => {});
+      }
       return { accessToken: cached.accessToken, projectId };
     }
   }
@@ -2051,6 +2133,7 @@ export async function getGeminiCliAccessToken(credentials, options = {}) {
     try {
       res = await fetchImpl(tokenUri, {
         method: "POST",
+        signal: AbortSignal.timeout(15_000),
         headers: {
           "content-type": "application/x-www-form-urlencoded",
           accept: "application/json"
@@ -2100,6 +2183,9 @@ export async function getGeminiCliAccessToken(credentials, options = {}) {
         : 3600;
 
     tokenCache.set(cacheKey, { accessToken, expiresAt: nowFn() + expiresInSec * 1000 });
+    while (tokenCache.size > GEMINI_CLI_TOKEN_CACHE_MAX) {
+      tokenCache.delete(tokenCache.keys().next().value);
+    }
     return { accessToken, projectId };
   })();
 

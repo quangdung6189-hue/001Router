@@ -283,12 +283,15 @@ pre,
   border-color: #2e2e2e;
 }
 
-/* Reusable semantic surfaces & buttons */
+/* Reusable semantic surfaces & buttons
+   Follows modern-web-guidance: natural-interactions & physics-based-easing */
 .r-card {
   background-color: var(--bg-card);
   border: 1px solid var(--border-subtle);
   color: var(--text-primary);
   border-radius: 0.75rem;
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--ux-shadow) 42%, transparent);
+  transition: border-color 0.18s var(--ux-ease), box-shadow 0.22s var(--ux-ease);
 }
 
 .r-card-subtle {
@@ -296,6 +299,16 @@ pre,
   border: 1px solid var(--border-subtle);
   color: var(--text-primary);
   border-radius: 0.625rem;
+  transition: border-color 0.16s var(--ux-ease), background-color 0.16s var(--ux-ease);
+}
+
+:where(button, [role="button"], a[href], summary, select):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+:where(.font-mono, code, .responsive-table td) {
+  font-variant-numeric: tabular-nums;
 }
 
 .r-btn-primary {
@@ -303,11 +316,36 @@ pre,
   color: #ffffff;
   font-weight: 600;
   border-radius: 0.5rem;
-  transition: background-color 0.15s ease, opacity 0.15s ease;
+  cursor: pointer;
+  user-select: none;
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.22),
+    0 1px 2px color-mix(in srgb, var(--accent) 32%, transparent);
+  transition:
+    background-color 0.16s ease-out,
+    box-shadow 0.2s ease-out,
+    scale 0.28s ease-out,
+    opacity 0.15s ease;
+  transition-timing-function:
+    ease-out,
+    ease-out,
+    linear(0, 0.35 14%, 1.07 42%, 0.98 68%, 1),
+    ease;
 }
 
 .r-btn-primary:hover:not(:disabled) {
   background-color: var(--accent-hover);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.26),
+    0 6px 16px -6px color-mix(in srgb, var(--accent) 62%, transparent);
+}
+
+.r-btn-primary:active:not(:disabled) {
+  scale: 0.965;
+  transition-duration: 0.08s;
+  box-shadow:
+    inset 0 1px 2px rgb(0 0 0 / 0.18),
+    0 1px 2px color-mix(in srgb, var(--accent) 26%, transparent);
 }
 
 .r-btn-primary:disabled {
@@ -321,12 +359,38 @@ pre,
   color: var(--text-primary);
   font-weight: 500;
   border-radius: 0.5rem;
-  transition: background-color 0.15s ease, border-color 0.15s ease;
+  cursor: pointer;
+  user-select: none;
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--text-primary) 4%, transparent),
+    0 1px 2px color-mix(in srgb, var(--ux-shadow) 35%, transparent);
+  transition:
+    background-color 0.16s ease-out,
+    border-color 0.16s ease-out,
+    color 0.16s ease-out,
+    box-shadow 0.2s ease-out,
+    scale 0.28s ease-out,
+    opacity 0.15s ease;
+  transition-timing-function:
+    ease-out,
+    ease-out,
+    ease-out,
+    ease-out,
+    linear(0, 0.35 14%, 1.06 42%, 0.98 68%, 1),
+    ease;
 }
 
 .r-btn-secondary:hover:not(:disabled) {
   background-color: var(--bg-elevated);
   border-color: var(--border-strong);
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--text-primary) 6%, transparent),
+    0 4px 12px -6px color-mix(in srgb, var(--ux-shadow-strong) 45%, transparent);
+}
+
+.r-btn-secondary:active:not(:disabled) {
+  scale: 0.97;
+  transition-duration: 0.08s;
 }
 
 .r-btn-secondary:disabled {
@@ -339,14 +403,148 @@ pre,
   color: var(--contrast-text);
   font-weight: 600;
   border-radius: 0.5rem;
-  transition: opacity 0.15s ease;
+  cursor: pointer;
+  user-select: none;
+  transition: opacity 0.15s ease, box-shadow 0.18s ease-out, scale 0.28s ease-out;
+  transition-timing-function: ease, ease-out, linear(0, 0.35 14%, 1.07 42%, 0.98 68%, 1);
 }
 
 .r-btn-contrast:hover:not(:disabled) {
-  opacity: 0.9;
+  opacity: 0.92;
+  box-shadow: 0 6px 14px -6px color-mix(in srgb, var(--ux-shadow-strong) 55%, transparent);
 }
 
-/* Native Modal Dialogs — prevent background scroll chaining */
+.r-btn-contrast:active:not(:disabled) {
+  scale: 0.965;
+  transition-duration: 0.08s;
+}
+
+.r-btn-danger {
+  background-color: #dc2626;
+  color: #ffffff;
+  font-weight: 600;
+  border-radius: 0.5rem;
+  cursor: pointer;
+  user-select: none;
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.2),
+    0 1px 2px rgb(220 38 38 / 0.28);
+  transition: background-color 0.16s ease-out, box-shadow 0.2s ease-out, scale 0.28s ease-out, opacity 0.15s ease;
+  transition-timing-function: ease-out, ease-out, linear(0, 0.35 14%, 1.07 42%, 0.98 68%, 1), ease;
+}
+
+.r-btn-danger:hover:not(:disabled) {
+  background-color: #ef4444;
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.24),
+    0 6px 16px -6px rgb(239 68 68 / 0.55);
+}
+
+.r-btn-danger:active:not(:disabled) {
+  scale: 0.965;
+  transition-duration: 0.08s;
+}
+
+.r-btn-danger:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Tactile Stretchy Switch (adapted from Lucian UX/UI #433 · MIT License (c) 2026 Seokwoooo) */
+.r-switch-track {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  border-radius: 9999px;
+  border: 1px solid var(--border-strong);
+  background-color: var(--bg-subtle);
+  box-shadow: inset 0 1px 3px rgb(0 0 0 / 0.12);
+  transition:
+    background-color 0.24s var(--ux-ease),
+    border-color 0.24s var(--ux-ease),
+    box-shadow 0.24s var(--ux-ease);
+}
+
+.r-switch-track[data-size="sm"] {
+  width: 2.25rem;
+  height: 1.25rem;
+}
+
+.r-switch-track[data-size="md"] {
+  width: 2.75rem;
+  height: 1.5rem;
+}
+
+.r-switch-input:checked + .r-switch-track {
+  border-color: var(--accent);
+  background-color: var(--accent);
+  box-shadow:
+    inset 0 1px 2px rgb(0 0 0 / 0.12),
+    0 4px 12px -4px color-mix(in srgb, var(--accent) 62%, transparent);
+}
+
+.r-switch-input:focus-visible + .r-switch-track {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.r-switch-thumb {
+  position: absolute;
+  left: 2px;
+  border-radius: 9999px;
+  background-color: var(--text-muted);
+  box-shadow:
+    0 1px 2px rgb(0 0 0 / 0.22),
+    0 2px 5px -1px rgb(0 0 0 / 0.2);
+  pointer-events: none;
+  transition:
+    transform 0.42s cubic-bezier(0.3, 1.48, 0.5, 1),
+    width 0.22s cubic-bezier(0.3, 1.4, 0.5, 1),
+    background-color 0.2s var(--ux-ease);
+}
+
+.r-switch-thumb[data-size="sm"] {
+  width: 0.875rem;
+  height: 0.875rem;
+}
+
+.r-switch-thumb[data-size="md"] {
+  width: 1.125rem;
+  height: 1.125rem;
+}
+
+.r-switch-root[data-checked="true"] .r-switch-thumb {
+  background-color: #ffffff;
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.9),
+    0 1px 3px rgb(0 0 0 / 0.26);
+}
+
+.r-switch-root[data-checked="true"] .r-switch-thumb[data-size="sm"] {
+  transform: translateX(1rem);
+}
+
+.r-switch-root[data-checked="true"] .r-switch-thumb[data-size="md"] {
+  transform: translateX(1.25rem);
+}
+
+.r-switch-root[data-pressed="true"]:not([data-disabled="true"]) .r-switch-thumb[data-size="sm"] {
+  width: 1.125rem;
+}
+
+.r-switch-root[data-pressed="true"]:not([data-disabled="true"]) .r-switch-thumb[data-size="md"] {
+  width: 1.4375rem;
+}
+
+.r-switch-root[data-checked="true"][data-pressed="true"]:not([data-disabled="true"]) .r-switch-thumb[data-size="sm"] {
+  transform: translateX(0.75rem);
+}
+
+.r-switch-root[data-checked="true"][data-pressed="true"]:not([data-disabled="true"]) .r-switch-thumb[data-size="md"] {
+  transform: translateX(0.9375rem);
+}
+
+/* Native Modal Dialogs — Top-layer entry/exit animations (modern-web-guidance: animate-to-from-top-layer) */
 dialog:modal {
   overscroll-behavior: contain;
   margin: auto;
@@ -358,7 +556,36 @@ dialog:modal {
   max-width: min(94vw, 44rem);
   max-height: min(90dvh, 52rem);
   width: 100%;
-  box-shadow: 0 24px 60px rgb(0 0 0 / 0.5);
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--text-primary) 5%, transparent),
+    0 24px 60px -12px rgb(0 0 0 / 0.5);
+  opacity: 0;
+  transition-property: opacity, transform, display, overlay;
+  transition-duration: 0.22s;
+  transition-timing-function: cubic-bezier(0.2, 0.8, 0.2, 1);
+  transition-behavior: allow-discrete;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  dialog:modal {
+    transform: translateY(8px) scale(0.96);
+  }
+}
+
+dialog:modal[open]:where(:not([data-closing])) {
+  opacity: 1;
+
+  @starting-style {
+    opacity: 0;
+  }
+
+  @media (prefers-reduced-motion: no-preference) {
+    transform: translateY(0) scale(1);
+
+    @starting-style {
+      transform: translateY(8px) scale(0.96);
+    }
+  }
 }
 
 dialog[data-size="sm"]:modal {
@@ -372,8 +599,22 @@ dialog[data-size="lg"]:modal {
 dialog::backdrop {
   overflow: hidden;
   overscroll-behavior: contain;
-  background-color: rgb(10 10 10 / 0.65);
-  backdrop-filter: blur(3px);
+  background-color: rgb(10 10 10 / 0);
+  backdrop-filter: blur(0px);
+  transition-property: background-color, backdrop-filter, display, overlay;
+  transition-duration: 0.22s;
+  transition-timing-function: ease-out;
+  transition-behavior: allow-discrete;
+}
+
+dialog[open]:where(:not([data-closing]))::backdrop {
+  background-color: rgb(10 10 10 / 0.62);
+  backdrop-filter: blur(4px);
+
+  @starting-style {
+    background-color: rgb(10 10 10 / 0);
+    backdrop-filter: blur(0px);
+  }
 }
 
 /* Navigation Drawer Modal on small screens */
@@ -393,13 +634,32 @@ dialog.nav-drawer:modal {
   color: var(--text-primary);
 }
 
+@media (prefers-reduced-motion: no-preference) {
+  dialog.nav-drawer:modal {
+    transform: translateX(-100%);
+  }
+
+  dialog.nav-drawer:modal[open]:where(:not([data-closing])) {
+    transform: translateX(0);
+
+    @starting-style {
+      transform: translateX(-100%);
+    }
+  }
+}
+
 /* Post-interaction form validation (:user-invalid + JS fallback) */
 .field-input {
   background-color: var(--bg-input);
   border: 1px solid var(--border-subtle);
   color: var(--text-primary);
   border-radius: 0.5rem;
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  box-shadow: inset 0 1px 2px rgb(0 0 0 / 0.04);
+  transition: border-color 0.16s ease, box-shadow 0.18s ease, background-color 0.16s ease;
+}
+
+.field-input:hover:not(:disabled):not(:focus-visible) {
+  border-color: var(--border-strong);
 }
 
 .field-input::placeholder {
@@ -409,7 +669,9 @@ dialog.nav-drawer:modal {
 .field-input:focus-visible {
   outline: none;
   border-color: var(--accent);
-  box-shadow: 0 0 0 2px rgb(229 106 74 / 0.25);
+  box-shadow:
+    0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent),
+    inset 0 1px 2px rgb(0 0 0 / 0.03);
 }
 
 .field-input:is(:user-invalid, .user-invalid-fallback) {
@@ -477,12 +739,16 @@ dialog.nav-drawer:modal {
   vertical-align: middle;
 }
 
+.responsive-table tbody tr {
+  transition: background-color 0.14s ease;
+}
+
 .responsive-table tbody tr:last-child td {
   border-bottom: none;
 }
 
 .responsive-table tbody tr:hover {
-  background-color: rgb(229 106 74 / 0.04);
+  background-color: rgb(229 106 74 / 0.045);
 }
 
 @container (width < 680px) {
@@ -553,7 +819,32 @@ dialog.nav-drawer:modal {
   white-space: nowrap !important;
 }
 
-/* Toast notifications region & top-layer transitions */
+/* Sidebar active pill indicator & micro-motion */
+.r-nav-link {
+  position: relative;
+  transition: background-color 0.16s var(--ux-ease), color 0.16s var(--ux-ease);
+}
+
+.r-nav-link[aria-current="page"]::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 22%;
+  bottom: 22%;
+  width: 3px;
+  border-radius: 0 999px 999px 0;
+  background-color: var(--accent);
+}
+
+.r-nav-link svg {
+  transition: transform 0.22s var(--ux-ease);
+}
+
+.r-nav-link:hover svg {
+  transform: translateX(1px);
+}
+
+/* Toast notifications region & top-layer transitions (modern-web-guidance: persistent-toast-notifications) */
 .toast-stack {
   position: fixed;
   inset: auto 1rem 1rem auto;
@@ -564,8 +855,9 @@ dialog.nav-drawer:modal {
   z-index: 60;
   flex-direction: column;
   gap: 0.5rem;
-  max-width: min(92vw, 24rem);
+  max-width: min(92vw, 24.5rem);
   pointer-events: none;
+  overflow: visible;
 }
 
 .toast-stack:not([popover]) {
@@ -576,15 +868,78 @@ dialog.nav-drawer:modal {
   display: flex;
 }
 
+@keyframes toast-enter-kf {
+  from {
+    opacity: 0;
+    transform: translateY(14px) scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes toast-countdown-kf {
+  from {
+    transform: scaleX(1);
+  }
+  to {
+    transform: scaleX(0);
+  }
+}
+
+@keyframes toast-check-draw {
+  from {
+    stroke-dashoffset: 18;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
 .toast-card {
+  position: relative;
+  overflow: hidden;
   pointer-events: auto;
-  border-radius: 0.625rem;
+  border-radius: 0.75rem;
   border: 1px solid var(--border-strong);
   background-color: var(--bg-card);
   color: var(--text-primary);
-  box-shadow: 0 12px 32px rgb(0 0 0 / 0.35);
-  transition: opacity 0.18s ease, transform 0.18s ease;
+  box-shadow:
+    0 14px 34px -10px rgb(0 0 0 / 0.36),
+    0 2px 6px -2px rgb(0 0 0 / 0.16);
+  touch-action: pan-y;
+  transition: opacity 0.2s ease, transform 0.24s ease-out, border-color 0.18s ease;
   transition-behavior: allow-discrete;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .toast-card {
+    animation: toast-enter-kf 0.38s cubic-bezier(0.3, 1.38, 0.5, 1) both;
+  }
+
+  .toast-check-path {
+    stroke-dasharray: 18;
+    stroke-dashoffset: 18;
+    animation: toast-check-draw 0.36s var(--ux-ease) 0.14s forwards;
+  }
+}
+
+.toast-progress {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 2px;
+  transform-origin: left center;
+  opacity: 0.72;
+  animation: toast-countdown-kf var(--toast-duration, 4200ms) linear forwards;
+}
+
+.toast-card:hover .toast-progress,
+.toast-card:focus-within .toast-progress,
+.toast-card[data-paused="true"] .toast-progress {
+  animation-play-state: paused;
 }
 
 /* Lucian UX/UI Prompt base rules · MIT License (c) 2026 Seokwoooo */
@@ -645,9 +1000,48 @@ dialog.nav-drawer:modal {
     animation: none;
   }
 
+  dialog:modal,
+  dialog::backdrop {
+    transition-duration: 0.1s;
+  }
+
+  .r-btn-primary,
+  .r-btn-secondary,
+  .r-btn-contrast,
+  .r-btn-danger,
+  .r-switch-thumb,
+  .r-nav-link svg,
   .toast-card,
   .field-input {
-    transition: none;
+    transition-property: color, background-color, border-color, opacity, box-shadow;
+    transition-duration: 0.12s;
+  }
+
+  .r-btn-primary:active:not(:disabled),
+  .r-btn-secondary:active:not(:disabled),
+  .r-btn-contrast:active:not(:disabled),
+  .r-btn-danger:active:not(:disabled) {
+    scale: 1;
+  }
+
+  .r-switch-thumb {
+    transition: transform 0.01ms, background-color 0.12s ease;
+  }
+
+  .r-switch-root[data-pressed="true"] .r-switch-thumb[data-size="sm"] {
+    width: 0.875rem;
+  }
+
+  .r-switch-root[data-pressed="true"] .r-switch-thumb[data-size="md"] {
+    width: 1.125rem;
+  }
+
+  .r-switch-root[data-checked="true"][data-pressed="true"] .r-switch-thumb[data-size="sm"] {
+    transform: translateX(1rem);
+  }
+
+  .r-switch-root[data-checked="true"][data-pressed="true"] .r-switch-thumb[data-size="md"] {
+    transform: translateX(1.25rem);
   }
 
   .ux,
@@ -791,20 +1185,26 @@ dialog.nav-drawer:modal {
 
 @media (prefers-reduced-motion: no-preference) {
   .header-menu-popover {
+    transform-origin: top right;
     opacity: 0;
     translate: 0 -0.25rem;
-    transition: opacity, translate, display, overlay;
-    transition-duration: 0.14s;
+    scale: 0.96;
+    transition: opacity, translate, scale, display, overlay;
+    transition-duration: 0.16s;
+    transition-timing-function: ease-out;
+    transition-timing-function: ease-out, ease-out, linear(0, 0.45 18%, 1.05 55%, 1), ease, ease;
     transition-behavior: allow-discrete;
   }
 
   .header-menu-popover:is(:popover-open, .\:popover-open) {
     opacity: 1;
     translate: 0 0;
-    transition-duration: 0.1s;
+    scale: 1;
+    transition-duration: 0.2s;
     @starting-style {
       opacity: 0;
       translate: 0 -0.25rem;
+      scale: 0.96;
     }
   }
 }

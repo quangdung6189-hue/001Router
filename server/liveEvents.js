@@ -2,16 +2,24 @@
  * Real-time SSE event hub for:
  * 1) Live Usage & Provider Topology stream (`/api/usage/stream`)
  * 2) Live Server Console Log ring buffer & stream (`/api/console-logs`, `/api/console-logs/stream`)
+ *
+ * Hardened against SSE connection floods (global + per-IP caps), slow-client memory exhaustion
+ * (writableLength drop guard), and broadcast CPU amplification (coalesced snapshot timer + shared heartbeat).
  */
 
 import { nanoid } from "nanoid";
+import { extractClientIp } from "./security/ratelimit.js";
 import { redactSecrets } from "./security/redact.js";
 
 const MAX_CONSOLE_LOGS = 500;
 const MAX_RECENT_REQUESTS = 100;
+const MAX_SSE_CLIENTS_GLOBAL = Number(process.env.ROUTER001_MAX_SSE_CLIENTS) || 50;
+const MAX_SSE_CLIENTS_PER_IP = Number(process.env.ROUTER001_MAX_SSE_PER_IP) || 8;
+const MAX_CLIENT_BUFFER_BYTES = 256 * 1024;
+const USAGE_BROADCAST_COALESCE_MS = 120;
 
 export class LiveEventsHub {
-  constructor() {
+  constructor(options = {}) {
     /** @type {Map<string, number>} providerSlug -> active in-flight count */
     this.activeRequests = new Map();
     /** @type {Map<string, string[]>} providerSlug -> active in-flight model ids */
@@ -27,6 +35,82 @@ export class LiveEventsHub {
     this.consoleLogs = [];
     /** @type {Set<import("express").Response>} */
     this.consoleClients = new Set();
+
+    /** @type {Map<string, number>} */
+    this._ipCounts = new Map();
+    /** @type {WeakMap<import("express").Response, string>} */
+    this._clientIp = new WeakMap();
+    this.maxClientsGlobal = Math.max(2, Number(options.maxClientsGlobal) || MAX_SSE_CLIENTS_GLOBAL);
+    this.maxClientsPerIp = Math.max(1, Number(options.maxClientsPerIp) || MAX_SSE_CLIENTS_PER_IP);
+    this._heartbeatTimer = null;
+    this._broadcastTimer = null;
+  }
+
+  _totalClients() {
+    return this.usageClients.size + this.consoleClients.size;
+  }
+
+  _ensureHeartbeat() {
+    if (this._heartbeatTimer || this._totalClients() === 0) return;
+    this._heartbeatTimer = setInterval(() => {
+      this._writeToSet(this.usageClients, ": heartbeat\n\n");
+      this._writeToSet(this.consoleClients, ": heartbeat\n\n");
+      if (this._totalClients() === 0 && this._heartbeatTimer) {
+        clearInterval(this._heartbeatTimer);
+        this._heartbeatTimer = null;
+      }
+    }, 20_000);
+    this._heartbeatTimer.unref?.();
+  }
+
+  _registerClient(req, res, targetSet) {
+    const ip = extractClientIp(req);
+    const ipCount = this._ipCounts.get(ip) || 0;
+    if (this._totalClients() >= this.maxClientsGlobal || ipCount >= this.maxClientsPerIp) {
+      res.status(429).json({
+        error: "Too many concurrent live event streams. Close unused dashboard tabs and retry."
+      });
+      return false;
+    }
+    this._ipCounts.set(ip, ipCount + 1);
+    this._clientIp.set(res, ip);
+    targetSet.add(res);
+    this._ensureHeartbeat();
+    return true;
+  }
+
+  _unregisterClient(res, targetSet) {
+    if (!targetSet.delete(res)) return;
+    const ip = this._clientIp.get(res);
+    if (ip) {
+      const next = (this._ipCounts.get(ip) || 1) - 1;
+      if (next <= 0) this._ipCounts.delete(ip);
+      else this._ipCounts.set(ip, next);
+      this._clientIp.delete(res);
+    }
+    if (this._totalClients() === 0 && this._heartbeatTimer) {
+      clearInterval(this._heartbeatTimer);
+      this._heartbeatTimer = null;
+    }
+  }
+
+  _writeToSet(clientSet, payload) {
+    for (const res of clientSet) {
+      if (res.writableEnded || res.destroyed || res.writableLength > MAX_CLIENT_BUFFER_BYTES) {
+        this._unregisterClient(res, clientSet);
+        try {
+          res.end();
+        } catch {
+          // ignore
+        }
+        continue;
+      }
+      try {
+        res.write(payload);
+      } catch {
+        this._unregisterClient(res, clientSet);
+      }
+    }
   }
 
   /**
@@ -35,31 +119,26 @@ export class LiveEventsHub {
    * @param {string} scope
    * @param {string} message
    * @param {string[]} [secrets]
+   * @param {{ skipRedact?: boolean }} [opts]
    */
-  log(level, scope, message, secrets = []) {
+  log(level, scope, message, secrets = [], opts = null) {
     const entry = {
       id: nanoid(10),
       timestamp: new Date().toISOString(),
       level: ["info", "warn", "error", "debug"].includes(level) ? level : "info",
       scope: String(scope || "router"),
-      message: redactSecrets(String(message || ""), secrets)
+      message: opts?.skipRedact
+        ? String(message || "")
+        : redactSecrets(String(message || ""), secrets)
     };
     this.consoleLogs.push(entry);
     if (this.consoleLogs.length > MAX_CONSOLE_LOGS) {
       this.consoleLogs.splice(0, this.consoleLogs.length - MAX_CONSOLE_LOGS);
     }
 
-    const payload = `data: ${JSON.stringify(entry)}\n\n`;
-    for (const res of this.consoleClients) {
-      if (res.writableEnded) {
-        this.consoleClients.delete(res);
-        continue;
-      }
-      try {
-        res.write(payload);
-      } catch {
-        this.consoleClients.delete(res);
-      }
+    if (this.consoleClients.size > 0) {
+      const payload = `data: ${JSON.stringify(entry)}\n\n`;
+      this._writeToSet(this.consoleClients, payload);
     }
     return entry;
   }
@@ -71,24 +150,16 @@ export class LiveEventsHub {
 
   clearConsoleLogs() {
     this.consoleLogs = [];
-    const payload = `data: ${JSON.stringify({ type: "clear" })}\n\n`;
-    for (const res of this.consoleClients) {
-      if (res.writableEnded) {
-        this.consoleClients.delete(res);
-        continue;
-      }
-      try {
-        res.write(payload);
-      } catch {
-        this.consoleClients.delete(res);
-      }
+    if (this.consoleClients.size > 0) {
+      const payload = `data: ${JSON.stringify({ type: "clear" })}\n\n`;
+      this._writeToSet(this.consoleClients, payload);
     }
   }
 
   clearRecentRequests() {
     this.recentRequests = [];
     this.errorProvider = null;
-    this._broadcastUsageSnapshot();
+    this._broadcastUsageSnapshot(true);
   }
 
   /**
@@ -212,20 +283,25 @@ export class LiveEventsHub {
     };
   }
 
-  _broadcastUsageSnapshot() {
+  _broadcastUsageSnapshot(immediate = false) {
     if (this.usageClients.size === 0) return;
-    const payload = `data: ${JSON.stringify(this.getUsageSnapshot())}\n\n`;
-    for (const res of this.usageClients) {
-      if (res.writableEnded) {
-        this.usageClients.delete(res);
-        continue;
+    if (immediate) {
+      if (this._broadcastTimer) {
+        clearTimeout(this._broadcastTimer);
+        this._broadcastTimer = null;
       }
-      try {
-        res.write(payload);
-      } catch {
-        this.usageClients.delete(res);
-      }
+      const payload = `data: ${JSON.stringify(this.getUsageSnapshot())}\n\n`;
+      this._writeToSet(this.usageClients, payload);
+      return;
     }
+    if (this._broadcastTimer) return;
+    this._broadcastTimer = setTimeout(() => {
+      this._broadcastTimer = null;
+      if (this.usageClients.size === 0) return;
+      const payload = `data: ${JSON.stringify(this.getUsageSnapshot())}\n\n`;
+      this._writeToSet(this.usageClients, payload);
+    }, USAGE_BROADCAST_COALESCE_MS);
+    this._broadcastTimer.unref?.();
   }
 
   /**
@@ -234,32 +310,19 @@ export class LiveEventsHub {
    * @param {import("express").Response} res
    */
   attachUsageStream(req, res, initialSnapshot = null) {
+    if (!this._registerClient(req, res, this.usageClients)) return;
+
     res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
     res.setHeader("Cache-Control", "no-cache, no-transform");
     res.setHeader("Connection", "keep-alive");
+    res.socket?.setTimeout?.(0);
     res.flushHeaders?.();
 
-    this.usageClients.add(res);
     const snap = initialSnapshot || this.getUsageSnapshot();
     res.write(`data: ${JSON.stringify(snap)}\n\n`);
 
-    const heartbeat = setInterval(() => {
-      if (res.writableEnded) {
-        clearInterval(heartbeat);
-        this.usageClients.delete(res);
-        return;
-      }
-      try {
-        res.write(": heartbeat\n\n");
-      } catch {
-        clearInterval(heartbeat);
-        this.usageClients.delete(res);
-      }
-    }, 20000);
-
     req.on("close", () => {
-      clearInterval(heartbeat);
-      this.usageClients.delete(res);
+      this._unregisterClient(res, this.usageClients);
     });
   }
 
@@ -269,32 +332,19 @@ export class LiveEventsHub {
    * @param {import("express").Response} res
    */
   attachConsoleStream(req, res) {
+    if (!this._registerClient(req, res, this.consoleClients)) return;
+
     res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
     res.setHeader("Cache-Control", "no-cache, no-transform");
     res.setHeader("Connection", "keep-alive");
+    res.socket?.setTimeout?.(0);
     res.flushHeaders?.();
 
-    this.consoleClients.add(res);
     // Send initial buffered history
     res.write(`event: history\ndata: ${JSON.stringify(this.getConsoleLogs(200))}\n\n`);
 
-    const heartbeat = setInterval(() => {
-      if (res.writableEnded) {
-        clearInterval(heartbeat);
-        this.consoleClients.delete(res);
-        return;
-      }
-      try {
-        res.write(": heartbeat\n\n");
-      } catch {
-        clearInterval(heartbeat);
-        this.consoleClients.delete(res);
-      }
-    }, 20000);
-
     req.on("close", () => {
-      clearInterval(heartbeat);
-      this.consoleClients.delete(res);
+      this._unregisterClient(res, this.consoleClients);
     });
   }
 }

@@ -1,4 +1,6 @@
 import express from "express";
+import dns from "node:dns";
+import { isIP } from "node:net";
 import { nanoid } from "nanoid";
 import {
   createRouterAuthMiddleware,
@@ -15,6 +17,51 @@ import {
 import { parseDirectTarget, resolveAuthContextForKey } from "../router.js";
 import { getProxyDispatcher, upstreamFetch as fetch } from "../proxy.js";
 import { classifyHostForSSRF } from "../security/redact.js";
+
+const MAX_AUDIO_UPLOAD_BYTES = 25 * 1024 * 1024;
+const AUDIO_UPLOAD_TIMEOUT_MS = 30_000;
+const DNS_SSRF_LOOKUP_TIMEOUT_MS = 3_000;
+
+/**
+ * Resolve DNS for a target hostname and reject if any returned IP is loopback, LAN, or metadata/link-local.
+ * @param {string} rawHostname
+ * @returns {Promise<{ ok: boolean, reason?: string }>}
+ */
+async function checkResolvedHostForSSRF(rawHostname) {
+  const bare = String(rawHostname || "")
+    .trim()
+    .replace(/^\[|\]$/g, "");
+  if (!bare || isIP(bare)) return { ok: true };
+  let timer = null;
+  try {
+    const records = await Promise.race([
+      dns.promises.lookup(bare, { all: true, verbatim: true }),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error("DNS timeout")), DNS_SSRF_LOOKUP_TIMEOUT_MS);
+        timer.unref?.();
+      })
+    ]);
+    if (Array.isArray(records)) {
+      for (const rec of records) {
+        const addr = rec?.address;
+        if (!addr) continue;
+        const ssrf = classifyHostForSSRF(addr);
+        if (ssrf.isMetadataOrLinkLocal || ssrf.isPrivateLan || ssrf.isLoopback) {
+          return {
+            ok: false,
+            reason: `target host resolved to forbidden address (${ssrf.reason || addr})`
+          };
+        }
+      }
+    }
+  } catch {
+    // Allow remote scraper providers to handle unresolvable or offline-test hostnames;
+    // any private/loopback/metadata literal was already blocked lexically above.
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+  return { ok: true };
+}
 
 const SEARCH_PRESETS = new Set([
   "tavily",
@@ -157,30 +204,13 @@ function buildServiceHeaders(provider, apiKey, extraHeaders = {}) {
  * @param {import("../storage.js").Storage} storage
  */
 function collectAllSecrets(storage) {
+  if (typeof storage?.getRedactionSecrets === "function") {
+    return storage.getRedactionSecrets();
+  }
   const secrets = [];
   for (const p of storage.getProviders()) {
     for (const k of p.apiKeys || []) {
       if (k?.key) secrets.push(k.key);
-      if (typeof k?.serviceAccountJson === "string" && k.serviceAccountJson) {
-        secrets.push(k.serviceAccountJson);
-        try {
-          const sa = JSON.parse(k.serviceAccountJson);
-          if (sa?.private_key) secrets.push(sa.private_key);
-        } catch {
-          // ignore
-        }
-      }
-      if (typeof k?.oauthCredentials === "string" && k.oauthCredentials) {
-        secrets.push(k.oauthCredentials);
-        try {
-          const oc = JSON.parse(k.oauthCredentials);
-          if (oc?.refreshToken) secrets.push(oc.refreshToken);
-          if (oc?.clientSecret) secrets.push(oc.clientSecret);
-          if (oc?.accessToken) secrets.push(oc.accessToken);
-        } catch {
-          // ignore
-        }
-      }
     }
   }
   return secrets;
@@ -377,23 +407,129 @@ export function normalizeWebFetchResult(rawPayload) {
 }
 
 /**
- * Read raw Buffer from an Express request stream (used for multipart/form-data passthrough).
+ * Read raw Buffer from an Express request stream with strict byte and timeout caps.
  * @param {import("express").Request} req
+ * @param {number} [maxBytes]
+ * @param {number} [timeoutMs]
  * @returns {Promise<Buffer>}
  */
-function readRawRequestBuffer(req) {
+function readRawRequestBuffer(
+  req,
+  maxBytes = MAX_AUDIO_UPLOAD_BYTES,
+  timeoutMs = AUDIO_UPLOAD_TIMEOUT_MS
+) {
+  const contentLenHeader = Number(req.headers["content-length"]);
+  if (Number.isFinite(contentLenHeader) && contentLenHeader > maxBytes) {
+    const err = new Error(`Upload exceeds ${Math.round(maxBytes / (1024 * 1024))} MB limit`);
+    err.status = 413;
+    return Promise.reject(err);
+  }
   if (Buffer.isBuffer(req.body)) {
+    if (req.body.length > maxBytes) {
+      const err = new Error(`Upload exceeds ${Math.round(maxBytes / (1024 * 1024))} MB limit`);
+      err.status = 413;
+      return Promise.reject(err);
+    }
     return Promise.resolve(req.body);
   }
   if (req.body && typeof req.body === "object" && Object.keys(req.body).length > 0) {
-    return Promise.resolve(Buffer.from(JSON.stringify(req.body), "utf8"));
+    const buf = Buffer.from(JSON.stringify(req.body), "utf8");
+    if (buf.length > maxBytes) {
+      const err = new Error(`Upload exceeds ${Math.round(maxBytes / (1024 * 1024))} MB limit`);
+      err.status = 413;
+      return Promise.reject(err);
+    }
+    return Promise.resolve(buf);
   }
   return new Promise((resolve, reject) => {
     const chunks = [];
-    req.on("data", (chunk) => chunks.push(chunk));
-    req.on("end", () => resolve(Buffer.concat(chunks)));
-    req.on("error", reject);
+    let totalBytes = 0;
+    let settled = false;
+
+    const finish = (err, buf) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      req.removeListener("data", onData);
+      req.removeListener("end", onEnd);
+      req.removeListener("error", onError);
+      req.removeListener("aborted", onAborted);
+      if (err) reject(err);
+      else resolve(buf);
+    };
+
+    const timer = setTimeout(() => {
+      const err = new Error("Request upload timed out");
+      err.status = 408;
+      finish(err);
+    }, timeoutMs);
+    timer.unref?.();
+
+    const onData = (chunk) => {
+      const bufChunk = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      totalBytes += bufChunk.length;
+      if (totalBytes > maxBytes) {
+        chunks.length = 0;
+        const err = new Error(`Upload exceeds ${Math.round(maxBytes / (1024 * 1024))} MB limit`);
+        err.status = 413;
+        finish(err);
+        return;
+      }
+      chunks.push(bufChunk);
+    };
+    const onEnd = () => finish(null, Buffer.concat(chunks, totalBytes));
+    const onError = (err) => finish(err);
+    const onAborted = () => {
+      const err = new Error("Request stream aborted by client");
+      err.status = 400;
+      finish(err);
+    };
+
+    req.on("data", onData);
+    req.on("end", onEnd);
+    req.on("error", onError);
+    req.on("aborted", onAborted);
   });
+}
+
+/**
+ * Extract the `model` field from a multipart/form-data buffer without decoding multi-MB audio payloads.
+ * @param {Buffer} rawBuffer
+ * @returns {string}
+ */
+function extractMultipartModelField(rawBuffer) {
+  if (!Buffer.isBuffer(rawBuffer) || rawBuffer.length === 0) return "";
+  const pattern =
+    /Content-Disposition:\s*form-data;\s*(?:[^;\r\n]+;\s*)*name=["']?model["']?(?:;[^\r\n]*)?\r?\n(?:[^\r\n]+\r?\n)*\r?\n([^\r\n]+)/i;
+  if (rawBuffer.length <= 131_072) {
+    const m = rawBuffer.toString("latin1").match(pattern);
+    return m && m[1] ? m[1].trim() : "";
+  }
+  const head = rawBuffer.subarray(0, 65_536).toString("latin1");
+  const headMatch = head.match(pattern);
+  if (headMatch && headMatch[1]) return headMatch[1].trim();
+  const tail = rawBuffer.subarray(rawBuffer.length - 65_536).toString("latin1");
+  const tailMatch = tail.match(pattern);
+  return tailMatch && tailMatch[1] ? tailMatch[1].trim() : "";
+}
+
+/**
+ * Replace the first occurrence of `searchStr` with `replaceStr` directly on a Buffer (binary-safe).
+ * @param {Buffer} buf
+ * @param {string} searchStr
+ * @param {string} replaceStr
+ * @returns {Buffer}
+ */
+function replaceUtf8SequenceInBuffer(buf, searchStr, replaceStr) {
+  const needle = Buffer.from(searchStr, "utf8");
+  const idx = buf.indexOf(needle);
+  if (idx < 0) return buf;
+  const replacement = Buffer.from(replaceStr, "utf8");
+  return Buffer.concat([
+    buf.subarray(0, idx),
+    replacement,
+    buf.subarray(idx + needle.length)
+  ]);
 }
 
 /**
@@ -466,6 +602,7 @@ export function createMediaRouter(storage, routerService) {
       });
       const upstreamRes = await fetch(upstreamUrl, {
         method: "POST",
+        signal: AbortSignal.timeout(Number(storage.getSettings().timeoutMs) || 120_000),
         headers,
         body: JSON.stringify(upstreamPayload),
         ...(dispatcher ? { dispatcher } : {})
@@ -570,6 +707,11 @@ export function createMediaRouter(storage, routerService) {
     delete upstreamPayload.provider;
 
     const dispatcher = getProxyDispatcher(provider, storage);
+    const speechAbort = new AbortController();
+    const onSpeechClose = () => {
+      if (!res.writableEnded) speechAbort.abort();
+    };
+    res.on("close", onSpeechClose);
 
     try {
       const { secret: authSecret, extraHeaders } = await resolveAuthContextForKey(keyEntry, {
@@ -580,8 +722,10 @@ export function createMediaRouter(storage, routerService) {
         ...extraHeaders,
         "content-type": "application/json"
       });
+      const timeoutSignal = AbortSignal.timeout(Number(storage.getSettings().timeoutMs) || 120_000);
       const upstreamRes = await fetch(upstreamUrl, {
         method: "POST",
+        signal: AbortSignal.any([speechAbort.signal, timeoutSignal]),
         headers,
         body: JSON.stringify(upstreamPayload),
         ...(dispatcher ? { dispatcher } : {})
@@ -633,24 +777,35 @@ export function createMediaRouter(storage, routerService) {
 
       if (upstreamRes.body) {
         const reader = upstreamRes.body.getReader();
-        while (true) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          if (value && value.length > 0) {
-            res.write(Buffer.from(value));
+        try {
+          while (true) {
+            if (speechAbort.signal.aborted || res.writableEnded) {
+              await reader.cancel().catch(() => {});
+              break;
+            }
+            const { value, done } = await reader.read();
+            if (done) break;
+            if (value && value.length > 0 && !res.writableEnded) {
+              res.write(Buffer.from(value));
+            }
           }
+        } finally {
+          reader.releaseLock();
         }
-        return res.end();
+        return res.writableEnded ? undefined : res.end();
       }
 
       const audioBuf = Buffer.from(await upstreamRes.arrayBuffer());
       return res.send(audioBuf);
     } catch (err) {
+      if (speechAbort.signal.aborted || res.writableEnded) return;
       const cleanMsg = sanitizeSecrets(
         err?.message || "Upstream speech synthesis failed",
         collectAllSecrets(storage)
       );
       return sendV1Error(res, 502, cleanMsg);
+    } finally {
+      res.removeListener("close", onSpeechClose);
     }
   });
 
@@ -665,7 +820,20 @@ export function createMediaRouter(storage, routerService) {
     try {
       rawBuffer = await readRawRequestBuffer(req);
     } catch (err) {
-      return sendV1Error(res, 400, err?.message || "Failed to read transcription body");
+      const status = Number(err?.status) || 400;
+      if (status === 413 || status === 408) {
+        res.setHeader("Connection", "close");
+        res.once("finish", () => {
+          if (!req.complete) {
+            req.socket?.end();
+            const forceClose = setTimeout(() => {
+              if (!req.destroyed) req.destroy();
+            }, 250);
+            forceClose.unref?.();
+          }
+        });
+      }
+      return sendV1Error(res, status, err?.message || "Failed to read transcription body");
     }
 
     // Extract optional model or provider hint from multipart form or JSON body or query
@@ -684,13 +852,7 @@ export function createMediaRouter(storage, routerService) {
     }
 
     if (!extractedModel && rawContentType.includes("multipart/form-data") && rawBuffer.length > 0) {
-      const previewStr = rawBuffer.toString("latin1");
-      const match = previewStr.match(
-        /Content-Disposition:\s*form-data;\s*name="model"\r?\n\r?\n([^\r\n]+)/i
-      );
-      if (match && match[1]) {
-        extractedModel = match[1].trim();
-      }
+      extractedModel = extractMultipartModelField(rawBuffer);
     }
 
     const resolved = resolveMediaProviderAndModel(storage, routerService, {
@@ -720,7 +882,7 @@ export function createMediaRouter(storage, routerService) {
       );
     }
 
-    // If multipart body contains `<providerSlug>/<upstreamModel>`, rewrite to `<upstreamModel>`
+    // If multipart body contains `<providerSlug>/<upstreamModel>`, rewrite binary-safely to `<upstreamModel>`
     let forwardBuffer = rawBuffer;
     if (
       extractedModel &&
@@ -728,9 +890,7 @@ export function createMediaRouter(storage, routerService) {
       upstreamModel &&
       rawContentType.includes("multipart/form-data")
     ) {
-      const str = rawBuffer.toString("latin1");
-      const replaced = str.replace(extractedModel, upstreamModel);
-      forwardBuffer = Buffer.from(replaced, "latin1");
+      forwardBuffer = replaceUtf8SequenceInBuffer(rawBuffer, extractedModel, upstreamModel);
     }
 
     const keyEntry = keySelection.keys[0];
@@ -752,6 +912,7 @@ export function createMediaRouter(storage, routerService) {
       });
       const upstreamRes = await fetch(upstreamUrl, {
         method: "POST",
+        signal: AbortSignal.timeout(Number(storage.getSettings().timeoutMs) || 120_000),
         headers,
         body: forwardBuffer,
         ...(dispatcher ? { dispatcher } : {})
@@ -956,6 +1117,7 @@ export function createMediaRouter(storage, routerService) {
 
       const upstreamRes = await fetch(reqUrl, {
         method: reqMethod,
+        signal: AbortSignal.timeout(Number(storage.getSettings().timeoutMs) || 120_000),
         headers: reqHeaders,
         ...(reqBody ? { body: reqBody } : {}),
         ...(dispatcher ? { dispatcher } : {})
@@ -1038,8 +1200,9 @@ export function createMediaRouter(storage, routerService) {
       return sendV1Error(res, 400, "Missing or invalid 'url' field");
     }
 
+    let parsedTarget;
     try {
-      const parsedTarget = new URL(targetUrl);
+      parsedTarget = new URL(targetUrl);
       const ssrf = classifyHostForSSRF(parsedTarget.hostname);
       if (ssrf.isMetadataOrLinkLocal || ssrf.isPrivateLan || ssrf.isLoopback) {
         return sendV1Error(
@@ -1092,6 +1255,11 @@ export function createMediaRouter(storage, routerService) {
       return;
     }
 
+    const dnsCheck = await checkResolvedHostForSSRF(parsedTarget.hostname);
+    if (!dnsCheck.ok) {
+      return sendV1Error(res, 400, `SSRF guard: ${dnsCheck.reason}`);
+    }
+
     const keySelection = routerService.getOrderedActiveKeys(provider);
     if (keySelection.keys.length === 0) {
       return sendV1Error(
@@ -1142,8 +1310,10 @@ export function createMediaRouter(storage, routerService) {
         });
       }
 
+      const fetchTimeoutMs = Number(storage.getSettings().timeoutMs) || 120_000;
       let upstreamRes = await fetch(reqUrl, {
         method: reqMethod,
+        signal: AbortSignal.timeout(fetchTimeoutMs),
         headers: reqHeaders,
         ...(reqBody ? { body: reqBody } : {}),
         ...(dispatcher ? { dispatcher } : {})
@@ -1151,8 +1321,10 @@ export function createMediaRouter(storage, routerService) {
 
       // Fallback to /scrape if mock upstream only implements /scrape
       if (upstreamRes.status === 404 && !reqUrl.endsWith("/scrape")) {
+        await upstreamRes.body?.cancel?.().catch(() => {});
         upstreamRes = await fetch(`${baseUrl}/scrape`, {
           method: "POST",
+          signal: AbortSignal.timeout(fetchTimeoutMs),
           headers: buildServiceHeaders(provider, apiKey, {
             "content-type": "application/json",
             accept: "application/json"
@@ -1268,7 +1440,7 @@ export function createMediaRouter(storage, routerService) {
     if (providerFilter) {
       return res.json({
         provider: providerFilter,
-        voices: catalog[providerFilter] || catalog.openai
+        voices: Object.hasOwn(catalog, providerFilter) ? catalog[providerFilter] : catalog.openai
       });
     }
     return res.json({ voices: catalog });
@@ -1328,6 +1500,7 @@ export function createMediaRouter(storage, routerService) {
       });
       const upstreamRes = await fetch(upstreamUrl, {
         method: "POST",
+        signal: AbortSignal.timeout(Number(storage.getSettings().timeoutMs) || 120_000),
         headers,
         body: JSON.stringify(upstreamPayload),
         ...(dispatcher ? { dispatcher } : {})

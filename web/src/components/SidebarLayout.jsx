@@ -197,6 +197,7 @@ export function SidebarLayout() {
   const menuTriggerRef = useRef(null);
   const menuPopoverRef = useRef(null);
   const menuGroupRef = useRef(null);
+  const searchInputRef = useRef(null);
 
   const syncSettings = useCallback(async () => {
     try {
@@ -378,6 +379,30 @@ export function SidebarLayout() {
     [location.pathname, t]
   );
 
+  // Quick `/` keyboard shortcut to focus contextual header search when not typing in an input
+  useEffect(() => {
+    if (!meta.searchable) return undefined;
+    const onKeyDown = (e) => {
+      if (e.key !== '/' || e.ctrlKey || e.metaKey || e.altKey) return;
+      const tag = document.activeElement?.tagName;
+      if (
+        tag === 'INPUT' ||
+        tag === 'TEXTAREA' ||
+        tag === 'SELECT' ||
+        document.activeElement?.isContentEditable ||
+        document.querySelector('dialog:modal')
+      ) {
+        return;
+      }
+      if (searchInputRef.current && searchInputRef.current.offsetParent !== null) {
+        e.preventDefault();
+        searchInputRef.current.focus();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [meta.searchable]);
+
   const isMediaRoute = location.pathname.startsWith('/media-providers');
   const visibleDebugNav = useMemo(
     () => DEBUG_NAV.filter((item) => !item.requiresTranslator || enableTranslator),
@@ -391,7 +416,7 @@ export function SidebarLayout() {
         to={to}
         end={end}
         className={({ isActive }) =>
-          `group flex items-center justify-between gap-2.5 rounded-lg px-3 py-2 text-[13px] font-medium transition-colors focus-visible:outline-2 focus-visible:outline-[#E56A4A] ${
+          `r-nav-link group flex items-center justify-between gap-2.5 rounded-lg px-3 py-2 text-[13px] font-medium focus-visible:outline-2 focus-visible:outline-[#E56A4A] ${
             isActive
               ? 'bg-[#E56A4A]/14 text-[#E56A4A]'
               : 'text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)]'
@@ -443,7 +468,25 @@ export function SidebarLayout() {
                 <div className="truncate text-[15px] font-bold tracking-tight text-[var(--text-primary)]">
                   001Router
                 </div>
-                <div className="font-mono text-[11px] text-[var(--text-muted)]">v2.0.0</div>
+                <div className="flex items-center gap-1.5 font-mono text-[11px] text-[var(--text-muted)]">
+                  <span>v2.0.0</span>
+                  <span
+                    title={
+                      health.ok === true
+                        ? `Gateway online · :${health.port}`
+                        : health.ok === false
+                          ? 'Gateway unreachable'
+                          : 'Checking gateway status…'
+                    }
+                    className={`inline-block h-1.5 w-1.5 rounded-full ${
+                      health.ok === true
+                        ? 'bg-[var(--ux-mint)]'
+                        : health.ok === false
+                          ? 'bg-[var(--ux-danger)]'
+                          : 'bg-[var(--text-muted)]'
+                    }`}
+                  />
+                </div>
               </div>
             </div>
             <button
@@ -482,7 +525,7 @@ export function SidebarLayout() {
                   key={to}
                   to={to}
                   className={({ isActive }) =>
-                    `group flex items-center gap-2.5 rounded-lg px-3 py-1.5 text-[12.5px] font-medium transition-colors focus-visible:outline-2 focus-visible:outline-[#E56A4A] ${
+                    `r-nav-link group flex items-center gap-2.5 rounded-lg px-3 py-1.5 text-[12.5px] font-medium focus-visible:outline-2 focus-visible:outline-[#E56A4A] ${
                       isActive
                         ? 'bg-[#E56A4A]/14 text-[#E56A4A]'
                         : 'text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)]'
@@ -624,13 +667,22 @@ export function SidebarLayout() {
                   aria-hidden="true"
                 />
                 <input
+                  ref={searchInputRef}
                   type="search"
                   value={headerSearch}
                   onChange={(e) => setHeaderSearch(e.target.value)}
                   placeholder={t(meta.searchPlaceholderKey || 'common.search')}
                   aria-label={t(meta.searchPlaceholderKey || 'common.search')}
-                  className="field-input w-full py-1.5 pr-3 pl-8 text-xs"
+                  className="field-input w-full py-1.5 pr-7 pl-8 text-xs"
                 />
+                {!headerSearch ? (
+                  <kbd
+                    aria-hidden="true"
+                    className="pointer-events-none absolute inset-y-0 right-2 my-auto flex h-4.5 w-4.5 items-center justify-center rounded border border-[var(--border-subtle)] bg-[var(--bg-subtle)] font-mono text-[10px] font-medium text-[var(--text-muted)]"
+                  >
+                    /
+                  </kbd>
+                ) : null}
               </div>
             ) : null}
 

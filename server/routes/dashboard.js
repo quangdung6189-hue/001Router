@@ -39,16 +39,18 @@ import {
   openaiToClaudeRequest
 } from "../translator.js";
 import {
-  decryptExportBundle,
+  decryptExportBundleAsync,
   deriveRouterKeyFields,
-  encryptExportBundle
+  encryptExportBundleAsync
 } from "../security/crypto.js";
 import {
   createLoginRateLimiter,
+  createRateLimitMiddleware,
   extractClientIp
 } from "../security/ratelimit.js";
 import {
   classifyHostForSSRF,
+  isSafePropertyKey,
   maskProxyUrl,
   stripPrototypePollution,
   validateProviderBaseUrl
@@ -1515,6 +1517,16 @@ function parseQuotaLimit(raw, fieldName) {
 export function createDashboardRouter(storage, liveEvents = null) {
   const router = express.Router();
   const loginLimiter = createLoginRateLimiter();
+  const sensitiveCryptoRateLimit = createRateLimitMiddleware({
+    windowMs: 60_000,
+    maxRequests: Number(process.env.ROUTER001_SENSITIVE_RPM) || 25,
+    message: "Too many sensitive security operations. Please wait a minute and retry."
+  });
+  const heavyProbeRateLimit = createRateLimitMiddleware({
+    windowMs: 60_000,
+    maxRequests: Number(process.env.ROUTER001_PROBE_RPM) || 30,
+    message: "Too many bulk provider probes. Please wait a moment and retry."
+  });
 
   // --- Public Auth Endpoints ---
 
@@ -1776,7 +1788,7 @@ export function createDashboardRouter(storage, liveEvents = null) {
     return res.status(201).json({ provider: toPublicProvider(provider) });
   });
 
-  router.post("/providers/test-all", async (req, res) => {
+  router.post("/providers/test-all", heavyProbeRateLimit, async (req, res) => {
     const body = req.body || {};
     const categoryFilter =
       typeof body.category === "string" && body.category.trim()
@@ -4710,7 +4722,23 @@ export function createDashboardRouter(storage, liveEvents = null) {
       enabled: true,
       requestCount: 0,
       lastUsedAt: null,
-      createdAt: new Date().toISOString()
+      createdAt: new Date().toISOString(),
+      ...(body.access && typeof body.access === "object"
+        ? {
+            access: {
+              restricted: Boolean(body.access.restricted),
+              allow: Array.isArray(body.access.allow)
+                ? [
+                    ...new Set(
+                      body.access.allow
+                        .filter((x) => typeof x === "string" && x.trim())
+                        .map((x) => x.trim())
+                    )
+                  ]
+                : []
+            }
+          }
+        : {})
     };
 
     await storage.update((data) => {
@@ -5242,8 +5270,8 @@ export function createDashboardRouter(storage, liveEvents = null) {
       : typeof req.body?.target === "string"
         ? req.body.target.trim()
         : "";
-    if (!alias || !target) {
-      return res.status(400).json({ error: "Both 'alias' and 'model' are required" });
+    if (!alias || !target || !isSafePropertyKey(alias)) {
+      return res.status(400).json({ error: "Both valid 'alias' and 'model' are required" });
     }
     const aliases = await storage.setModelAlias(alias, target);
     return res.json({ ok: true, aliases });
@@ -5254,8 +5282,8 @@ export function createDashboardRouter(storage, liveEvents = null) {
       (typeof req.query.alias === "string" && req.query.alias.trim()) ||
       (typeof req.body?.alias === "string" && req.body.alias.trim()) ||
       "";
-    if (!alias) {
-      return res.status(400).json({ error: "alias is required" });
+    if (!alias || !isSafePropertyKey(alias)) {
+      return res.status(400).json({ error: "Valid alias is required" });
     }
     await storage.deleteModelAlias(alias);
     return res.json({ ok: true, aliases: storage.getModelAliases() });
@@ -5266,7 +5294,10 @@ export function createDashboardRouter(storage, liveEvents = null) {
       typeof req.query.provider === "string" ? req.query.provider.trim() : "";
     const all = storage.getDisabledModels();
     if (providerSlug) {
-      return res.json({ provider: providerSlug, ids: all[providerSlug] || [] });
+      return res.json({
+        provider: providerSlug,
+        ids: isSafePropertyKey(providerSlug) && Object.hasOwn(all, providerSlug) ? all[providerSlug] : []
+      });
     }
     return res.json({ disabledModels: all });
   });
@@ -5278,8 +5309,8 @@ export function createDashboardRouter(storage, liveEvents = null) {
       : typeof req.body?.id === "string" && req.body.id.trim()
         ? [req.body.id.trim()]
         : [];
-    if (!providerSlug || ids.length === 0) {
-      return res.status(400).json({ error: "provider and ids are required" });
+    if (!providerSlug || !isSafePropertyKey(providerSlug) || ids.length === 0) {
+      return res.status(400).json({ error: "Valid provider and ids are required" });
     }
     const next = await storage.disableModels(providerSlug, ids);
     return res.json({ ok: true, provider: providerSlug, ids: next });
@@ -5288,8 +5319,8 @@ export function createDashboardRouter(storage, liveEvents = null) {
   router.delete("/models/disabled", async (req, res) => {
     const providerSlug = typeof req.query.provider === "string" ? req.query.provider.trim() : "";
     const modelId = typeof req.query.id === "string" ? req.query.id.trim() : "";
-    if (!providerSlug || !modelId) {
-      return res.status(400).json({ error: "provider and id query params are required" });
+    if (!providerSlug || !isSafePropertyKey(providerSlug) || !modelId) {
+      return res.status(400).json({ error: "Valid provider and id query params are required" });
     }
     const next = await storage.enableModel(providerSlug, modelId);
     return res.json({ ok: true, provider: providerSlug, ids: next });
@@ -5299,7 +5330,11 @@ export function createDashboardRouter(storage, liveEvents = null) {
 
   router.get("/pricing", (_req, res) => {
     const customPricing = storage.getCustomPricing();
-    const pricing = getMergedPricingMap(PRESETS, customPricing);
+    const pricing = getMergedPricingMap(
+      PRESETS,
+      customPricing,
+      storage.getCustomPricingVersion?.() ?? -1
+    );
     return res.json({ pricing, customPricing });
   });
 
@@ -5308,7 +5343,7 @@ export function createDashboardRouter(storage, liveEvents = null) {
     const provider = typeof body.provider === "string" ? body.provider.trim().toLowerCase() : "";
     const model = typeof body.model === "string" ? body.model.trim() : "";
     const rate = normalizePricingRate(body.rate || body);
-    if (!provider || !model || !rate) {
+    if (!provider || !model || !rate || !isSafePropertyKey(provider) || !isSafePropertyKey(model)) {
       return res.status(400).json({ error: "Valid provider, model, and input/output pricing rates are required" });
     }
     const saved = await storage.setCustomPricing(provider, model, rate);
@@ -5317,17 +5352,28 @@ export function createDashboardRouter(storage, liveEvents = null) {
       provider,
       model,
       rate: saved,
-      pricing: getMergedPricingMap(PRESETS, storage.getCustomPricing())
+      pricing: getMergedPricingMap(
+        PRESETS,
+        storage.getCustomPricing(),
+        storage.getCustomPricingVersion?.() ?? -1
+      )
     });
   });
 
   router.delete("/pricing", async (req, res) => {
     const provider = typeof req.query.provider === "string" ? req.query.provider.trim().toLowerCase() : "";
     const model = typeof req.query.model === "string" ? req.query.model.trim() : "";
+    if ((provider && !isSafePropertyKey(provider)) || (model && !isSafePropertyKey(model))) {
+      return res.status(400).json({ error: "Invalid provider or model key" });
+    }
     await storage.resetCustomPricing(provider, model);
     return res.json({
       ok: true,
-      pricing: getMergedPricingMap(PRESETS, storage.getCustomPricing())
+      pricing: getMergedPricingMap(
+        PRESETS,
+        storage.getCustomPricing(),
+        storage.getCustomPricingVersion?.() ?? -1
+      )
     });
   });
 
@@ -5585,7 +5631,7 @@ export function createDashboardRouter(storage, liveEvents = null) {
   router.put("/settings", handleUpdateSettings);
   router.patch("/settings", handleUpdateSettings);
 
-  router.post("/settings/password", async (req, res) => {
+  router.post("/settings/password", sensitiveCryptoRateLimit, async (req, res) => {
     const body = req.body || {};
     const currentPassword =
       typeof body.currentPassword === "string" ? body.currentPassword : "";
@@ -5642,7 +5688,7 @@ export function createDashboardRouter(storage, liveEvents = null) {
     return res.json(getSecurityStatus(storage));
   });
 
-  router.post("/security/scan", async (_req, res) => {
+  router.post("/security/scan", sensitiveCryptoRateLimit, async (_req, res) => {
     const scanResult = await runSecurityScan({
       storage,
       dataDir: storage.dataDir,
@@ -6047,7 +6093,7 @@ export function createDashboardRouter(storage, liveEvents = null) {
 
   // --- Export & Import ---
 
-  router.get("/export", async (req, res) => {
+  router.get("/export", sensitiveCryptoRateLimit, async (req, res) => {
     const rawSecrets =
       typeof req.query.secrets === "string"
         ? req.query.secrets.trim().toLowerCase()
@@ -6140,14 +6186,20 @@ export function createDashboardRouter(storage, liveEvents = null) {
     };
 
     if (rawSecrets === "encrypted") {
-      const encryptedEnvelope = encryptExportBundle(bundle, passphrase);
-      return res.json(encryptedEnvelope);
+      try {
+        const encryptedEnvelope = await encryptExportBundleAsync(bundle, passphrase);
+        return res.json(encryptedEnvelope);
+      } catch (err) {
+        return res.status(Number(err?.status) || 400).json({
+          error: err?.message || "Failed to encrypt export bundle"
+        });
+      }
     }
 
     return res.json(bundle);
   });
 
-  router.post("/import", async (req, res) => {
+  router.post("/import", sensitiveCryptoRateLimit, async (req, res) => {
     const rawBody = stripPrototypePollution(req.body);
     if (!rawBody || typeof rawBody !== "object" || Array.isArray(rawBody)) {
       return res.status(400).json({ error: "Invalid import payload" });
@@ -6174,14 +6226,17 @@ export function createDashboardRouter(storage, liveEvents = null) {
         });
       }
       try {
-        const decrypted = decryptExportBundle(rawBody, passphrase);
+        const decrypted = await decryptExportBundleAsync(rawBody, passphrase);
         body = stripPrototypePollution(decrypted);
         if (rawBody.mode) {
           body.mode = rawBody.mode;
         }
-      } catch {
-        return res.status(400).json({
-          error: "Invalid passphrase or corrupted encrypted bundle"
+      } catch (err) {
+        return res.status(Number(err?.status) || 400).json({
+          error:
+            err?.status === 429
+              ? err.message
+              : "Invalid passphrase or corrupted encrypted bundle"
         });
       }
     }

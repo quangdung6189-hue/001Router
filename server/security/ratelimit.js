@@ -3,6 +3,7 @@ export const LOCKOUT_10_FAILURES_MS = 15 * 60 * 1000; // 15 minutes
 export const MAX_LOCKOUT_MS = 60 * 60 * 1000; // 60 minutes
 export const GLOBAL_WINDOW_MS = 60 * 1000;
 export const GLOBAL_MAX_FAILURES_PER_WINDOW = 50;
+export const MAX_TRACKED_IPS = 10_000;
 
 /**
  * Extract normalized client IP address from Express request.
@@ -41,12 +42,32 @@ export function computeLockoutDurationMs(failures) {
 }
 
 export class LoginRateLimiter {
-  constructor() {
+  constructor(options = {}) {
     /** @type {Map<string, { failures: number, lockedUntil: number, lastFailureAt: number }>} */
     this.byIp = new Map();
     /** @type {number[]} */
     this.globalFailureTimestamps = [];
     this.globalLockedUntil = 0;
+    this.maxEntries = Math.max(100, Number(options.maxEntries) || MAX_TRACKED_IPS);
+    this._lastPruneAt = 0;
+  }
+
+  _prune(now) {
+    if (this.byIp.size <= this.maxEntries && now - this._lastPruneAt < 60_000) {
+      return;
+    }
+    this._lastPruneAt = now;
+    const staleCutoff = now - MAX_LOCKOUT_MS;
+    for (const [ip, entry] of this.byIp.entries()) {
+      if (entry.lockedUntil <= now && entry.lastFailureAt < staleCutoff) {
+        this.byIp.delete(ip);
+      }
+    }
+    while (this.byIp.size > this.maxEntries) {
+      const oldestKey = this.byIp.keys().next().value;
+      if (oldestKey === undefined) break;
+      this.byIp.delete(oldestKey);
+    }
   }
 
   /**
@@ -100,6 +121,7 @@ export class LoginRateLimiter {
    * @returns {{ failures: number, lockedUntil: number, retryAfterSec: number }}
    */
   recordFailure(ip, now = Date.now()) {
+    this._prune(now);
     const key = String(ip || "127.0.0.1");
     const existing = this.byIp.get(key) || {
       failures: 0,
@@ -115,6 +137,8 @@ export class LoginRateLimiter {
       existing.lockedUntil = Math.max(existing.lockedUntil, now + lockoutMs);
     }
 
+    // Refresh insertion order for LRU eviction
+    this.byIp.delete(key);
     this.byIp.set(key, existing);
 
     // Track global failure rate within sliding 60s window
@@ -156,6 +180,144 @@ export class LoginRateLimiter {
   }
 }
 
-export function createLoginRateLimiter() {
-  return new LoginRateLimiter();
+export function createLoginRateLimiter(options = {}) {
+  return new LoginRateLimiter(options);
+}
+
+/**
+ * Bounded fixed-window + sliding-carryover rate limiter for DoS/flood protection across
+ * `/v1/*`, `/api/*`, and expensive amplification routes.
+ * Guarantees O(1) memory upper bound (`maxEntries`) and O(1) check/consume latency.
+ */
+export class BoundedRateLimiter {
+  /**
+   * @param {{ windowMs?: number, maxRequests?: number, maxEntries?: number }} [options]
+   */
+  constructor(options = {}) {
+    this.windowMs = Math.max(1000, Number(options.windowMs) || 60_000);
+    this.maxRequests = Math.max(1, Number(options.maxRequests) || 120);
+    this.maxEntries = Math.max(100, Number(options.maxEntries) || MAX_TRACKED_IPS);
+    /** @type {Map<string, { windowStart: number, count: number, prevCount: number }>} */
+    this.buckets = new Map();
+    this._lastSweep = 0;
+  }
+
+  _sweep(now) {
+    if (this.buckets.size < this.maxEntries && now - this._lastSweep < this.windowMs) {
+      return;
+    }
+    this._lastSweep = now;
+    const expireBefore = now - this.windowMs * 2;
+    for (const [k, b] of this.buckets.entries()) {
+      if (b.windowStart < expireBefore) {
+        this.buckets.delete(k);
+      }
+    }
+    while (this.buckets.size > this.maxEntries) {
+      const oldest = this.buckets.keys().next().value;
+      if (oldest === undefined) break;
+      this.buckets.delete(oldest);
+    }
+  }
+
+  /**
+   * Consume `weight` unit(s) for `key` and return allowance + remaining quota.
+   * @param {string} key
+   * @param {number} [now]
+   * @param {number} [weight]
+   */
+  consume(key, now = Date.now(), weight = 1) {
+    this._sweep(now);
+    const k = String(key || "127.0.0.1");
+    let bucket = this.buckets.get(k);
+    if (!bucket) {
+      bucket = { windowStart: now, count: 0, prevCount: 0 };
+    } else {
+      const elapsed = now - bucket.windowStart;
+      if (elapsed >= this.windowMs * 2) {
+        bucket.windowStart = now;
+        bucket.prevCount = 0;
+        bucket.count = 0;
+      } else if (elapsed >= this.windowMs) {
+        bucket.windowStart += this.windowMs;
+        bucket.prevCount = bucket.count;
+        bucket.count = 0;
+      }
+      // Refresh LRU position
+      this.buckets.delete(k);
+    }
+    this.buckets.set(k, bucket);
+
+    const elapsedInWindow = Math.max(0, Math.min(this.windowMs, now - bucket.windowStart));
+    const prevWeight = (this.windowMs - elapsedInWindow) / this.windowMs;
+    const effectiveCount = bucket.count + bucket.prevCount * prevWeight;
+
+    if (effectiveCount + weight > this.maxRequests) {
+      const retryAfterMs = Math.max(1000, this.windowMs - elapsedInWindow);
+      return {
+        allowed: false,
+        remaining: 0,
+        limit: this.maxRequests,
+        retryAfterSec: Math.max(1, Math.ceil(retryAfterMs / 1000))
+      };
+    }
+
+    bucket.count += weight;
+    const remaining = Math.max(0, Math.floor(this.maxRequests - (effectiveCount + weight)));
+    return {
+      allowed: true,
+      remaining,
+      limit: this.maxRequests,
+      retryAfterSec: 0
+    };
+  }
+
+  reset() {
+    this.buckets.clear();
+  }
+}
+
+/**
+ * Create an Express rate-limiting middleware backed by `BoundedRateLimiter`.
+ * @param {{
+ *   windowMs?: number,
+ *   maxRequests?: number,
+ *   maxEntries?: number,
+ *   message?: string,
+ *   keyGenerator?: (req: import("express").Request) => string,
+ *   skip?: (req: import("express").Request) => boolean
+ * }} [options]
+ */
+export function createRateLimitMiddleware(options = {}) {
+  const limiter = new BoundedRateLimiter(options);
+  const message = options.message || "Too many requests. Please slow down and try again shortly.";
+  const keyGen = options.keyGenerator || ((req) => extractClientIp(req));
+  const skip = options.skip || null;
+
+  const middleware = (req, res, next) => {
+    if (skip && skip(req)) return next();
+    const result = limiter.consume(keyGen(req));
+    res.setHeader("X-RateLimit-Limit", String(result.limit));
+    res.setHeader("X-RateLimit-Remaining", String(result.remaining));
+    if (!result.allowed) {
+      res.setHeader("Retry-After", String(result.retryAfterSec));
+      const p = String(req.originalUrl || req.path || "");
+      if (p.startsWith("/v1")) {
+        return res.status(429).json({
+          error: {
+            message,
+            type: "rate_limit_error",
+            retryAfterSec: result.retryAfterSec
+          }
+        });
+      }
+      return res.status(429).json({
+        error: message,
+        retryAfterSec: result.retryAfterSec
+      });
+    }
+    return next();
+  };
+  middleware.limiter = limiter;
+  return middleware;
 }

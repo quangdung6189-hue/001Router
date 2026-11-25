@@ -27,18 +27,23 @@ export function isLoopbackHost(host) {
 
 /**
  * Extract the lowercase hostname (no port, no IPv6 brackets) from a raw `Host` header value.
+ * Strictly validates syntax so malformed hosts like `[::1].evil.com` or `localhost:80:evil` are rejected.
  * @param {unknown} rawHost
  * @returns {string}
  */
 export function parseHostHeaderName(rawHost) {
   const v = String(rawHost || "").trim().toLowerCase();
-  if (!v) return "";
+  if (!v || v.length > 255) return "";
   if (v.startsWith("[")) {
-    const end = v.indexOf("]");
-    return end > 0 ? v.slice(1, end) : "";
+    const m = /^\[([0-9a-f:]+)\](?::(\d{1,5}))?$/i.exec(v);
+    if (!m) return "";
+    if (m[2] && Number(m[2]) > 65535) return "";
+    return net.isIPv6(m[1]) ? m[1] : "";
   }
-  const colon = v.lastIndexOf(":");
-  return (colon > -1 ? v.slice(0, colon) : v).replace(/\.+$/, "");
+  const m = /^([a-z0-9.-]+)(?::(\d{1,5}))?$/.exec(v);
+  if (!m) return "";
+  if (m[2] && Number(m[2]) > 65535) return "";
+  return m[1].replace(/\.+$/, "");
 }
 
 /**
@@ -85,7 +90,26 @@ export function createHostGuardMiddleware(options = {}) {
 }
 
 /**
- * Check whether an Origin or Referer URL matches the current request's Host header.
+ * Determine whether the incoming request arrived over HTTPS (only trusting `X-Forwarded-Proto`
+ * when Express `trust proxy` is enabled or running on Vercel).
+ * @param {import("express").Request} req
+ * @returns {boolean}
+ */
+function isTrustedHttpsRequest(req) {
+  if (!req) return false;
+  if (req.secure === true) return true;
+  const trustProxy = Boolean(process.env.VERCEL || req.app?.get?.("trust proxy"));
+  if (trustProxy) {
+    const proto = req.headers?.["x-forwarded-proto"];
+    if (typeof proto === "string" && proto.split(",")[0].trim().toLowerCase() === "https") {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Check whether an Origin or Referer URL matches the current request's Host header and scheme.
  * @param {string} originOrReferer
  * @param {import("express").Request} req
  * @returns {boolean}
@@ -98,6 +122,13 @@ export function isSameOriginUrl(originOrReferer, req) {
   if (!reqHost) return false;
   try {
     const parsed = new URL(originOrReferer.trim());
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return false;
+    }
+    const expectedProtocol = isTrustedHttpsRequest(req) ? "https:" : "http:";
+    if (parsed.protocol !== expectedProtocol) {
+      return false;
+    }
     return parsed.host.toLowerCase() === reqHost;
   } catch {
     return false;
@@ -115,6 +146,9 @@ export function createSecurityHeadersMiddleware() {
     res.setHeader("Referrer-Policy", "no-referrer");
     res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
     res.setHeader("Permissions-Policy", PERMISSIONS_POLICY_VALUE);
+    if (isTrustedHttpsRequest(req)) {
+      res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
+    }
 
     if (req.path === "/api" || req.path.startsWith("/api/")) {
       res.setHeader("Cache-Control", "no-store");
@@ -127,12 +161,16 @@ export function createSecurityHeadersMiddleware() {
 /**
  * Express middleware implementing CORS lockdown (Section 9.8 #4):
  * - `/api/*`: same-origin only (never reflects cross-origin Origin or sets Access-Control-Allow-Origin: *)
- * - `/v1/*`: allows `*` WITHOUT credentials (Bearer-token / x-api-key auth only)
+ * - `/v1/*` and `/v1beta/*`: allows `*` WITHOUT credentials (Bearer-token / x-api-key auth only)
  */
 export function createCorsMiddleware() {
   return (req, res, next) => {
     const isApi = req.path === "/api" || req.path.startsWith("/api/");
-    const isV1 = req.path === "/v1" || req.path.startsWith("/v1/");
+    const isV1 =
+      req.path === "/v1" ||
+      req.path.startsWith("/v1/") ||
+      req.path === "/v1beta" ||
+      req.path.startsWith("/v1beta/");
 
     if (isV1) {
       res.setHeader("Access-Control-Allow-Origin", "*");

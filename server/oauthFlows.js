@@ -75,7 +75,54 @@ export const KIMI_CODE_DEFAULT_MODELS = [
 export const OAUTH_STATE_TTL_MS = 600_000;
 export const OAUTH_STATE_TTL_SEC = Math.floor(OAUTH_STATE_TTL_MS / 1000);
 export const OAUTH2_TOKEN_REFRESH_BUFFER_MS = 5 * 60 * 1000;
+const OAUTH2_TOKEN_SOFT_REFRESH_MS = 10 * 60 * 1000;
+const OAUTH2_TOKEN_HARD_REFRESH_MS = OAUTH2_TOKEN_REFRESH_BUFFER_MS;
+const OAUTH2_CRED_CACHE_MAX = 256;
+const OAUTH2_TOKEN_CACHE_MAX = 1000;
 const MAX_PENDING_OAUTH_STATES = 200;
+
+const CACHED_PLATFORM = platform();
+const CACHED_ARCH = arch();
+let CACHED_HOSTNAME = "unknown";
+try {
+  CACHED_HOSTNAME = hostname() || "unknown";
+} catch {
+  CACHED_HOSTNAME = "unknown";
+}
+const CACHED_STAINLESS_OS = (() => {
+  switch (CACHED_PLATFORM) {
+    case "darwin":
+      return "MacOS";
+    case "win32":
+      return "Windows";
+    case "linux":
+      return "Linux";
+    case "freebsd":
+      return "FreeBSD";
+    default:
+      return `Other::${CACHED_PLATFORM}`;
+  }
+})();
+const CACHED_STAINLESS_ARCH = (() => {
+  switch (CACHED_ARCH) {
+    case "x64":
+      return "x64";
+    case "arm64":
+      return "arm64";
+    case "ia32":
+      return "x86";
+    default:
+      return `other::${CACHED_ARCH}`;
+  }
+})();
+const CACHED_KIMI_DEVICE_MODEL =
+  CACHED_PLATFORM === "darwin"
+    ? `macOS ${CACHED_ARCH}`
+    : CACHED_PLATFORM === "win32"
+      ? `Windows ${CACHED_ARCH}`
+      : CACHED_PLATFORM === "linux"
+        ? `Linux ${CACHED_ARCH}`
+        : `${CACHED_PLATFORM} ${CACHED_ARCH}`;
 
 export const DEFAULT_GITLAB_BASE_URL = "https://gitlab.com";
 export const DEFAULT_GITLAB_SCOPE = "api read_user";
@@ -252,8 +299,11 @@ const pendingPkceStates = new Map();
 /** @type {Map<string, { provider: string, tokenUrl: string, pollUrlBase: string, profileUrl: string, agentKeyUrl: string, clientId: string, clientSecret: string, scope: string, extra: Record<string, any>, createdAt: number, expiresAt: number }>} */
 const pendingDeviceFlows = new Map();
 
-/** @type {Map<string, { accessToken: string, expiresAt: number }>} */
+/** @type {Map<string, { accessToken: string, expiresAt: number, refreshToken?: string }>} */
 const oauth2TokenCache = new Map();
+
+/** @type {Map<string, { provider: string, clientId: string, clientSecret: string, refreshToken: string, storedAccessToken: string, storedExpiresAt: number, rawTokenUrl: string, effectiveTokenUrl: string, cacheKey: string }>} */
+const oauth2CredDescriptorCache = new Map();
 
 /** @type {Map<string, Promise<string>>} */
 const oauth2InFlightRefreshes = new Map();
@@ -1399,38 +1449,123 @@ export async function getGenericOAuthAccessToken(oauthCredsStringOrObj, options 
     forceRefresh = false
   } = options;
 
-  let rawObj = oauthCredsStringOrObj;
-  if (typeof oauthCredsStringOrObj === "string") {
-    try {
-      rawObj = JSON.parse(oauthCredsStringOrObj);
-    } catch {
-      throw createHttpError(400, "Stored OAuth2 credentials JSON is malformed");
+  let provider = "";
+  let clientId = "";
+  let clientSecret = "";
+  let refreshToken = "";
+  let storedAccessToken = "";
+  let storedExpiresAt = 0;
+  let rawTokenUrl = "";
+  let effectiveTokenUrl = "";
+  let cacheKey = "";
+
+  const allowLoop = Boolean(allowLoopback || tokenUrlOverride);
+  const descriptorKey =
+    typeof oauthCredsStringOrObj === "string"
+      ? `${allowLoop ? 1 : 0}\0${tokenUrlOverride || ""}\0${oauthCredsStringOrObj}`
+      : "";
+  const cachedDesc = descriptorKey ? oauth2CredDescriptorCache.get(descriptorKey) : null;
+
+  if (cachedDesc) {
+    ({
+      provider,
+      clientId,
+      clientSecret,
+      refreshToken,
+      storedAccessToken,
+      storedExpiresAt,
+      rawTokenUrl,
+      effectiveTokenUrl,
+      cacheKey
+    } = cachedDesc);
+  } else {
+    let rawObj = oauthCredsStringOrObj;
+    if (typeof oauthCredsStringOrObj === "string") {
+      try {
+        rawObj = JSON.parse(oauthCredsStringOrObj);
+      } catch {
+        throw createHttpError(400, "Stored OAuth2 credentials JSON is malformed");
+      }
+    }
+    if (!rawObj || typeof rawObj !== "object" || Array.isArray(rawObj)) {
+      throw createHttpError(400, "Stored OAuth2 credentials must be a JSON object");
+    }
+
+    const creds = stripPrototypePollution(rawObj);
+    provider = typeof creds.provider === "string" ? creds.provider.trim() : "";
+    clientId = typeof creds.clientId === "string" ? creds.clientId.trim() : "";
+    clientSecret =
+      typeof creds.clientSecret === "string" ? creds.clientSecret.trim() : "";
+    refreshToken =
+      typeof creds.refreshToken === "string" ? creds.refreshToken.trim() : "";
+    storedAccessToken =
+      typeof creds.accessToken === "string" ? creds.accessToken.trim() : "";
+    storedExpiresAt = Number(creds.expiresAt) || 0;
+    rawTokenUrl =
+      typeof tokenUrlOverride === "string" && tokenUrlOverride.trim()
+        ? tokenUrlOverride.trim()
+        : typeof creds.tokenUrl === "string"
+          ? creds.tokenUrl.trim()
+          : "";
+
+    if (refreshToken && rawTokenUrl) {
+      const parsedTokenUrl = validateOAuthEndpointUrl(rawTokenUrl, "tokenUrl", {
+        allowLoopback: allowLoop
+      });
+      effectiveTokenUrl = parsedTokenUrl.toString();
+      cacheKey = buildOAuth2CacheKey(clientId, refreshToken, effectiveTokenUrl);
+    }
+
+    if (descriptorKey) {
+      oauth2CredDescriptorCache.set(descriptorKey, {
+        provider,
+        clientId,
+        clientSecret,
+        refreshToken,
+        storedAccessToken,
+        storedExpiresAt,
+        rawTokenUrl,
+        effectiveTokenUrl,
+        cacheKey
+      });
+      while (oauth2CredDescriptorCache.size > OAUTH2_CRED_CACHE_MAX) {
+        oauth2CredDescriptorCache.delete(oauth2CredDescriptorCache.keys().next().value);
+      }
     }
   }
-  if (!rawObj || typeof rawObj !== "object" || Array.isArray(rawObj)) {
-    throw createHttpError(400, "Stored OAuth2 credentials must be a JSON object");
-  }
-
-  const creds = stripPrototypePollution(rawObj);
-  const clientId = typeof creds.clientId === "string" ? creds.clientId.trim() : "";
-  const clientSecret =
-    typeof creds.clientSecret === "string" ? creds.clientSecret.trim() : "";
-  const refreshToken =
-    typeof creds.refreshToken === "string" ? creds.refreshToken.trim() : "";
-  const storedAccessToken =
-    typeof creds.accessToken === "string" ? creds.accessToken.trim() : "";
-  const storedExpiresAt = Number(creds.expiresAt) || 0;
-  const rawTokenUrl =
-    typeof tokenUrlOverride === "string" && tokenUrlOverride.trim()
-      ? tokenUrlOverride.trim()
-      : typeof creds.tokenUrl === "string"
-        ? creds.tokenUrl.trim()
-        : "";
 
   const now = nowFn();
 
+  // Prefer in-memory refreshed token when fresher than storedAccessToken
+  if (!forceRefresh && cacheKey) {
+    const cached = oauth2TokenCache.get(cacheKey);
+    if (cached && cached.expiresAt - OAUTH2_TOKEN_HARD_REFRESH_MS > now) {
+      if (
+        cached.expiresAt - OAUTH2_TOKEN_SOFT_REFRESH_MS <= now &&
+        !oauth2InFlightRefreshes.has(cacheKey)
+      ) {
+        getGenericOAuthAccessToken(oauthCredsStringOrObj, {
+          ...options,
+          forceRefresh: true
+        }).catch(() => {});
+      }
+      return { accessToken: cached.accessToken, expiresAt: cached.expiresAt };
+    }
+  }
+
   if (!forceRefresh && storedAccessToken) {
-    if (!refreshToken || !rawTokenUrl || storedExpiresAt - OAUTH2_TOKEN_REFRESH_BUFFER_MS > now) {
+    if (!refreshToken || !rawTokenUrl || storedExpiresAt - OAUTH2_TOKEN_HARD_REFRESH_MS > now) {
+      if (
+        cacheKey &&
+        storedExpiresAt > 0 &&
+        storedExpiresAt - OAUTH2_TOKEN_SOFT_REFRESH_MS <= now &&
+        !oauth2InFlightRefreshes.has(cacheKey)
+      ) {
+        getGenericOAuthAccessToken(oauthCredsStringOrObj, {
+          ...options,
+          forceRefresh: true
+        }).catch(() => {});
+      }
       return { accessToken: storedAccessToken, expiresAt: storedExpiresAt };
     }
   }
@@ -1445,19 +1580,6 @@ export async function getGenericOAuthAccessToken(oauthCredsStringOrObj, options 
     );
   }
 
-  const parsedTokenUrl = validateOAuthEndpointUrl(rawTokenUrl, "tokenUrl", {
-    allowLoopback: Boolean(allowLoopback || tokenUrlOverride)
-  });
-  const effectiveTokenUrl = parsedTokenUrl.toString();
-  const cacheKey = buildOAuth2CacheKey(clientId, refreshToken, effectiveTokenUrl);
-
-  if (!forceRefresh) {
-    const cached = oauth2TokenCache.get(cacheKey);
-    if (cached && cached.expiresAt - OAUTH2_TOKEN_REFRESH_BUFFER_MS > now) {
-      return { accessToken: cached.accessToken, expiresAt: cached.expiresAt };
-    }
-  }
-
   const existingFlight = oauth2InFlightRefreshes.get(cacheKey);
   if (existingFlight && !forceRefresh) {
     const accessToken = await existingFlight;
@@ -1467,7 +1589,7 @@ export async function getGenericOAuthAccessToken(oauthCredsStringOrObj, options 
 
   const flightPromise = (async () => {
     const useJsonRefresh =
-      canonicalOAuthProvider(creds.provider) === "anthropic" ||
+      canonicalOAuthProvider(provider) === "anthropic" ||
       /anthropic\.com/i.test(effectiveTokenUrl);
     let contentType = "application/x-www-form-urlencoded";
     let body = "";
@@ -1493,6 +1615,7 @@ export async function getGenericOAuthAccessToken(oauthCredsStringOrObj, options 
     try {
       res = await fetchImpl(effectiveTokenUrl, {
         method: "POST",
+        signal: AbortSignal.timeout(15_000),
         headers: {
           "content-type": contentType,
           accept: "application/json"
@@ -1543,6 +1666,9 @@ export async function getGenericOAuthAccessToken(oauthCredsStringOrObj, options 
     const rotatedRefresh =
       typeof data?.refresh_token === "string" ? data.refresh_token.trim() : "";
     oauth2TokenCache.set(cacheKey, { accessToken, expiresAt, refreshToken: rotatedRefresh });
+    while (oauth2TokenCache.size > OAUTH2_TOKEN_CACHE_MAX) {
+      oauth2TokenCache.delete(oauth2TokenCache.keys().next().value);
+    }
     return accessToken;
   })();
 
@@ -1566,6 +1692,7 @@ export function clearOAuthFlowsStore() {
   pendingPkceStates.clear();
   pendingDeviceFlows.clear();
   oauth2TokenCache.clear();
+  oauth2CredDescriptorCache.clear();
   oauth2InFlightRefreshes.clear();
 }
 
@@ -1575,31 +1702,11 @@ export function clearOAuthFlowsStore() {
 // ---------------------------------------------------------------------------
 
 function mapStainlessOs() {
-  switch (platform()) {
-    case "darwin":
-      return "MacOS";
-    case "win32":
-      return "Windows";
-    case "linux":
-      return "Linux";
-    case "freebsd":
-      return "FreeBSD";
-    default:
-      return `Other::${platform()}`;
-  }
+  return CACHED_STAINLESS_OS;
 }
 
 function mapStainlessArch() {
-  switch (arch()) {
-    case "x64":
-      return "x64";
-    case "arm64":
-      return "arm64";
-    case "ia32":
-      return "x86";
-    default:
-      return `other::${arch()}`;
-  }
+  return CACHED_STAINLESS_ARCH;
 }
 
 export function isClaudeOAuthKey(keyEntry, secret = "") {
@@ -1629,28 +1736,14 @@ export function isKimiOAuthKey(keyEntry) {
 }
 
 export function buildKimiHeaders(deviceId = "") {
-  const osName = platform();
-  const architecture = arch();
-  let deviceModel = `${osName} ${architecture}`;
-  if (osName === "darwin") deviceModel = `macOS ${architecture}`;
-  else if (osName === "win32") deviceModel = `Windows ${architecture}`;
-  else if (osName === "linux") deviceModel = `Linux ${architecture}`;
-
-  let deviceName = "unknown";
-  try {
-    deviceName = hostname() || "unknown";
-  } catch {
-    deviceName = "unknown";
-  }
-
   const resolvedId =
     typeof deviceId === "string" && deviceId.trim() ? deviceId.trim() : `kimi-${Date.now()}`;
 
   return {
     "x-msh-platform": "9router",
     "x-msh-version": "2.0.0",
-    "x-msh-device-name": deviceName,
-    "x-msh-device-model": deviceModel,
+    "x-msh-device-name": CACHED_HOSTNAME,
+    "x-msh-device-model": CACHED_KIMI_DEVICE_MODEL,
     "x-msh-device-id": resolvedId
   };
 }
