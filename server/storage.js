@@ -7,11 +7,14 @@ import { nanoid } from "nanoid";
 import { Pool } from "pg";
 import { maskKey } from "./auth.js";
 import {
+  MASTER_KEY_FILENAME,
   decryptSecret,
+  deriveDatabaseMasterKey,
   deriveRouterKeyFields,
   encryptSecret,
   isEncrypted,
-  loadOrCreateMasterKey
+  loadOrCreateMasterKey,
+  normalizeMasterKeyBuffer
 } from "./security/crypto.js";
 import { isSafePropertyKey, redactSecrets } from "./security/redact.js";
 
@@ -193,6 +196,8 @@ export class Storage {
     this.pgPool = this.databaseUrl ? new Pool(buildPgPoolConfig(this.databaseUrl)) : null;
     this.data = null;
     this.masterKey = null;
+    /** @type {Buffer[]} */
+    this.fallbackMasterKeys = [];
     this._isDefaultPassword = true;
     this._initialRouterKey = null;
     this._lastSecurityScan = null;
@@ -202,11 +207,10 @@ export class Storage {
     this._deferredFirstAt = 0;
     this._deferredWaiters = [];
     this._pgUpdatedAt = 0;
+    this._lastPgPayload = "";
     this._pgSyncInFlight = null;
     this._lastCheckedPasswordHash = null;
     this._dirEnsured = false;
-    /** @type {Map<string, string>} cached AES-256-GCM ciphertext per plaintext secret */
-    this._encCache = new Map();
     /** @type {string[] | null} */
     this._redactionSecretsCache = null;
     this._customPricingVersion = 0;
@@ -286,16 +290,43 @@ export class Storage {
     return secrets;
   }
 
-  _encryptCached(plaintext) {
-    if (typeof plaintext !== "string" || !plaintext) return "";
-    const hit = this._encCache.get(plaintext);
-    if (hit) return hit;
-    const enc = encryptSecret(plaintext, this.masterKey);
-    if (this._encCache.size >= 512) {
-      this._encCache.delete(this._encCache.keys().next().value);
+  _safeDecryptSecret(value) {
+    if (typeof value !== "string" || !value) {
+      return { plaintext: "", ok: true, migrated: false };
     }
-    this._encCache.set(plaintext, enc);
-    return enc;
+    if (!isEncrypted(value)) {
+      return { plaintext: value, ok: true, migrated: true };
+    }
+    try {
+      return { plaintext: decryptSecret(value, this.masterKey), ok: true, migrated: false };
+    } catch {
+      for (const fbKey of this.fallbackMasterKeys || []) {
+        try {
+          return { plaintext: decryptSecret(value, fbKey), ok: true, migrated: true };
+        } catch {
+          // Try next fallback master key
+        }
+      }
+      return { plaintext: "", ok: false, migrated: false, rawCiphertext: value };
+    }
+  }
+
+  _decryptField(obj, prop, rawProp) {
+    const val = obj[prop];
+    if (typeof val !== "string" || !val) return false;
+    const res = this._safeDecryptSecret(val);
+    obj[prop] = res.plaintext;
+    if (!res.ok && res.rawCiphertext) {
+      Object.defineProperty(obj, rawProp, {
+        value: res.rawCiphertext,
+        enumerable: false,
+        configurable: true,
+        writable: true
+      });
+    } else if (rawProp in obj) {
+      delete obj[rawProp];
+    }
+    return res.migrated;
   }
 
   _decryptLoadedSecrets(loaded) {
@@ -307,30 +338,14 @@ export class Storage {
         if (!provider || !Array.isArray(provider.apiKeys)) continue;
         for (const keyEntry of provider.apiKeys) {
           if (!keyEntry || typeof keyEntry !== "object") continue;
-          if (typeof keyEntry.key === "string" && keyEntry.key) {
-            if (isEncrypted(keyEntry.key)) {
-              keyEntry.key = decryptSecret(keyEntry.key, this.masterKey);
-            } else {
-              needsSave = true;
-            }
+          if (this._decryptField(keyEntry, "key", "_rawEncKey")) {
+            needsSave = true;
           }
-          if (typeof keyEntry.serviceAccountJson === "string" && keyEntry.serviceAccountJson) {
-            if (isEncrypted(keyEntry.serviceAccountJson)) {
-              keyEntry.serviceAccountJson = decryptSecret(
-                keyEntry.serviceAccountJson,
-                this.masterKey
-              );
-            } else {
-              needsSave = true;
-            }
+          if (this._decryptField(keyEntry, "serviceAccountJson", "_rawEncSa")) {
+            needsSave = true;
           }
           if (typeof keyEntry.oauthCredentials === "string" && keyEntry.oauthCredentials) {
-            if (isEncrypted(keyEntry.oauthCredentials)) {
-              keyEntry.oauthCredentials = decryptSecret(
-                keyEntry.oauthCredentials,
-                this.masterKey
-              );
-            } else {
+            if (this._decryptField(keyEntry, "oauthCredentials", "_rawEncOAuth")) {
               needsSave = true;
             }
           } else if (
@@ -347,9 +362,7 @@ export class Storage {
     if (Array.isArray(loaded.proxyPools)) {
       for (const pool of loaded.proxyPools) {
         if (!pool || typeof pool.url !== "string" || !pool.url) continue;
-        if (isEncrypted(pool.url)) {
-          pool.url = decryptSecret(pool.url, this.masterKey);
-        } else {
+        if (this._decryptField(pool, "url", "_rawEncUrl")) {
           needsSave = true;
         }
       }
@@ -358,28 +371,25 @@ export class Storage {
     return needsSave;
   }
 
-  async refreshFromPostgres() {
+  async refreshFromPostgres(force = false) {
     if (!this.pgPool) return;
     if (this._pgSyncInFlight) return this._pgSyncInFlight;
     this._pgSyncInFlight = (async () => {
       try {
         const res = await this.pgPool.query(
-          this.data && this._pgUpdatedAt
-            ? "SELECT CASE WHEN EXTRACT(EPOCH FROM updated_at) = $1 THEN NULL ELSE payload END AS payload, EXTRACT(EPOCH FROM updated_at) AS ts FROM router001_state WHERE id = 'primary' LIMIT 1"
-            : "SELECT payload, EXTRACT(EPOCH FROM updated_at) AS ts FROM router001_state WHERE id = 'primary' LIMIT 1",
-          this.data && this._pgUpdatedAt ? [this._pgUpdatedAt] : undefined
+          "SELECT payload, EXTRACT(EPOCH FROM updated_at) AS ts FROM router001_state WHERE id = 'primary' LIMIT 1"
         );
         const row = res.rows[0];
-        if (!row) return;
+        if (!row?.payload) return;
         const remoteTs = Number(row.ts) || 0;
-        if (remoteTs && remoteTs === this._pgUpdatedAt && this.data) {
+        if (!force && row.payload === this._lastPgPayload && this.data) {
           return;
         }
-        if (!row.payload) return;
         const parsed = JSON.parse(row.payload);
         if (parsed && typeof parsed === "object") {
           this._decryptLoadedSecrets(parsed);
           this.data = parsed;
+          this._lastPgPayload = row.payload;
           this._pgUpdatedAt = remoteTs;
           this._customPricingVersion += 1;
           this._invalidateIndexes();
@@ -411,6 +421,10 @@ export class Storage {
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )
     `);
+    await this.pgPool.query(`
+      ALTER TABLE router001_state
+      ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    `);
     // Lock down Supabase public PostgREST API (ANON/authenticated keys get 0 access)
     await this.pgPool.query(`
       DO $$
@@ -427,7 +441,32 @@ export class Storage {
    */
   async init() {
     await fs.mkdir(this.dataDir, { recursive: true });
-    this.masterKey = await loadOrCreateMasterKey(this.dataDir);
+    this.masterKey = await loadOrCreateMasterKey(this.dataDir, {
+      databaseUrl: this.databaseUrl
+    });
+    this.fallbackMasterKeys = [];
+    const addFallbackKey = (buf) => {
+      if (
+        Buffer.isBuffer(buf) &&
+        buf.length === 32 &&
+        !buf.equals(this.masterKey) &&
+        !this.fallbackMasterKeys.some((k) => k.equals(buf))
+      ) {
+        this.fallbackMasterKeys.push(buf);
+      }
+    };
+    if (this.databaseUrl) {
+      addFallbackKey(deriveDatabaseMasterKey(this.databaseUrl));
+    }
+    try {
+      const localKeyRaw = await fs.readFile(path.join(this.dataDir, MASTER_KEY_FILENAME), "utf8");
+      if (localKeyRaw && localKeyRaw.trim()) {
+        addFallbackKey(normalizeMasterKeyBuffer(localKeyRaw.trim()));
+      }
+    } catch {
+      // ignore missing local .master.key
+    }
+
     let loaded = null;
     let needsSave = false;
 
@@ -439,6 +478,7 @@ export class Storage {
       if (res.rows[0]?.payload) {
         try {
           loaded = JSON.parse(res.rows[0].payload);
+          this._lastPgPayload = res.rows[0].payload;
           this._pgUpdatedAt = Number(res.rows[0].ts) || 0;
         } catch {
           loaded = null;
@@ -712,13 +752,13 @@ export class Storage {
         for (const k of p.apiKeys) {
           if (!k || typeof k !== "object") continue;
           if (typeof k.key === "string" && isEncrypted(k.key)) {
-            k.key = decryptSecret(k.key, this.masterKey);
+            this._decryptField(k, "key", "_rawEncKey");
           }
           if (typeof k.serviceAccountJson === "string" && isEncrypted(k.serviceAccountJson)) {
-            k.serviceAccountJson = decryptSecret(k.serviceAccountJson, this.masterKey);
+            this._decryptField(k, "serviceAccountJson", "_rawEncSa");
           }
           if (typeof k.oauthCredentials === "string" && isEncrypted(k.oauthCredentials)) {
-            k.oauthCredentials = decryptSecret(k.oauthCredentials, this.masterKey);
+            this._decryptField(k, "oauthCredentials", "_rawEncOAuth");
           } else if (k.oauthCredentials && typeof k.oauthCredentials === "object") {
             k.oauthCredentials = JSON.stringify(k.oauthCredentials);
           }
@@ -729,7 +769,7 @@ export class Storage {
     if (Array.isArray(data.proxyPools)) {
       for (const pool of data.proxyPools) {
         if (pool && typeof pool.url === "string" && isEncrypted(pool.url)) {
-          pool.url = decryptSecret(pool.url, this.masterKey);
+          this._decryptField(pool, "url", "_rawEncUrl");
         }
       }
     }
@@ -748,7 +788,7 @@ export class Storage {
       }
     }
 
-    // Build encrypted disk clone (reuses cached ciphertexts so log-only flushes do 0 AES encrypts)
+    // Build encrypted disk clone, preserving _rawEnc* if a ciphertext could not be decrypted
     const diskClone = {
       ...data,
       providers: Array.isArray(data.providers)
@@ -760,14 +800,18 @@ export class Storage {
                 ...k,
                 key:
                   typeof k.key === "string" && k.key
-                    ? this._encryptCached(k.key)
-                    : ""
+                    ? encryptSecret(k.key, this.masterKey)
+                    : k._rawEncKey || ""
               };
               if (typeof k.serviceAccountJson === "string" && k.serviceAccountJson) {
-                cloned.serviceAccountJson = this._encryptCached(k.serviceAccountJson);
+                cloned.serviceAccountJson = encryptSecret(k.serviceAccountJson, this.masterKey);
+              } else if (k._rawEncSa) {
+                cloned.serviceAccountJson = k._rawEncSa;
               }
               if (typeof k.oauthCredentials === "string" && k.oauthCredentials) {
-                cloned.oauthCredentials = this._encryptCached(k.oauthCredentials);
+                cloned.oauthCredentials = encryptSecret(k.oauthCredentials, this.masterKey);
+              } else if (k._rawEncOAuth) {
+                cloned.oauthCredentials = k._rawEncOAuth;
               }
               return cloned;
             })
@@ -779,8 +823,8 @@ export class Storage {
           ...pool,
           url:
             typeof pool.url === "string" && pool.url
-              ? this._encryptCached(pool.url)
-              : ""
+              ? encryptSecret(pool.url, this.masterKey)
+              : pool._rawEncUrl || ""
         }))
         : [],
       keys: Array.isArray(data.keys)
@@ -804,6 +848,7 @@ export class Storage {
          RETURNING EXTRACT(EPOCH FROM updated_at) AS ts`,
         [payload]
       );
+      this._lastPgPayload = payload;
       const writtenTs = Number(res.rows?.[0]?.ts) || 0;
       if (writtenTs) {
         this._pgUpdatedAt = writtenTs;
@@ -877,6 +922,7 @@ export class Storage {
   updateDeferred(mutator) {
     if (this.pgPool) return this.update(mutator);
     const result = mutator(this.data);
+    this._invalidateIndexes();
     this._scheduleDeferredPersist();
     return Promise.resolve(result);
   }
@@ -913,18 +959,29 @@ export class Storage {
   }
 
   decryptSecret(ciphertext) {
-    return decryptSecret(ciphertext, this.masterKey);
+    try {
+      return decryptSecret(ciphertext, this.masterKey);
+    } catch (firstErr) {
+      for (const fbKey of this.fallbackMasterKeys || []) {
+        try {
+          return decryptSecret(ciphertext, fbKey);
+        } catch {
+          // Try next fallback master key
+        }
+      }
+      throw firstErr;
+    }
   }
 
   getSessionSecret() {
     if (typeof process.env.SESSION_SECRET === "string" && process.env.SESSION_SECRET.trim()) {
       return process.env.SESSION_SECRET.trim();
     }
-    if (
-      typeof process.env.ROUTER001_MASTER_KEY === "string" &&
-      process.env.ROUTER001_MASTER_KEY.trim() &&
-      this.masterKey
-    ) {
+    const hasDeterministicMaster =
+      (typeof process.env.ROUTER001_MASTER_KEY === "string" &&
+        process.env.ROUTER001_MASTER_KEY.trim()) ||
+      Boolean(this.databaseUrl);
+    if (hasDeterministicMaster && this.masterKey) {
       return crypto
         .createHmac("sha256", this.masterKey)
         .update("001router-session-secret-v1")
@@ -1240,6 +1297,27 @@ export class Storage {
   async clearLogs() {
     return this.update((data) => {
       data.logs = [];
+    });
+  }
+
+  async persistProviderKeyOAuthCredentials(keyId, updatedCredentialsJson, expiresAt = 0) {
+    if (!keyId || typeof updatedCredentialsJson !== "string" || !updatedCredentialsJson) {
+      return false;
+    }
+    return this.updateDeferred((data) => {
+      for (const provider of data.providers || []) {
+        const targetKey = (provider?.apiKeys || []).find((k) => k && k.id === keyId);
+        if (!targetKey) continue;
+        targetKey.oauthCredentials = updatedCredentialsJson;
+        if (expiresAt > 0) {
+          targetKey.oauthMeta = {
+            ...(targetKey.oauthMeta || {}),
+            expiresAt: new Date(expiresAt).toISOString()
+          };
+        }
+        return true;
+      }
+      return false;
     });
   }
 

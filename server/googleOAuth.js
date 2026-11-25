@@ -819,8 +819,6 @@ export async function exchangeGoogleOAuthPkce({
  */
 const GOOGLE_CRED_CACHE_MAX = 256;
 const GOOGLE_TOKEN_CACHE_MAX = 1000;
-const GOOGLE_TOKEN_SOFT_REFRESH_MS = 10 * 60 * 1000;
-const GOOGLE_TOKEN_HARD_REFRESH_MS = GOOGLE_TOKEN_REFRESH_BUFFER_MS;
 /** @type {Map<string, { clientId: string, clientSecret: string, refreshToken: string, projectId: string, effectiveTokenUri: string, cacheKey: string }>} */
 const googleCredDescriptorCache = new Map();
 
@@ -907,16 +905,7 @@ export async function getGoogleOAuthAccessToken(oauthCredsStringOrObj, options =
   const now = nowFn();
   if (!forceRefresh) {
     const cached = googleTokenCache.get(cacheKey);
-    if (cached && cached.expiresAt - GOOGLE_TOKEN_HARD_REFRESH_MS > now) {
-      if (
-        cached.expiresAt - GOOGLE_TOKEN_SOFT_REFRESH_MS <= now &&
-        !googleInFlightRefreshes.has(cacheKey)
-      ) {
-        getGoogleOAuthAccessToken(oauthCredsStringOrObj, {
-          ...options,
-          forceRefresh: true
-        }).catch(() => {});
-      }
+    if (cached && cached.expiresAt - GOOGLE_TOKEN_REFRESH_BUFFER_MS > now) {
       return { accessToken: cached.accessToken, projectId };
     }
   }

@@ -234,8 +234,16 @@ export function buildVertexOpenAiBaseUrl(projectId, location = "us-central1") {
 const parsedSaCache = new Map();
 const PARSED_SA_CACHE_MAX = 256;
 const TOKEN_CACHE_MAX = 1000;
-const TOKEN_SOFT_REFRESH_BUFFER_MS = 10 * 60 * 1000;
-const TOKEN_HARD_REFRESH_BUFFER_MS = TOKEN_REFRESH_BUFFER_MS;
+/** @type {import("./storage.js").Storage | null} */
+let defaultOAuthStorage = null;
+
+/**
+ * Register the active Storage instance so refreshed OAuth credentials are persisted automatically.
+ * @param {import("./storage.js").Storage | null} storage
+ */
+export function setDefaultOAuthStorage(storage) {
+  defaultOAuthStorage = storage || null;
+}
 
 export async function getServiceAccountAccessToken(saJsonStringOrObj, options = {}) {
   const {
@@ -281,17 +289,7 @@ export async function getServiceAccountAccessToken(saJsonStringOrObj, options = 
   const now = nowFn();
   if (!forceRefresh) {
     const cached = tokenCache.get(cacheKey);
-    if (cached && cached.expiresAt - TOKEN_HARD_REFRESH_BUFFER_MS > now) {
-      // Soft pre-emptive background refresh when <10 min remain (zero TTFT stall)
-      if (
-        cached.expiresAt - TOKEN_SOFT_REFRESH_BUFFER_MS <= now &&
-        !inFlightRequests.has(cacheKey)
-      ) {
-        getServiceAccountAccessToken(sa, {
-          ...options,
-          forceRefresh: true
-        }).catch(() => {});
-      }
+    if (cached && cached.expiresAt - TOKEN_REFRESH_BUFFER_MS > now) {
       return cached.accessToken;
     }
 
@@ -475,6 +473,11 @@ export async function resolveAuthContextForKey(keyEntry, options = {}) {
     const { accessToken } = await getGeminiCliAccessToken(keyEntry.oauthCredentials, {
       fetchImpl: options.googleOAuthFetchImpl || options.fetchImpl,
       tokenUrlOverride: options.googleOAuthTokenUrl || options.tokenUrlOverride,
+      allowLoopbackTokenUri: Boolean(
+        options.allowLoopbackTokenUri ||
+          options.googleOAuthTokenUrl ||
+          options.tokenUrlOverride
+      ),
       dispatcher: options.dispatcher,
       nowFn: options.nowFn,
       forceRefresh: options.forceRefresh
@@ -482,7 +485,7 @@ export async function resolveAuthContextForKey(keyEntry, options = {}) {
     return { secret: accessToken, extraHeaders: {} };
   }
   if (keyEntry.authMethod === "oauth2" && keyEntry.oauthCredentials) {
-    const { accessToken } = await getGenericOAuthAccessToken(keyEntry.oauthCredentials, {
+    const tokenRes = await getGenericOAuthAccessToken(keyEntry.oauthCredentials, {
       fetchImpl: options.oauthFetchImpl || options.fetchImpl,
       tokenUrlOverride: options.oauthTokenUrlOverride || options.tokenUrlOverride,
       allowLoopback: Boolean(
@@ -494,6 +497,20 @@ export async function resolveAuthContextForKey(keyEntry, options = {}) {
       nowFn: options.nowFn,
       forceRefresh: options.forceRefresh
     });
+    const accessToken = tokenRes.accessToken;
+    if (tokenRes.refreshed && tokenRes.updatedCredentialsJson) {
+      keyEntry.oauthCredentials = tokenRes.updatedCredentialsJson;
+      const targetStorage = options.storage || defaultOAuthStorage;
+      if (targetStorage?.persistProviderKeyOAuthCredentials && keyEntry.id) {
+        targetStorage
+          .persistProviderKeyOAuthCredentials(
+            keyEntry.id,
+            tokenRes.updatedCredentialsJson,
+            tokenRes.expiresAt
+          )
+          .catch(() => {});
+      }
+    }
     const extraHeaders = {};
     if (isClaudeOAuthKey(keyEntry, accessToken)) {
       extraHeaders.authorization = `Bearer ${accessToken}`;

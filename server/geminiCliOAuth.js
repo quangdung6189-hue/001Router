@@ -263,8 +263,6 @@ export function buildAntigravityHeaders(accessToken) {
 export const GEMINI_CLI_PKCE_TTL_MS = 600_000;
 export const GEMINI_CLI_PKCE_TTL_SEC = Math.floor(GEMINI_CLI_PKCE_TTL_MS / 1000);
 export const GEMINI_CLI_TOKEN_REFRESH_BUFFER_MS = 5 * 60 * 1000;
-const GEMINI_CLI_TOKEN_SOFT_REFRESH_MS = 10 * 60 * 1000;
-const GEMINI_CLI_TOKEN_HARD_REFRESH_MS = GEMINI_CLI_TOKEN_REFRESH_BUFFER_MS;
 const GEMINI_CLI_CRED_CACHE_MAX = 256;
 const GEMINI_CLI_TOKEN_CACHE_MAX = 1000;
 const MAX_PENDING_STATES = 200;
@@ -2104,16 +2102,7 @@ export async function getGeminiCliAccessToken(credentials, options = {}) {
   const now = nowFn();
   if (!forceRefresh) {
     const cached = tokenCache.get(cacheKey);
-    if (cached && cached.expiresAt - GEMINI_CLI_TOKEN_HARD_REFRESH_MS > now) {
-      if (
-        cached.expiresAt - GEMINI_CLI_TOKEN_SOFT_REFRESH_MS <= now &&
-        !inflightRefreshes.has(cacheKey)
-      ) {
-        getGeminiCliAccessToken(credentials, {
-          ...options,
-          forceRefresh: true
-        }).catch(() => {});
-      }
+    if (cached && cached.expiresAt - GEMINI_CLI_TOKEN_REFRESH_BUFFER_MS > now) {
       return { accessToken: cached.accessToken, projectId };
     }
   }

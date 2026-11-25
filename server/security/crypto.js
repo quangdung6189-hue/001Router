@@ -45,15 +45,52 @@ export function normalizeMasterKeyBuffer(raw) {
 }
 
 /**
- * Load the 32-byte master key from `process.env.ROUTER001_MASTER_KEY` or `<dataDir>/.master.key`.
+ * Deterministically derive a 32-byte master key from a shared database URL when
+ * `ROUTER001_MASTER_KEY` is not explicitly configured, so multiple serverless instances
+ * sharing the same Postgres DB derive the exact same encryption key.
+ * @param {string} databaseUrl
+ * @returns {Buffer}
+ */
+export function deriveDatabaseMasterKey(databaseUrl) {
+  return crypto
+    .createHmac("sha256", "001router-pg-master-key-v1")
+    .update(String(databaseUrl || "").trim(), "utf8")
+    .digest();
+}
+
+/**
+ * Load the 32-byte master key from `process.env.ROUTER001_MASTER_KEY`, a shared
+ * `options.databaseUrl`, or `<dataDir>/.master.key`.
  * Creates `<dataDir>/.master.key` with 32 cryptographically random bytes (mode 0600) on first boot.
  * @param {string} dataDir
+ * @param {{ databaseUrl?: string }} [options]
  * @returns {Promise<Buffer>}
  */
-export async function loadOrCreateMasterKey(dataDir) {
+export async function loadOrCreateMasterKey(dataDir, options = {}) {
   const envKey = process.env.ROUTER001_MASTER_KEY;
   if (typeof envKey === "string" && envKey.trim()) {
     return normalizeMasterKeyBuffer(envKey.trim());
+  }
+
+  const dbUrl = typeof options?.databaseUrl === "string" ? options.databaseUrl.trim() : "";
+  if (dbUrl) {
+    const dbKey = deriveDatabaseMasterKey(dbUrl);
+    await fs.mkdir(dataDir, { recursive: true });
+    const keyPath = path.join(dataDir, MASTER_KEY_FILENAME);
+    try {
+      await fs.access(keyPath);
+    } catch {
+      try {
+        await fs.writeFile(keyPath, `${dbKey.toString("hex")}\n`, {
+          encoding: "utf8",
+          mode: 0o600,
+          flag: "wx"
+        });
+      } catch {
+        // ignore race or read-only filesystem
+      }
+    }
+    return dbKey;
   }
 
   await fs.mkdir(dataDir, { recursive: true });
@@ -103,12 +140,32 @@ export async function loadOrCreateMasterKey(dataDir) {
 /**
  * Synchronous master key loader fallback.
  * @param {string} dataDir
+ * @param {{ databaseUrl?: string }} [options]
  * @returns {Buffer}
  */
-export function loadOrCreateMasterKeySync(dataDir) {
+export function loadOrCreateMasterKeySync(dataDir, options = {}) {
   const envKey = process.env.ROUTER001_MASTER_KEY;
   if (typeof envKey === "string" && envKey.trim()) {
     return normalizeMasterKeyBuffer(envKey.trim());
+  }
+
+  const dbUrl = typeof options?.databaseUrl === "string" ? options.databaseUrl.trim() : "";
+  if (dbUrl) {
+    const dbKey = deriveDatabaseMasterKey(dbUrl);
+    fsSync.mkdirSync(dataDir, { recursive: true });
+    const keyPath = path.join(dataDir, MASTER_KEY_FILENAME);
+    if (!fsSync.existsSync(keyPath)) {
+      try {
+        fsSync.writeFileSync(keyPath, `${dbKey.toString("hex")}\n`, {
+          encoding: "utf8",
+          mode: 0o600,
+          flag: "wx"
+        });
+      } catch {
+        // ignore race or read-only filesystem
+      }
+    }
+    return dbKey;
   }
 
   fsSync.mkdirSync(dataDir, { recursive: true });

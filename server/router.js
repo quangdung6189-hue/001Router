@@ -54,7 +54,8 @@ import {
 } from "./proxy.js";
 import {
   resolveAuthContextForKey,
-  resolveAuthSecretForKey
+  resolveAuthSecretForKey,
+  setDefaultOAuthStorage
 } from "./serviceAccountAuth.js";
 import {
   claudeToOpenAIRequest,
@@ -628,6 +629,7 @@ export class RouterService {
    */
   constructor(storage, options = {}) {
     this.storage = storage;
+    setDefaultOAuthStorage(storage);
     this.options = options || {};
     this.liveEvents = options?.liveEvents || options?.appLocals?.liveEvents || null;
     /** @type {Map<string, number>} */

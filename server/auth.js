@@ -167,7 +167,11 @@ export function verifySessionToken(token, secret, expectedVersion) {
     if (!payload || typeof payload.exp !== "number" || payload.exp <= Date.now()) {
       return { valid: false };
     }
-    if (typeof expectedVersion === "number" && payload.ver !== expectedVersion) {
+    if (
+      typeof expectedVersion === "number" &&
+      typeof payload.ver === "number" &&
+      payload.ver !== expectedVersion
+    ) {
       return { valid: false };
     }
     return { valid: true, payload };
@@ -303,8 +307,14 @@ export function isRouterKeyModelAllowed(routerKey, requestedModel) {
   return set.has(reqNorm);
 }
 
+function cleanExtractedToken(val) {
+  if (typeof val !== "string") return "";
+  return val.trim().replace(/^["']+|["']+$/g, "").trim();
+}
+
 /**
- * Extract a router API token from Authorization Bearer or x-api-key headers.
+ * Extract a router API token from Authorization Bearer/bare, x-api-key, api-key,
+ * x-goog-api-key headers, or query params (`?key=` / `?api_key=`).
  * @param {import("express").Request} req
  * @returns {string}
  */
@@ -313,17 +323,23 @@ export function extractRouterApiKey(req) {
   if (typeof authHeader === "string") {
     const match = authHeader.match(/^Bearer\s+(.+)$/i);
     if (match && match[1]) {
-      return match[1].trim();
+      const cleaned = cleanExtractedToken(match[1]);
+      if (cleaned) return cleaned;
+    } else {
+      const bare = cleanExtractedToken(authHeader);
+      if (bare && !/\s/.test(bare)) {
+        return bare;
+      }
     }
   }
-  const xApiKey = req.headers?.["x-api-key"];
-  if (typeof xApiKey === "string" && xApiKey.trim()) {
-    return xApiKey.trim();
-  }
-  const xGoogApiKey = req.headers?.["x-goog-api-key"];
-  if (typeof xGoogApiKey === "string" && xGoogApiKey.trim()) {
-    return xGoogApiKey.trim();
-  }
+  const xApiKey = cleanExtractedToken(req.headers?.["x-api-key"]);
+  if (xApiKey) return xApiKey;
+  const apiKeyHeader = cleanExtractedToken(req.headers?.["api-key"]);
+  if (apiKeyHeader) return apiKeyHeader;
+  const xGoogApiKey = cleanExtractedToken(req.headers?.["x-goog-api-key"]);
+  if (xGoogApiKey) return xGoogApiKey;
+  const queryKey = cleanExtractedToken(req.query?.key ?? req.query?.api_key);
+  if (queryKey) return queryKey;
   return "";
 }
 
@@ -382,14 +398,21 @@ export function createRouterAuthMiddleware(storage, options = {}) {
       maxRequests: Number(process.env.ROUTER001_V1_AUTH_FAIL_RPM) || 60
     });
 
-  return (req, res, next) => {
+  return async (req, res, next) => {
     if (req._routerAuthVerified) {
       return next();
     }
     const token = extractRouterApiKey(req);
-    const keys = storage.getKeys();
-    const keysByHash = storage.getKeysByHashIndex?.() || null;
-    const matched = token ? matchRouterApiKey(token, keys, keysByHash) : null;
+    let keys = storage.getKeys();
+    let keysByHash = storage.getKeysByHashIndex?.() || null;
+    let matched = token ? matchRouterApiKey(token, keys, keysByHash) : null;
+
+    if (!matched && token && storage.pgPool && typeof storage.refreshFromPostgres === "function") {
+      await storage.refreshFromPostgres(true).catch(() => {});
+      keys = storage.getKeys();
+      keysByHash = storage.getKeysByHashIndex?.() || null;
+      matched = matchRouterApiKey(token, keys, keysByHash);
+    }
 
     if (isRouterKeyRequired(storage)) {
       if (!matched) {

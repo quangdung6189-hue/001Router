@@ -75,8 +75,6 @@ export const KIMI_CODE_DEFAULT_MODELS = [
 export const OAUTH_STATE_TTL_MS = 600_000;
 export const OAUTH_STATE_TTL_SEC = Math.floor(OAUTH_STATE_TTL_MS / 1000);
 export const OAUTH2_TOKEN_REFRESH_BUFFER_MS = 5 * 60 * 1000;
-const OAUTH2_TOKEN_SOFT_REFRESH_MS = 10 * 60 * 1000;
-const OAUTH2_TOKEN_HARD_REFRESH_MS = OAUTH2_TOKEN_REFRESH_BUFFER_MS;
 const OAUTH2_CRED_CACHE_MAX = 256;
 const OAUTH2_TOKEN_CACHE_MAX = 1000;
 const MAX_PENDING_OAUTH_STATES = 200;
@@ -299,13 +297,13 @@ const pendingPkceStates = new Map();
 /** @type {Map<string, { provider: string, tokenUrl: string, pollUrlBase: string, profileUrl: string, agentKeyUrl: string, clientId: string, clientSecret: string, scope: string, extra: Record<string, any>, createdAt: number, expiresAt: number }>} */
 const pendingDeviceFlows = new Map();
 
-/** @type {Map<string, { accessToken: string, expiresAt: number, refreshToken?: string }>} */
+/** @type {Map<string, { accessToken: string, expiresAt: number, refreshToken?: string, updatedCredentialsJson?: string }>} */
 const oauth2TokenCache = new Map();
 
-/** @type {Map<string, { provider: string, clientId: string, clientSecret: string, refreshToken: string, storedAccessToken: string, storedExpiresAt: number, rawTokenUrl: string, effectiveTokenUrl: string, cacheKey: string }>} */
+/** @type {Map<string, { provider: string, clientId: string, clientSecret: string, refreshToken: string, storedAccessToken: string, storedExpiresAt: number, rawTokenUrl: string, effectiveTokenUrl: string, cacheKey: string, baseCredsObj: Record<string, any> }>} */
 const oauth2CredDescriptorCache = new Map();
 
-/** @type {Map<string, Promise<string>>} */
+/** @type {Map<string, Promise<{ accessToken: string, expiresAt: number, refreshToken?: string, updatedCredentialsJson?: string }>>} */
 const oauth2InFlightRefreshes = new Map();
 
 function createHttpError(status, message) {
@@ -1458,6 +1456,7 @@ export async function getGenericOAuthAccessToken(oauthCredsStringOrObj, options 
   let rawTokenUrl = "";
   let effectiveTokenUrl = "";
   let cacheKey = "";
+  let baseCredsObj = null;
 
   const allowLoop = Boolean(allowLoopback || tokenUrlOverride);
   const descriptorKey =
@@ -1476,7 +1475,8 @@ export async function getGenericOAuthAccessToken(oauthCredsStringOrObj, options 
       storedExpiresAt,
       rawTokenUrl,
       effectiveTokenUrl,
-      cacheKey
+      cacheKey,
+      baseCredsObj
     } = cachedDesc);
   } else {
     let rawObj = oauthCredsStringOrObj;
@@ -1492,6 +1492,7 @@ export async function getGenericOAuthAccessToken(oauthCredsStringOrObj, options 
     }
 
     const creds = stripPrototypePollution(rawObj);
+    baseCredsObj = { ...creds };
     provider = typeof creds.provider === "string" ? creds.provider.trim() : "";
     clientId = typeof creds.clientId === "string" ? creds.clientId.trim() : "";
     clientSecret =
@@ -1526,7 +1527,8 @@ export async function getGenericOAuthAccessToken(oauthCredsStringOrObj, options 
         storedExpiresAt,
         rawTokenUrl,
         effectiveTokenUrl,
-        cacheKey
+        cacheKey,
+        baseCredsObj
       });
       while (oauth2CredDescriptorCache.size > OAUTH2_CRED_CACHE_MAX) {
         oauth2CredDescriptorCache.delete(oauth2CredDescriptorCache.keys().next().value);
@@ -1539,33 +1541,13 @@ export async function getGenericOAuthAccessToken(oauthCredsStringOrObj, options 
   // Prefer in-memory refreshed token when fresher than storedAccessToken
   if (!forceRefresh && cacheKey) {
     const cached = oauth2TokenCache.get(cacheKey);
-    if (cached && cached.expiresAt - OAUTH2_TOKEN_HARD_REFRESH_MS > now) {
-      if (
-        cached.expiresAt - OAUTH2_TOKEN_SOFT_REFRESH_MS <= now &&
-        !oauth2InFlightRefreshes.has(cacheKey)
-      ) {
-        getGenericOAuthAccessToken(oauthCredsStringOrObj, {
-          ...options,
-          forceRefresh: true
-        }).catch(() => {});
-      }
+    if (cached && cached.expiresAt - OAUTH2_TOKEN_REFRESH_BUFFER_MS > now) {
       return { accessToken: cached.accessToken, expiresAt: cached.expiresAt };
     }
   }
 
   if (!forceRefresh && storedAccessToken) {
-    if (!refreshToken || !rawTokenUrl || storedExpiresAt - OAUTH2_TOKEN_HARD_REFRESH_MS > now) {
-      if (
-        cacheKey &&
-        storedExpiresAt > 0 &&
-        storedExpiresAt - OAUTH2_TOKEN_SOFT_REFRESH_MS <= now &&
-        !oauth2InFlightRefreshes.has(cacheKey)
-      ) {
-        getGenericOAuthAccessToken(oauthCredsStringOrObj, {
-          ...options,
-          forceRefresh: true
-        }).catch(() => {});
-      }
+    if (!refreshToken || !rawTokenUrl || storedExpiresAt - OAUTH2_TOKEN_REFRESH_BUFFER_MS > now) {
       return { accessToken: storedAccessToken, expiresAt: storedExpiresAt };
     }
   }
@@ -1582,10 +1564,24 @@ export async function getGenericOAuthAccessToken(oauthCredsStringOrObj, options 
 
   const existingFlight = oauth2InFlightRefreshes.get(cacheKey);
   if (existingFlight && !forceRefresh) {
-    const accessToken = await existingFlight;
-    const cached = oauth2TokenCache.get(cacheKey);
-    return { accessToken, expiresAt: cached?.expiresAt || now + 3600_000 };
+    const res = await existingFlight;
+    return {
+      accessToken: res.accessToken,
+      expiresAt: res.expiresAt,
+      ...(res.refreshToken ? { refreshToken: res.refreshToken } : {}),
+      refreshed: true,
+      ...(res.updatedCredentialsJson
+        ? { updatedCredentialsJson: res.updatedCredentialsJson }
+        : {})
+    };
   }
+
+  const cachedForRefresh = oauth2TokenCache.get(cacheKey);
+  const activeRefreshToken =
+    (cachedForRefresh &&
+      typeof cachedForRefresh.refreshToken === "string" &&
+      cachedForRefresh.refreshToken.trim()) ||
+    refreshToken;
 
   const flightPromise = (async () => {
     const useJsonRefresh =
@@ -1597,14 +1593,14 @@ export async function getGenericOAuthAccessToken(oauthCredsStringOrObj, options 
       contentType = "application/json";
       body = JSON.stringify({
         grant_type: "refresh_token",
-        refresh_token: refreshToken,
+        refresh_token: activeRefreshToken,
         ...(clientId ? { client_id: clientId } : {}),
         ...(clientSecret ? { client_secret: clientSecret } : {})
       });
     } else {
       const form = new URLSearchParams({
         grant_type: "refresh_token",
-        refresh_token: refreshToken
+        refresh_token: activeRefreshToken
       });
       if (clientId) form.set("client_id", clientId);
       if (clientSecret) form.set("client_secret", clientSecret);
@@ -1628,7 +1624,7 @@ export async function getGenericOAuthAccessToken(oauthCredsStringOrObj, options 
         502,
         redactSecrets(
           `OAuth2 token refresh network error: ${err?.message || "fetch failed"}`,
-          [clientSecret, refreshToken]
+          [clientSecret, activeRefreshToken]
         )
       );
     }
@@ -1639,7 +1635,7 @@ export async function getGenericOAuthAccessToken(oauthCredsStringOrObj, options 
         res.status >= 400 && res.status < 500 ? 401 : 502,
         redactSecrets(
           `OAuth2 token refresh failed (HTTP ${res.status}): ${rawText.slice(0, 200)}`,
-          [clientSecret, refreshToken]
+          [clientSecret, activeRefreshToken]
         )
       );
     }
@@ -1665,21 +1661,58 @@ export async function getGenericOAuthAccessToken(oauthCredsStringOrObj, options 
     const expiresAt = nowFn() + expiresInSec * 1000;
     const rotatedRefresh =
       typeof data?.refresh_token === "string" ? data.refresh_token.trim() : "";
-    oauth2TokenCache.set(cacheKey, { accessToken, expiresAt, refreshToken: rotatedRefresh });
+    const nextRefreshToken = rotatedRefresh || activeRefreshToken;
+    const updatedObj = {
+      ...(baseCredsObj || {}),
+      provider: provider || baseCredsObj?.provider || "",
+      clientId,
+      ...(clientSecret ? { clientSecret } : {}),
+      refreshToken: nextRefreshToken,
+      accessToken,
+      expiresAt,
+      ...(rawTokenUrl ? { tokenUrl: rawTokenUrl } : {})
+    };
+    const updatedCredentialsJson = JSON.stringify(updatedObj);
+
+    const cacheRecord = {
+      accessToken,
+      expiresAt,
+      refreshToken: nextRefreshToken,
+      updatedCredentialsJson
+    };
+    oauth2TokenCache.set(cacheKey, cacheRecord);
+    if (rotatedRefresh) {
+      const rotatedCacheKey = buildOAuth2CacheKey(clientId, rotatedRefresh, effectiveTokenUrl);
+      oauth2TokenCache.set(rotatedCacheKey, cacheRecord);
+    }
     while (oauth2TokenCache.size > OAUTH2_TOKEN_CACHE_MAX) {
       oauth2TokenCache.delete(oauth2TokenCache.keys().next().value);
     }
-    return accessToken;
+
+    if (cachedDesc) {
+      cachedDesc.refreshToken = nextRefreshToken;
+      cachedDesc.storedAccessToken = accessToken;
+      cachedDesc.storedExpiresAt = expiresAt;
+      cachedDesc.baseCredsObj = updatedObj;
+    }
+
+    return {
+      accessToken,
+      expiresAt,
+      ...(rotatedRefresh ? { refreshToken: rotatedRefresh } : {}),
+      updatedCredentialsJson
+    };
   })();
 
   oauth2InFlightRefreshes.set(cacheKey, flightPromise);
   try {
-    const accessToken = await flightPromise;
-    const cached = oauth2TokenCache.get(cacheKey);
+    const result = await flightPromise;
     return {
-      accessToken,
-      expiresAt: cached?.expiresAt || now + 3600_000,
-      ...(cached?.refreshToken ? { refreshToken: cached.refreshToken } : {})
+      accessToken: result.accessToken,
+      expiresAt: result.expiresAt,
+      ...(result.refreshToken ? { refreshToken: result.refreshToken } : {}),
+      refreshed: true,
+      updatedCredentialsJson: result.updatedCredentialsJson
     };
   } finally {
     if (oauth2InFlightRefreshes.get(cacheKey) === flightPromise) {
