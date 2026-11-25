@@ -2,7 +2,13 @@ import { upstreamFetch } from "./proxy.js";
 import crypto from "node:crypto";
 import { getGoogleOAuthAccessToken } from "./googleOAuth.js";
 import { getGeminiCliAccessToken } from "./geminiCliOAuth.js";
-import { getGenericOAuthAccessToken } from "./oauthFlows.js";
+import {
+  CLAUDE_CLI_VERSION,
+  buildKimiHeaders,
+  getGenericOAuthAccessToken,
+  isClaudeOAuthKey,
+  isKimiOAuthKey
+} from "./oauthFlows.js";
 import {
   classifyHostForSSRF,
   redactSecrets,
@@ -454,12 +460,15 @@ export async function resolveAuthContextForKey(keyEntry, options = {}) {
       forceRefresh: options.forceRefresh
     });
     const extraHeaders = {};
-    const oauthProvider = String(keyEntry.oauthMeta?.provider || "").toLowerCase();
-    if (oauthProvider === "claude" || oauthProvider === "anthropic") {
+    if (isClaudeOAuthKey(keyEntry, accessToken)) {
       extraHeaders.authorization = `Bearer ${accessToken}`;
       extraHeaders["anthropic-beta"] =
-        "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14";
+        "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27";
       extraHeaders["anthropic-dangerous-direct-browser-access"] = "true";
+      extraHeaders["user-agent"] = `claude-cli/${CLAUDE_CLI_VERSION} (external, sdk-cli)`;
+      extraHeaders["x-app"] = "cli";
+    } else if (isKimiOAuthKey(keyEntry)) {
+      Object.assign(extraHeaders, buildKimiHeaders(keyEntry.oauthMeta?.deviceId || keyEntry.id));
     }
     if (keyEntry.oauthMeta?.orgId) {
       extraHeaders["x-kilocode-organizationid"] = String(keyEntry.oauthMeta.orgId);
@@ -474,11 +483,20 @@ export async function resolveAuthContextForKey(keyEntry, options = {}) {
     return { secret: accessToken, extraHeaders: {} };
   }
   const extraHeaders = {};
+  const rawSecret = typeof keyEntry.key === "string" ? keyEntry.key : "";
+  if (isClaudeOAuthKey(keyEntry, rawSecret) && rawSecret) {
+    extraHeaders.authorization = `Bearer ${rawSecret}`;
+    extraHeaders["anthropic-beta"] =
+      "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27";
+    extraHeaders["anthropic-dangerous-direct-browser-access"] = "true";
+    extraHeaders["user-agent"] = `claude-cli/${CLAUDE_CLI_VERSION} (external, sdk-cli)`;
+    extraHeaders["x-app"] = "cli";
+  }
   if (keyEntry.oauthMeta?.orgId) {
     extraHeaders["x-kilocode-organizationid"] = String(keyEntry.oauthMeta.orgId);
   }
   return {
-    secret: typeof keyEntry.key === "string" ? keyEntry.key : "",
+    secret: rawSecret,
     extraHeaders
   };
 }

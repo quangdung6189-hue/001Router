@@ -75,9 +75,24 @@ import {
   startGoogleOAuthPkce
 } from "../googleOAuth.js";
 import {
+  CLAUDE_CODE_DEFAULT_MODELS,
+  CODEX_DEFAULT_MODELS,
+  KIMI_CODE_DEFAULT_MODELS,
+  KIMI_CODING_BASE_URL,
+  aggregateCodexResponsesStream,
+  buildClaudeOAuthMessagesRequest,
+  buildCodexOAuthRequest,
+  buildKimiHeaders,
   exchangeGenericOAuthPkce,
   extractCodeAndState,
+  fetchClaudeOAuthUsage,
+  fetchCodexOAuthUsage,
+  fetchKimiOAuthUsage,
+  getClaudeFallbackCandidates,
   getGenericOAuthAccessToken,
+  isClaudeOAuthKey,
+  isCodexOAuthKey,
+  isKimiOAuthKey,
   peekGenericPkceState,
   pollDeviceCodeFlow,
   restoreGenericPkceState,
@@ -890,6 +905,131 @@ function parseJsonOrNull(text) {
 }
 
 /**
+ * Sync plan tier, quota windows, and live model catalog for Claude, Codex, and Kimi OAuth accounts,
+ * then persist them onto the key (`oauthMeta`) and merge models into `provider.models`.
+ * Skips live external network fetches for loopback mock providers / offline test runs.
+ */
+async function syncOAuthAccountPlanAndModels(provider, keyEntry, storage, options = {}) {
+  if (!provider || !keyEntry) return null;
+  let resolvedSecret = typeof options.resolvedSecret === "string" ? options.resolvedSecret : "";
+  if (!resolvedSecret) {
+    try {
+      const ctx = await resolveAuthContextForKey(keyEntry, {
+        ...(options.saOptions || {}),
+        ...(options.dispatcher ? { dispatcher: options.dispatcher } : {}),
+        ...(options.forceRefresh ? { forceRefresh: true } : {})
+      });
+      resolvedSecret = ctx.secret;
+    } catch {
+      resolvedSecret = "";
+    }
+  }
+
+  const isClaude = isClaudeOAuthKey(keyEntry, resolvedSecret);
+  const isCodex = !isClaude && isCodexOAuthKey(keyEntry);
+  const isKimi = !isClaude && !isCodex && isKimiOAuthKey(keyEntry);
+  if (!isClaude && !isCodex && !isKimi) return null;
+
+  if (options.allowLoopback === true || isLocalUrl(provider.baseUrl)) {
+    return null;
+  }
+
+  const fetchImpl = options.fetchImpl || fetch;
+  const fetchUsageOnce = async (token) => {
+    if (isClaude) {
+      return fetchClaudeOAuthUsage(token, {
+        fetchImpl,
+        ...(options.dispatcher ? { dispatcher: options.dispatcher } : {})
+      });
+    }
+    if (isCodex) {
+      return fetchCodexOAuthUsage(token, {
+        accountId: keyEntry?.oauthMeta?.accountId || "",
+        fetchImpl,
+        ...(options.dispatcher ? { dispatcher: options.dispatcher } : {})
+      });
+    }
+    const isOAuth = keyEntry.authMethod === "oauth2" && Boolean(keyEntry.oauthCredentials);
+    return fetchKimiOAuthUsage(isOAuth ? token : "", isOAuth ? "" : token, {
+      deviceId: keyEntry?.oauthMeta?.deviceId || "",
+      fetchImpl,
+      ...(options.dispatcher ? { dispatcher: options.dispatcher } : {})
+    });
+  };
+
+  let usage;
+  try {
+    usage = await fetchUsageOnce(resolvedSecret);
+  } catch (err) {
+    if (Number(err?.status) === 401 && keyEntry.authMethod === "oauth2" && keyEntry.oauthCredentials) {
+      const ctx = await resolveAuthContextForKey(keyEntry, {
+        ...(options.saOptions || {}),
+        ...(options.dispatcher ? { dispatcher: options.dispatcher } : {}),
+        forceRefresh: true
+      });
+      resolvedSecret = ctx.secret;
+      usage = await fetchUsageOnce(resolvedSecret);
+    } else {
+      throw err;
+    }
+  }
+
+  const checkedAt = new Date().toISOString();
+  const billingStatus = usage.quotaOk || usage.planOk ? "active" : "unknown";
+  const liveIds =
+    Array.isArray(usage.liveModelIds) && usage.liveModelIds.length > 0
+      ? usage.liveModelIds
+      : Array.isArray(usage.models)
+        ? usage.models.map((m) => m.id).filter(Boolean)
+        : [];
+  const catalogChatIds = getCatalogChatModelIds(provider.preset);
+  let updatedProvider = null;
+  let updatedMeta = null;
+
+  await storage.update((data) => {
+    const target = data.providers.find((p) => p.id === provider.id);
+    if (!target) return;
+    const targetKey = (target.apiKeys || []).find((k) => k.id === keyEntry.id);
+    if (targetKey) {
+      targetKey.oauthMeta = {
+        ...mergeCloudCodeUsage(targetKey.oauthMeta, usage, checkedAt),
+        ...(usage.email ? { email: usage.email } : {}),
+        ...(usage.accountId ? { accountId: usage.accountId } : {}),
+        ...(usage.organizationId ? { organizationId: usage.organizationId } : {}),
+        ...(usage.organizationName ? { organizationName: usage.organizationName } : {}),
+        billingStatus,
+        modelsCount:
+          liveIds.length || (usage.models || []).length || (target.models || []).length
+      };
+      if (options.clearCooldown !== false) {
+        targetKey.cooldownUntil = null;
+        delete targetKey.lastError;
+      }
+      updatedMeta = targetKey.oauthMeta;
+    }
+    if (liveIds.length > 0 || (usage.models || []).length > 0) {
+      const modelIdsToMerge =
+        liveIds.length > 0 ? liveIds : (usage.models || []).map((m) => m.id).filter(Boolean);
+      target.models = options.replaceModels
+        ? [...new Set([...modelIdsToMerge, ...catalogChatIds])]
+        : [...new Set([...modelIdsToMerge, ...(target.models || []), ...catalogChatIds])];
+    }
+    target.updatedAt = checkedAt;
+    updatedProvider = target;
+  });
+
+  return {
+    providerType: isClaude ? "claude_oauth" : isCodex ? "codex_oauth" : "kimi_oauth",
+    usage,
+    liveIds,
+    catalogOnly: catalogChatIds.filter((id) => !liveIds.includes(id)),
+    updatedProvider: updatedProvider || storage.getProviderById(provider.id),
+    updatedMeta,
+    checkedAt
+  };
+}
+
+/**
  * Test connectivity to a single upstream provider using its active key.
  * @param {any} provider
  * @param {import("../storage.js").Storage} storage
@@ -993,6 +1133,235 @@ async function runProviderConnectionTest(
       };
     }
 
+    const isClaudeOAuth = !probeFlavor && isClaudeOAuthKey(keyEntry, resolvedSecret);
+    const isCodexOAuth = !probeFlavor && !isClaudeOAuth && isCodexOAuthKey(keyEntry);
+    const isKimiOAuth = !probeFlavor && !isClaudeOAuth && !isCodexOAuth && isKimiOAuthKey(keyEntry);
+    const isLoopbackBase = isLocalUrl(provider.baseUrl);
+
+    if (isClaudeOAuth && resolvedSecret && !isLoopbackBase) {
+      if (!requestedModel) {
+        try {
+          const usage = await fetchClaudeOAuthUsage(resolvedSecret, {
+            ...(dispatcher ? { dispatcher } : {})
+          });
+          clearTimeout(timer);
+          return {
+            ok: Boolean(usage.planOk || usage.quotaOk),
+            status: 200,
+            latencyMs: Date.now() - started,
+            message: `Connected (${usage.tierLabel} · ${(usage.models || []).length} models)`,
+            modelsCount: (usage.models || []).length,
+            oauthMeta: mergeCloudCodeUsage(keyEntry.oauthMeta, usage, new Date().toISOString())
+          };
+        } catch (err) {
+          clearTimeout(timer);
+          return {
+            ok: false,
+            status: Number(err?.status) || 0,
+            latencyMs: Date.now() - started,
+            message: sanitizeSecrets(err?.message || "Claude OAuth connection failed", secrets)
+          };
+        }
+      }
+
+      const baseProbeBody = {
+        messages: [{ role: "user", content: "Reply with the single word OK." }],
+        max_tokens: 16
+      };
+      const firstReq = buildClaudeOAuthMessagesRequest(
+        baseProbeBody,
+        resolvedSecret,
+        requestedModel,
+        {
+          baseUrl: provider.baseUrl || "https://api.anthropic.com",
+          availableModels: keyEntry?.oauthMeta?.availableModels
+        }
+      );
+      let chatRes = await fetch(firstReq.url, {
+        method: "POST",
+        headers: firstReq.headers,
+        body: JSON.stringify(firstReq.body),
+        signal: controller.signal,
+        ...(dispatcher ? { dispatcher } : {})
+      });
+      let usedModel = firstReq.resolvedModel;
+      if ((chatRes.status === 404 || chatRes.status === 400) && !controller.signal.aborted) {
+        const firstErr = await chatRes.text().catch(() => "");
+        const candidates = getClaudeFallbackCandidates(
+          usedModel,
+          keyEntry?.oauthMeta?.availableModels
+        ).slice(0, 2);
+        let fallbackOkRes = null;
+        let lastFallbackText = firstErr;
+        for (const cand of candidates) {
+          const candReq = buildClaudeOAuthMessagesRequest(baseProbeBody, resolvedSecret, cand, {
+            exactModel: true,
+            baseUrl: provider.baseUrl || "https://api.anthropic.com"
+          });
+          const candRes = await fetch(candReq.url, {
+            method: "POST",
+            headers: candReq.headers,
+            body: JSON.stringify(candReq.body),
+            signal: controller.signal,
+            ...(dispatcher ? { dispatcher } : {})
+          });
+          if (candRes.ok) {
+            fallbackOkRes = candRes;
+            usedModel = candReq.resolvedModel;
+            break;
+          }
+          lastFallbackText = await candRes.text().catch(() => "");
+          chatRes = candRes;
+        }
+        if (fallbackOkRes) {
+          chatRes = fallbackOkRes;
+        } else if (!fallbackOkRes && !chatRes.bodyUsed) {
+          chatRes = new Response(lastFallbackText, { status: chatRes.status, headers: chatRes.headers });
+        }
+      }
+      const resText = await chatRes.text().catch(() => "");
+      clearTimeout(timer);
+      return {
+        ok: chatRes.ok,
+        status: chatRes.status,
+        latencyMs: Date.now() - started,
+        model: usedModel,
+        message: chatRes.ok
+          ? `Connected using model '${usedModel}'`
+          : sanitizeSecrets(resText.slice(0, 200) || `HTTP ${chatRes.status}`, secrets)
+      };
+    }
+
+    if (isCodexOAuth && resolvedSecret && !isLoopbackBase) {
+      if (!requestedModel) {
+        try {
+          const usage = await fetchCodexOAuthUsage(resolvedSecret, {
+            accountId: keyEntry?.oauthMeta?.accountId || "",
+            ...(dispatcher ? { dispatcher } : {})
+          });
+          clearTimeout(timer);
+          return {
+            ok: Boolean(usage.planOk || usage.quotaOk),
+            status: 200,
+            latencyMs: Date.now() - started,
+            message: `Connected (${usage.tierLabel} · ${(usage.models || []).length} models)`,
+            modelsCount: (usage.models || []).length,
+            oauthMeta: mergeCloudCodeUsage(keyEntry.oauthMeta, usage, new Date().toISOString())
+          };
+        } catch (err) {
+          clearTimeout(timer);
+          return {
+            ok: false,
+            status: Number(err?.status) || 0,
+            latencyMs: Date.now() - started,
+            message: sanitizeSecrets(err?.message || "Codex OAuth connection failed", secrets)
+          };
+        }
+      }
+
+      const codexReq = buildCodexOAuthRequest(
+        { messages: [{ role: "user", content: "Reply with the single word OK." }] },
+        resolvedSecret,
+        requestedModel,
+        {
+          accountId: keyEntry?.oauthMeta?.accountId || "",
+          availableModels: keyEntry?.oauthMeta?.availableModels
+        }
+      );
+      const codexRes = await fetch(codexReq.url, {
+        method: "POST",
+        headers: codexReq.headers,
+        body: JSON.stringify(codexReq.body),
+        signal: controller.signal,
+        ...(dispatcher ? { dispatcher } : {})
+      });
+      const codexText = await codexRes.text().catch(() => "");
+      clearTimeout(timer);
+      const folded = codexRes.ok
+        ? aggregateCodexResponsesStream(codexText, codexReq.resolvedModel)
+        : null;
+      const ok = codexRes.ok && !folded?.error;
+      return {
+        ok,
+        status: codexRes.status,
+        latencyMs: Date.now() - started,
+        model: codexReq.resolvedModel,
+        message: ok
+          ? `Connected using model '${codexReq.resolvedModel}'`
+          : sanitizeSecrets(
+              folded?.error?.message || codexText.slice(0, 200) || `HTTP ${codexRes.status}`,
+              secrets
+            )
+      };
+    }
+
+    if (isKimiOAuth && resolvedSecret && !isLoopbackBase) {
+      if (!requestedModel) {
+        try {
+          const isOAuth = keyEntry.authMethod === "oauth2" && Boolean(keyEntry.oauthCredentials);
+          const usage = await fetchKimiOAuthUsage(isOAuth ? resolvedSecret : "", isOAuth ? "" : resolvedSecret, {
+            deviceId: keyEntry?.oauthMeta?.deviceId || "",
+            ...(dispatcher ? { dispatcher } : {})
+          });
+          clearTimeout(timer);
+          return {
+            ok: Boolean(usage.planOk || usage.quotaOk),
+            status: 200,
+            latencyMs: Date.now() - started,
+            message: `Connected (${usage.tierLabel} · ${(usage.models || []).length} models)`,
+            modelsCount: (usage.models || []).length,
+            oauthMeta: mergeCloudCodeUsage(keyEntry.oauthMeta, usage, new Date().toISOString())
+          };
+        } catch (err) {
+          clearTimeout(timer);
+          return {
+            ok: false,
+            status: Number(err?.status) || 0,
+            latencyMs: Date.now() - started,
+            message: sanitizeSecrets(err?.message || "Kimi OAuth connection failed", secrets)
+          };
+        }
+      }
+
+      const kimiBase = String(provider.baseUrl || "").toLowerCase().includes("moonshot.cn")
+        ? KIMI_CODING_BASE_URL
+        : provider.baseUrl;
+      const kimiHeaders = {
+        ...buildKimiHeaders(keyEntry?.oauthMeta?.deviceId || ""),
+        ...headers,
+        "content-type": "application/json"
+      };
+      const kimiUrl = buildUpstreamUrl(
+        kimiBase,
+        provider.formatType,
+        provider.formatType === "anthropic" ? "messages" : "chat/completions"
+      );
+      const kimiRes = await fetch(kimiUrl, {
+        method: "POST",
+        headers: kimiHeaders,
+        body: JSON.stringify({
+          model: requestedModel,
+          max_tokens: 16,
+          messages: [{ role: "user", content: "Reply OK" }]
+        }),
+        signal: controller.signal,
+        ...(dispatcher ? { dispatcher } : {})
+      });
+      const kimiText = await kimiRes.text().catch(() => "");
+      clearTimeout(timer);
+      return {
+        ok: kimiRes.ok,
+        status: kimiRes.status,
+        latencyMs: Date.now() - started,
+        model: requestedModel,
+        message: kimiRes.ok
+          ? `Connected using model '${requestedModel}'`
+          : sanitizeSecrets(kimiText.slice(0, 200) || `HTTP ${kimiRes.status}`, secrets)
+      };
+    }
+
+    const skipAltAuth = isClaudeOAuth || isCodexOAuth || isKimiOAuth;
+
     if (!requestedModel) {
       const modelsUrl = buildUpstreamUrl(
         provider.baseUrl,
@@ -1006,7 +1375,7 @@ async function runProviderConnectionTest(
         ...(dispatcher ? { dispatcher } : {})
       });
 
-      if ((modelsRes.status === 401 || modelsRes.status === 403) && resolvedSecret) {
+      if ((modelsRes.status === 401 || modelsRes.status === 403) && resolvedSecret && !skipAltAuth) {
         const altHeaders = buildAlternateAuthHeaders(headers, resolvedSecret);
         if (altHeaders) {
           const retryRes = await fetch(modelsUrl, {
@@ -1073,7 +1442,7 @@ async function runProviderConnectionTest(
       signal: controller.signal,
       ...(dispatcher ? { dispatcher } : {})
     });
-    if ((chatRes.status === 401 || chatRes.status === 403) && resolvedSecret) {
+    if ((chatRes.status === 401 || chatRes.status === 403) && resolvedSecret && !skipAltAuth) {
       const altHeaders = buildAlternateAuthHeaders(headers, resolvedSecret);
       if (altHeaders) {
         const retryChatRes = await fetch(testUrl, {
@@ -1262,6 +1631,7 @@ export function createDashboardRouter(storage, liveEvents = null) {
       target.updatedAt = new Date().toISOString();
       return target;
     });
+    req.app?.locals?.routerService?.clearProviderCooldowns(provider.id, keyId || null);
     return res.json({ ok: true, provider: toPublicProvider(updated) });
   });
 
@@ -2883,11 +3253,29 @@ export function createDashboardRouter(storage, liveEvents = null) {
         }
       });
 
+      let finalProvider = savedProvider;
+      let finalMeta = exchanged.oauthMeta;
+      const savedKey = (savedProvider?.apiKeys || []).find((k) => k.id === savedKeyId);
+      if (savedKey && !oauthOpts.allowLoopback && !isLocalUrl(savedProvider?.baseUrl)) {
+        try {
+          const synced = await syncOAuthAccountPlanAndModels(savedProvider, savedKey, storage, {
+            allowLoopback: oauthOpts.allowLoopback,
+            dispatcher: dispatcher || undefined,
+            saOptions: extractServiceAccountOptions(req)
+          });
+          if (synced?.updatedProvider) finalProvider = synced.updatedProvider;
+          if (synced?.updatedMeta) finalMeta = synced.updatedMeta;
+        } catch {
+          // Best-effort initial plan & model sync on connect.
+        }
+      }
+      req.app?.locals?.routerService?.clearProviderCooldowns(savedProvider?.id, savedKeyId || null);
+
       return res.json({
         ok: true,
         keyId: savedKeyId,
-        oauthMeta: exchanged.oauthMeta,
-        provider: toPublicProvider(savedProvider)
+        oauthMeta: finalMeta,
+        provider: toPublicProvider(finalProvider)
       });
     } catch (err) {
       return res.status(Number(err?.status) || 400).json({
@@ -3038,12 +3426,30 @@ export function createDashboardRouter(storage, liveEvents = null) {
         }
       });
 
+      let finalProvider = savedProvider;
+      let finalMeta = result.oauthMeta;
+      const savedKey = (savedProvider?.apiKeys || []).find((k) => k.id === savedKeyId);
+      if (savedKey && !oauthOpts.allowLoopback && !isLocalUrl(savedProvider?.baseUrl)) {
+        try {
+          const synced = await syncOAuthAccountPlanAndModels(savedProvider, savedKey, storage, {
+            allowLoopback: oauthOpts.allowLoopback,
+            dispatcher: dispatcher || undefined,
+            saOptions: extractServiceAccountOptions(req)
+          });
+          if (synced?.updatedProvider) finalProvider = synced.updatedProvider;
+          if (synced?.updatedMeta) finalMeta = synced.updatedMeta;
+        } catch {
+          // Best-effort initial plan & model sync on device auth connect.
+        }
+      }
+      req.app?.locals?.routerService?.clearProviderCooldowns(savedProvider?.id, savedKeyId || null);
+
       return res.json({
         status: "approved",
         ok: true,
         keyId: savedKeyId,
-        oauthMeta: result.oauthMeta,
-        provider: toPublicProvider(savedProvider)
+        oauthMeta: finalMeta,
+        provider: toPublicProvider(finalProvider)
       });
     } catch (err) {
       return res.status(Number(err?.status) || 400).json({
@@ -3183,6 +3589,14 @@ export function createDashboardRouter(storage, liveEvents = null) {
       requestedModel,
       saOptions
     );
+    if (result.ok) {
+      for (const k of provider.apiKeys || []) {
+        if (k.enabled !== false && k.id) {
+          await storage.clearProviderKeyCooldown(provider.id, k.id);
+        }
+      }
+      req.app?.locals?.routerService?.clearProviderCooldowns(provider.id);
+    }
     return res.json(result);
   });
 
@@ -3208,6 +3622,7 @@ export function createDashboardRouter(storage, liveEvents = null) {
     );
     if (result.ok) {
       await storage.clearProviderKeyCooldown(provider.id, keyEntry.id);
+      req.app?.locals?.routerService?.clearProviderCooldowns(provider.id, keyEntry.id);
     }
     return res.json({ keyId: keyEntry.id, ...result });
   });
@@ -3292,6 +3707,10 @@ export function createDashboardRouter(storage, liveEvents = null) {
           })
           .catch(() => {});
 
+        if (usage.planOk || usage.quotaOk) {
+          req.app?.locals?.routerService?.clearProviderCooldowns(provider.id, keyEntry.id);
+        }
+
         return res.json({
           ok: Boolean(usage.planOk || usage.quotaOk),
           keyId: keyEntry.id,
@@ -3302,8 +3721,11 @@ export function createDashboardRouter(storage, liveEvents = null) {
           tierLabel: usage.tierLabel || updatedMeta?.tierLabel || `${cloudFlavor.label} · Connected`,
           billingStatus,
           billingActive: usage.tier === "paid",
+          quotaWindows: updatedMeta?.quotaWindows || usage.windows || [],
+          availableModels: updatedMeta?.availableModels || usage.models || [],
           modelsCount,
           recommendedModels: catalogChatModelIds(usage.models).slice(0, 4),
+          provider: toPublicProvider(storage.getProviderById(provider.id)),
           latencyMs: Date.now() - started,
           checkedAt: nowIso
         });
@@ -3349,6 +3771,44 @@ export function createDashboardRouter(storage, liveEvents = null) {
       );
 
       const isLoopbackBase = isLocalUrl(provider.baseUrl);
+
+      // 1c. Claude Code OAuth, OpenAI Codex OAuth, Kimi Code OAuth -> live plan, quota windows & live models
+      const isClaudeOAuth = isClaudeOAuthKey(keyEntry, resolvedSecret);
+      const isCodexOAuth = !isClaudeOAuth && isCodexOAuthKey(keyEntry);
+      const isKimiOAuth = !isClaudeOAuth && !isCodexOAuth && isKimiOAuthKey(keyEntry);
+      if ((isClaudeOAuth || isCodexOAuth || isKimiOAuth) && !isLoopbackBase) {
+        const synced = await syncOAuthAccountPlanAndModels(provider, keyEntry, storage, {
+          resolvedSecret,
+          dispatcher,
+          saOptions,
+          allowLoopback: Boolean(
+            req.app?.locals?.oauthAllowLoopback || req.app?.locals?.allowLoopbackTokenUri
+          )
+        });
+        if (synced) {
+          const { usage, updatedProvider, updatedMeta, checkedAt, providerType } = synced;
+          req.app?.locals?.routerService?.clearProviderCooldowns(provider.id, keyEntry.id);
+          const chatModels = (usage.models || []).map((m) => m.id).filter(Boolean);
+          return res.json({
+            ok: Boolean(usage.planOk || usage.quotaOk),
+            keyId: keyEntry.id,
+            providerType,
+            authMethod: keyEntry.authMethod || "oauth2",
+            email: updatedMeta?.email || usage.email || "",
+            accountId: updatedMeta?.accountId || usage.accountId || "",
+            tierLabel: updatedMeta?.tierLabel || usage.tierLabel,
+            billingStatus: "active",
+            billingActive: true,
+            quotaWindows: updatedMeta?.quotaWindows || usage.windows || [],
+            availableModels: updatedMeta?.availableModels || usage.models || [],
+            modelsCount: chatModels.length || (updatedProvider?.models || []).length,
+            recommendedModels: chatModels.slice(0, 6),
+            provider: toPublicProvider(updatedProvider),
+            latencyMs: Date.now() - started,
+            checkedAt
+          });
+        }
+      }
 
       // 2. OpenRouter official /auth/key inspector (skip when baseUrl points to a custom third-party relay)
       if (
@@ -3601,6 +4061,10 @@ export function createDashboardRouter(storage, liveEvents = null) {
         modelsCount,
         checkedAt
       });
+      if (testRes.ok) {
+        await storage.clearProviderKeyCooldown(provider.id, keyEntry.id);
+        req.app?.locals?.routerService?.clearProviderCooldowns(provider.id, keyEntry.id);
+      }
       return res.json({
         ok: testRes.ok,
         keyId: keyEntry.id,
@@ -3610,6 +4074,7 @@ export function createDashboardRouter(storage, liveEvents = null) {
         billingStatus,
         billingMessage: testRes.message,
         modelsCount,
+        provider: toPublicProvider(storage.getProviderById(provider.id)),
         latencyMs: testRes.latencyMs ?? Date.now() - started,
         checkedAt
       });
@@ -3642,6 +4107,7 @@ export function createDashboardRouter(storage, liveEvents = null) {
         if (!updatedProvider) {
           return res.status(404).json({ error: "Provider not found" });
         }
+        req.app?.locals?.routerService?.clearProviderCooldowns(provider.id, keyEntry.id);
         return res.json({
           ok: true,
           keyId: keyEntry.id,
@@ -3674,13 +4140,13 @@ export function createDashboardRouter(storage, liveEvents = null) {
         }
 
         const nowIso = new Date().toISOString();
-        const updatedMeta = {
+        let updatedMeta = {
           ...(keyEntry.oauthMeta || {}),
           expiresAt: new Date(refreshed.expiresAt).toISOString(),
           checkedAt: nowIso
         };
 
-        const updatedProvider = await storage.update((data) => {
+        let updatedProvider = await storage.update((data) => {
           const target = data.providers.find((p) => p.id === provider.id);
           if (!target) return null;
           const targetKey = (target.apiKeys || []).find((k) => k.id === keyEntry.id);
@@ -3692,6 +4158,23 @@ export function createDashboardRouter(storage, liveEvents = null) {
           target.updatedAt = nowIso;
           return target;
         });
+
+        if (updatedProvider && !oauthOpts.allowLoopback && !isLocalUrl(provider.baseUrl)) {
+          try {
+            const updatedKey = (updatedProvider.apiKeys || []).find((k) => k.id === keyEntry.id) || keyEntry;
+            const synced = await syncOAuthAccountPlanAndModels(updatedProvider, updatedKey, storage, {
+              resolvedSecret: refreshed.accessToken,
+              allowLoopback: oauthOpts.allowLoopback,
+              dispatcher: dispatcher || undefined,
+              saOptions: extractServiceAccountOptions(req)
+            });
+            if (synced?.updatedProvider) updatedProvider = synced.updatedProvider;
+            if (synced?.updatedMeta) updatedMeta = synced.updatedMeta;
+          } catch {
+            // Best-effort quota/model refresh along with token refresh.
+          }
+        }
+        req.app?.locals?.routerService?.clearProviderCooldowns(provider.id, keyEntry.id);
 
         return res.json({
           ok: true,
@@ -3710,6 +4193,7 @@ export function createDashboardRouter(storage, liveEvents = null) {
           forceRefresh: true
         });
         await storage.clearProviderKeyCooldown(provider.id, keyEntry.id);
+        req.app?.locals?.routerService?.clearProviderCooldowns(provider.id, keyEntry.id);
         const refreshedProvider = storage.getProviderById(provider.id);
         return res.json({
           ok: true,
@@ -3831,6 +4315,64 @@ export function createDashboardRouter(storage, liveEvents = null) {
       }
     }
 
+    // Claude OAuth / Codex OAuth / Kimi Code OAuth accounts discover their live model catalog
+    // and quota windows through official OAuth usage/model endpoints.
+    const oauthModelKeys = (provider.apiKeys || []).filter(
+      (k) =>
+        k.enabled !== false &&
+        !getCloudCodeFlavorForKey(k) &&
+        (isClaudeOAuthKey(k) || isCodexOAuthKey(k) || isKimiOAuthKey(k))
+    );
+    if (oauthModelKeys.length > 0 && !isLocalUrl(provider.baseUrl)) {
+      const oauthOpts = extractOAuthFlowsOptions(req);
+      const allowLoopback = Boolean(
+        oauthOpts.allowLoopback || req.app?.locals?.allowLoopbackTokenUri
+      );
+      if (!allowLoopback) {
+        const syncedList = [];
+        let lastErr = null;
+        for (const k of oauthModelKeys) {
+          try {
+            const s = await syncOAuthAccountPlanAndModels(provider, k, storage, {
+              dispatcher,
+              saOptions,
+              allowLoopback,
+              replaceModels: replace && syncedList.length === 0
+            });
+            if (s) syncedList.push(s);
+          } catch (err) {
+            lastErr = err;
+          }
+        }
+        if (syncedList.length > 0) {
+          const latestProvider = storage.getProviderById(provider.id);
+          const catalogChatIds = getCatalogChatModelIds(provider.preset);
+          const liveIds = [...new Set(syncedList.flatMap((s) => s.liveIds || []))];
+          const liveSet = new Set(liveIds);
+          const catalogOnly = catalogChatIds.filter((id) => !liveSet.has(id));
+          req.app?.locals?.routerService?.clearProviderCooldowns(provider.id);
+          return res.json({
+            ok: true,
+            models: latestProvider?.models || [],
+            live: liveIds,
+            catalogOnly,
+            provider: toPublicProvider(latestProvider),
+            message: `Synced ${liveIds.length} live models from OAuth account (${catalogOnly.length} catalog-only merged)`
+          });
+        }
+        if (lastErr) {
+          return res.json({
+            ok: false,
+            models: provider.models || [],
+            message: sanitizeSecrets(
+              lastErr?.message || "Failed to sync OAuth account models",
+              collectProviderSecrets(provider)
+            )
+          });
+        }
+      }
+    }
+
     let resolvedSecret = "";
 
     const controller = new AbortController();
@@ -3918,15 +4460,38 @@ export function createDashboardRouter(storage, liveEvents = null) {
         const target = data.providers.find((p) => p.id === provider.id);
         if (target) {
           target.models = merged;
+          if (fetchedModels.length > 0) {
+            const targetKey = (target.apiKeys || []).find((k) => k.id === keyEntry.id);
+            if (targetKey) {
+              targetKey.oauthMeta = {
+                ...(targetKey.oauthMeta || {}),
+                availableModels: fetchedModels.map((id) => ({
+                  id,
+                  label: id,
+                  family: "claude_gpt",
+                  kind: "chat",
+                  isLive: true
+                })),
+                modelsCount: fetchedModels.length,
+                checkedAt: new Date().toISOString()
+              };
+            }
+          }
           target.updatedAt = new Date().toISOString();
         }
       });
+
+      const updatedProvider = storage.getProviderById(provider.id);
+      if (fetchedModels.length > 0) {
+        req.app?.locals?.routerService?.clearProviderCooldowns(provider.id, keyEntry.id);
+      }
 
       return res.json({
         ok: true,
         models: merged,
         live: fetchedModels,
         catalogOnly,
+        provider: toPublicProvider(updatedProvider),
         message: `Fetched ${fetchedModels.length} live models (${catalogOnly.length} catalog-only merged)`
       });
     } catch (err) {
@@ -5151,25 +5716,57 @@ export function createDashboardRouter(storage, liveEvents = null) {
       };
       const storedBudget = quotas[provider.id] || {};
 
-      // Live plan/quota for every Gemini CLI / Antigravity account of this provider — each key is
-      // its own Google account with its own plan and windows, so each gets its own entry.
-      const cliKeys = (provider.apiKeys || []).filter(
-        (k) => k.enabled !== false && getCloudCodeFlavorForKey(k) && k.oauthCredentials
+      // Live plan/quota for Cloud Code Assist, Claude OAuth, OpenAI Codex OAuth, Kimi Code OAuth,
+      // and any account with stored quota windows. Each key gets its own account entry.
+      const quotaKeys = (provider.apiKeys || []).filter(
+        (k) =>
+          k.enabled !== false &&
+          ((getCloudCodeFlavorForKey(k) && k.oauthCredentials) ||
+            isClaudeOAuthKey(k) ||
+            isCodexOAuthKey(k) ||
+            isKimiOAuthKey(k) ||
+            (Array.isArray(k.oauthMeta?.quotaWindows) && k.oauthMeta.quotaWindows.length > 0))
       );
-      const dispatcher = cliKeys.length ? getProxyDispatcher(provider, storage) : null;
+      const dispatcher = quotaKeys.length ? getProxyDispatcher(provider, storage) : null;
+      const isLoopbackBase = isLocalUrl(provider.baseUrl);
+      const skipLiveOAuthQuota = Boolean(
+        req.app?.locals?.oauthAllowLoopback || req.app?.locals?.allowLoopbackTokenUri
+      );
+      const saOptions = extractServiceAccountOptions(req);
       const cloudCodeAccounts = await Promise.all(
-        cliKeys.map(async (cliKey) => {
+        quotaKeys.map(async (cliKey) => {
           const cliFlavor = getCloudCodeFlavorForKey(cliKey);
+          const isClaudeOAuth = !cliFlavor && isClaudeOAuthKey(cliKey);
+          const isCodexOAuth = !cliFlavor && !isClaudeOAuth && isCodexOAuthKey(cliKey);
+          const isKimiOAuth = !cliFlavor && !isClaudeOAuth && !isCodexOAuth && isKimiOAuthKey(cliKey);
           const prev = cliKey.oauthMeta || {};
           const keyToday = todayByKey.get(cliKey.id) || { requests: 0, errors: 0 };
-          // Stored values (from sign-in / last refresh) when the live read fails.
+          const defaultFlavor = cliFlavor
+            ? cliFlavor.id
+            : isClaudeOAuth
+              ? "claude"
+              : isCodexOAuth
+                ? "codex"
+                : isKimiOAuth
+                  ? "kimi"
+                  : provider.preset || provider.slug;
+          const defaultTierLabel = cliFlavor
+            ? `${cliFlavor.label} · Connected`
+            : isClaudeOAuth
+              ? "Claude OAuth"
+              : isCodexOAuth
+                ? "OpenAI Codex"
+                : isKimiOAuth
+                  ? "Kimi Code"
+                  : provider.name || provider.slug;
+          // Stored values (from sign-in / last refresh) when the live read fails or isn't needed.
           const account = {
             keyId: cliKey.id,
             label: cliKey.label || cliKey.name || "",
-            flavor: cliFlavor.id,
+            flavor: defaultFlavor,
             email: prev.email || "",
             tier: prev.tier || "",
-            tierLabel: prev.tierLabel || `${cliFlavor.label} · Connected`,
+            tierLabel: prev.tierLabel || defaultTierLabel,
             projectId: prev.projectId || "",
             buckets: Array.isArray(prev.quotaBuckets) ? prev.quotaBuckets : [],
             windows: Array.isArray(prev.quotaWindows) ? prev.quotaWindows : [],
@@ -5183,21 +5780,57 @@ export function createDashboardRouter(storage, liveEvents = null) {
             error: ""
           };
           try {
-            const { accessToken } = await getGeminiCliAccessToken(cliKey.oauthCredentials, {
-              ...(dispatcher ? { dispatcher } : {}),
-              ...(cloudFetch ? { fetchImpl: cloudFetch } : {})
-            });
-            const usage = await fetchCloudCodeUsage(accessToken, {
-              projectId: account.projectId,
-              ...(dispatcher ? { dispatcher } : {}),
-              ...(cloudFetch ? { fetchImpl: cloudFetch } : {}),
-              flavor: cliFlavor.id
-            });
-            if (!usage.planOk && !usage.quotaOk) {
-              account.error = "Google did not return plan or quota for this account.";
+            let usage = null;
+            if (cliFlavor && cliKey.oauthCredentials) {
+              const { accessToken } = await getGeminiCliAccessToken(cliKey.oauthCredentials, {
+                ...(dispatcher ? { dispatcher } : {}),
+                ...(cloudFetch ? { fetchImpl: cloudFetch } : {})
+              });
+              usage = await fetchCloudCodeUsage(accessToken, {
+                projectId: account.projectId,
+                ...(dispatcher ? { dispatcher } : {}),
+                ...(cloudFetch ? { fetchImpl: cloudFetch } : {}),
+                flavor: cliFlavor.id
+              });
+              if (!usage.planOk && !usage.quotaOk) {
+                account.error = "Google did not return plan or quota for this account.";
+                return account;
+              }
+            } else if ((isClaudeOAuth || isCodexOAuth || isKimiOAuth) && !isLoopbackBase && !skipLiveOAuthQuota) {
+              const authCtx = await resolveAuthContextForKey(cliKey, {
+                ...saOptions,
+                ...(dispatcher ? { dispatcher } : {})
+              });
+              if (isClaudeOAuth) {
+                usage = await fetchClaudeOAuthUsage(authCtx.secret, {
+                  ...(dispatcher ? { dispatcher } : {})
+                });
+              } else if (isCodexOAuth) {
+                usage = await fetchCodexOAuthUsage(authCtx.secret, {
+                  accountId: prev.accountId || "",
+                  ...(dispatcher ? { dispatcher } : {})
+                });
+              } else {
+                const isOAuth = cliKey.authMethod === "oauth2" && Boolean(cliKey.oauthCredentials);
+                usage = await fetchKimiOAuthUsage(
+                  isOAuth ? authCtx.secret : "",
+                  isOAuth ? "" : authCtx.secret,
+                  {
+                    deviceId: prev.deviceId || "",
+                    ...(dispatcher ? { dispatcher } : {})
+                  }
+                );
+              }
+              if (!usage?.planOk && !usage?.quotaOk) {
+                account.error = usage?.warning || "Provider did not return plan or quota for this account.";
+                return account;
+              }
+            } else {
+              // Stored quota/catalog snapshot only (static key or offline loopback mode)
               return account;
             }
             Object.assign(account, {
+              ...(usage.email ? { email: usage.email } : {}),
               tier: usage.tier || account.tier,
               tierLabel: usage.tierLabel || account.tierLabel,
               projectId: usage.projectId || account.projectId,
@@ -5213,7 +5846,7 @@ export function createDashboardRouter(storage, liveEvents = null) {
                   : account.windows?.length
                     ? account.windows
                     : usage.windows || [],
-              perModelHidden: usage.perModelHidden,
+              perModelHidden: Boolean(usage.perModelHidden),
               ...(usage.catalogOk && Array.isArray(usage.models) && usage.models.length > 0
                 ? {
                     models: usage.models,
@@ -5240,7 +5873,18 @@ export function createDashboardRouter(storage, liveEvents = null) {
                   const k = (p?.apiKeys || []).find((x) => x.id === cliKey.id);
                   if (!k) return;
                   k.oauthMeta = mergeCloudCodeUsage(k.oauthMeta, usage, checkedAt);
-                  if (syncProviderModelsWithCatalog(p)) p.updatedAt = checkedAt;
+                  if (cliFlavor) {
+                    if (syncProviderModelsWithCatalog(p)) p.updatedAt = checkedAt;
+                  } else if (Array.isArray(usage.models) && usage.models.length > 0) {
+                    const liveIds = (usage.liveModelIds?.length
+                      ? usage.liveModelIds
+                      : usage.models.map((m) => m.id)
+                    ).filter(Boolean);
+                    if (liveIds.length > 0) {
+                      p.models = [...new Set([...liveIds, ...(p.models || []), ...getCatalogChatModelIds(p.preset)])];
+                      p.updatedAt = checkedAt;
+                    }
+                  }
                 })
                 .catch(() => {});
             }

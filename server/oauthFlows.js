@@ -1,11 +1,76 @@
 import { upstreamFetch } from "./proxy.js";
 import crypto from "node:crypto";
+import { arch, hostname, platform } from "node:os";
 import { isLoopbackHost } from "./security/headers.js";
 import {
   classifyHostForSSRF,
   redactSecrets,
   stripPrototypePollution
 } from "./security/redact.js";
+
+export const CLAUDE_CLI_VERSION = "2.1.322";
+export const CODEX_CLI_VERSION = "0.167.1";
+export const KIMI_CODING_BASE_URL = "https://api.kimi.com/coding/v1";
+export const CODEX_RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses";
+export const CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
+export const CODEX_MODELS_URL = `https://chatgpt.com/backend-api/codex/models?client_version=${CODEX_CLI_VERSION}`;
+export const CLAUDE_OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage?cedar_ember=1";
+export const CLAUDE_OAUTH_PROFILE_URL = "https://api.anthropic.com/api/oauth/profile";
+export const CLAUDE_OAUTH_MODELS_URL = "https://api.anthropic.com/v1/models?limit=1000";
+export const KIMI_CODING_USAGE_URL = "https://api.kimi.com/coding/v1/usages";
+
+export const CLAUDE_CODE_DEFAULT_MODELS = [
+  "claude-sonnet-4-6",
+  "claude-opus-4-6",
+  "claude-opus-4-7",
+  "claude-opus-4-8",
+  "claude-haiku-4-5-20251001",
+  "claude-sonnet-4-5-20250929",
+  "claude-sonnet-4-20250514",
+  "claude-3-7-sonnet-20250219",
+  "claude-3-5-haiku-20241022",
+  "claude-sonnet-5-5",
+  "claude-opus-5-5",
+  "claude-haiku-5-5",
+  "claude-fable-5-2",
+  "claude-opus-5",
+  "claude-sonnet-5",
+  "claude-fable-5"
+];
+
+export const CODEX_DEFAULT_MODELS = [
+  "gpt-5.3-codex",
+  "gpt-5.2-codex",
+  "gpt-5.1-codex-max",
+  "gpt-5.1-codex",
+  "gpt-5.1-codex-mini",
+  "gpt-5.4",
+  "gpt-5.4-mini",
+  "gpt-5.6-sol",
+  "gpt-5.6-terra",
+  "gpt-5.6-luna",
+  "gpt-6-sol",
+  "gpt-6-luna",
+  "gpt-6-astra",
+  "gpt-6.1-sol",
+  "gpt-6.1-terra",
+  "gpt-daybreak-blue-latest",
+  "gpt-reserve",
+  "codex-auto-review"
+];
+
+export const KIMI_CODE_DEFAULT_MODELS = [
+  "kimi-k3",
+  "k3",
+  "kimi-for-coding",
+  "kimi-for-coding-highspeed",
+  "kimi-k2.7-code",
+  "kimi-k2.7-code-highspeed",
+  "kimi-k2.6",
+  "kimi-k2.5",
+  "kimi-k2.5-thinking",
+  "kimi-latest"
+];
 
 export const OAUTH_STATE_TTL_MS = 600_000;
 export const OAUTH_STATE_TTL_SEC = Math.floor(OAUTH_STATE_TTL_MS / 1000);
@@ -1027,6 +1092,7 @@ export async function startDeviceCodeFlow(provider, params = {}) {
     scope,
     extra: {
       deviceCode,
+      ...(isKimi ? { deviceId: `kimi-${crypto.randomBytes(8).toString("hex")}` } : {}),
       preset: typeof cleanParams.preset === "string" ? cleanParams.preset.trim() : "",
       providerId:
         typeof cleanParams.providerId === "string" ? cleanParams.providerId.trim() : "",
@@ -1189,7 +1255,8 @@ export async function pollDeviceCodeFlow(provider, params = {}) {
       method: "POST",
       headers: {
         "content-type": "application/x-www-form-urlencoded",
-        accept: "application/json"
+        accept: "application/json",
+        ...(record.provider === "kimi" ? buildKimiHeaders(record.extra?.deviceId) : {})
       },
       body: form.toString(),
       ...(dispatcher ? { dispatcher } : {})
@@ -1281,7 +1348,8 @@ export async function pollDeviceCodeFlow(provider, params = {}) {
     ...(refreshToken ? { refreshToken } : {}),
     accessToken: effectiveToken,
     expiresAt,
-    tokenUrl: record.tokenUrl
+    tokenUrl: record.tokenUrl,
+    ...(record.extra?.deviceId ? { deviceId: record.extra.deviceId } : {})
   };
 
   if (refreshToken) {
@@ -1296,6 +1364,7 @@ export async function pollDeviceCodeFlow(provider, params = {}) {
     oauthMeta: {
       provider: record.provider,
       flow: "device_code",
+      ...(record.extra?.deviceId ? { deviceId: record.extra.deviceId } : {}),
       ...(record.provider === "kimi" ? { tierLabel: "Kimi Code Plan" } : {}),
       ...(agentKeyExpiresAt ? { agentKeyExpiresAt } : {}),
       expiresAt: new Date(expiresAt).toISOString(),
@@ -1498,4 +1567,1192 @@ export function clearOAuthFlowsStore() {
   pendingDeviceFlows.clear();
   oauth2TokenCache.clear();
   oauth2InFlightRefreshes.clear();
+}
+
+// ---------------------------------------------------------------------------
+// OAuth Plan Detection, Quota Inspection, Live Model Discovery & Wire Adaptation
+// (Anthropic Claude Code OAuth, OpenAI Codex OAuth, Kimi Code Device OAuth)
+// ---------------------------------------------------------------------------
+
+function mapStainlessOs() {
+  switch (platform()) {
+    case "darwin":
+      return "MacOS";
+    case "win32":
+      return "Windows";
+    case "linux":
+      return "Linux";
+    case "freebsd":
+      return "FreeBSD";
+    default:
+      return `Other::${platform()}`;
+  }
+}
+
+function mapStainlessArch() {
+  switch (arch()) {
+    case "x64":
+      return "x64";
+    case "arm64":
+      return "arm64";
+    case "ia32":
+      return "x86";
+    default:
+      return `other::${arch()}`;
+  }
+}
+
+export function isClaudeOAuthKey(keyEntry, secret = "") {
+  const oauthProvider = String(keyEntry?.oauthMeta?.provider || "").toLowerCase();
+  const s = String(secret || keyEntry?.key || "");
+  return (
+    (keyEntry?.authMethod === "oauth2" &&
+      (oauthProvider === "claude" || oauthProvider === "anthropic")) ||
+    s.includes("sk-ant-oat")
+  );
+}
+
+export function isCodexOAuthKey(keyEntry) {
+  const oauthProvider = String(keyEntry?.oauthMeta?.provider || "").toLowerCase();
+  return (
+    keyEntry?.authMethod === "oauth2" &&
+    (oauthProvider === "openai" || oauthProvider === "codex")
+  );
+}
+
+export function isKimiOAuthKey(keyEntry) {
+  const oauthProvider = String(keyEntry?.oauthMeta?.provider || "").toLowerCase();
+  return (
+    keyEntry?.authMethod === "oauth2" &&
+    (oauthProvider === "kimi" || oauthProvider === "kimi-coding")
+  );
+}
+
+export function buildKimiHeaders(deviceId = "") {
+  const osName = platform();
+  const architecture = arch();
+  let deviceModel = `${osName} ${architecture}`;
+  if (osName === "darwin") deviceModel = `macOS ${architecture}`;
+  else if (osName === "win32") deviceModel = `Windows ${architecture}`;
+  else if (osName === "linux") deviceModel = `Linux ${architecture}`;
+
+  let deviceName = "unknown";
+  try {
+    deviceName = hostname() || "unknown";
+  } catch {
+    deviceName = "unknown";
+  }
+
+  const resolvedId =
+    typeof deviceId === "string" && deviceId.trim() ? deviceId.trim() : `kimi-${Date.now()}`;
+
+  return {
+    "x-msh-platform": "9router",
+    "x-msh-version": "2.0.0",
+    "x-msh-device-name": deviceName,
+    "x-msh-device-model": deviceModel,
+    "x-msh-device-id": resolvedId
+  };
+}
+
+// --- Claude Code OAuth ---
+
+const ANTHROPIC_BETA_BASE = [
+  "claude-code-20250219",
+  "oauth-2025-04-20",
+  "interleaved-thinking-2025-05-14",
+  "context-management-2025-06-27",
+  "prompt-caching-scope-2026-01-05",
+  "structured-outputs-2025-12-15",
+  "fast-mode-2026-02-01",
+  "redact-thinking-2026-02-12",
+  "token-efficient-tools-2026-03-28"
+];
+const ANTHROPIC_BETA_HEAVY_AGENT = ["advanced-tool-use-2025-11-20", "effort-2025-11-24"];
+
+export function selectAnthropicBeta(model = "", body = null) {
+  const summarize = body?.thinking?.display === "summarized";
+  const flags = ANTHROPIC_BETA_BASE.filter(
+    (flag) => flag !== "redact-thinking-2026-02-12" || !summarize
+  );
+  if (/^claude-(opus|sonnet)/i.test(String(model || ""))) {
+    flags.push(...ANTHROPIC_BETA_HEAVY_AGENT);
+  }
+  return flags.join(",");
+}
+
+const CLAUDE_DOT_TO_API_ID = {
+  "claude-sonnet-5.5": "claude-sonnet-5-5",
+  "claude-opus-5.5": "claude-opus-5-5",
+  "claude-haiku-5.5": "claude-haiku-5-5",
+  "claude-fable-5.2": "claude-fable-5-2",
+  "claude-fable-5.1": "claude-fable-5-1",
+  "claude-opus-4.8": "claude-opus-4-8",
+  "claude-opus-4.7": "claude-opus-4-7",
+  "claude-sonnet-4.6": "claude-sonnet-4-6",
+  "claude-opus-4.6": "claude-opus-4-6",
+  "claude-opus-4.5": "claude-opus-4-5-20251101",
+  "claude-haiku-4.5": "claude-haiku-4-5-20251001",
+  "claude-sonnet-4.5": "claude-sonnet-4-5-20250929",
+  "claude-opus-4.1": "claude-opus-4-1-20250805",
+  "claude-haiku-4-5": "claude-haiku-4-5-20251001",
+  "claude-sonnet-4-5": "claude-sonnet-4-5-20250929"
+};
+
+function normalizeClaudeModelSyntax(rawId) {
+  let id = String(rawId || "").trim();
+  if (!id) return "";
+  id = id.replace(/\([^()]+\)\s*$/, "").trim();
+  id = id.replace(/-(thinking|xhigh|high|medium|low|minimal)$/i, "").trim();
+  const lower = id.toLowerCase();
+  if (CLAUDE_DOT_TO_API_ID[lower]) return CLAUDE_DOT_TO_API_ID[lower];
+  return id.replace(/(\d+)\.(\d+)/g, "$1-$2");
+}
+
+function claudeModelFamily(modelId) {
+  const s = String(modelId || "").toLowerCase();
+  if (s.includes("haiku")) return "haiku";
+  if (s.includes("opus") || s.includes("fable")) return "opus";
+  return "sonnet";
+}
+
+export function resolveClaudeOAuthModel(requestedModel, availableModels = []) {
+  const raw = String(requestedModel || "").trim();
+  const normalized = normalizeClaudeModelSyntax(raw);
+  const liveList = (Array.isArray(availableModels) ? availableModels : []).filter(
+    (m) => m && m.id && m.isLive === true
+  );
+  if (liveList.length === 0) {
+    return normalized || "claude-sonnet-4-6";
+  }
+
+  const exact = liveList.find((m) => m.id === raw || m.id === normalized);
+  if (exact) return exact.id;
+
+  const prefixMatch = liveList.find(
+    (m) => m.id.startsWith(normalized) || normalized.startsWith(m.id)
+  );
+  if (prefixMatch) return prefixMatch.id;
+
+  const fam = claudeModelFamily(normalized || raw);
+  const familyMatch = liveList.find((m) => claudeModelFamily(m.id) === fam);
+  if (familyMatch) return familyMatch.id;
+
+  return liveList[0].id;
+}
+
+export function getClaudeFallbackCandidates(requestedModel, availableModels = []) {
+  const normalized = normalizeClaudeModelSyntax(requestedModel);
+  const liveIds = (Array.isArray(availableModels) ? availableModels : [])
+    .filter((m) => m?.id && m.isLive === true)
+    .map((m) => m.id);
+  const fam = claudeModelFamily(normalized || requestedModel);
+
+  const familyOrder =
+    fam === "haiku"
+      ? ["claude-haiku-4-5-20251001", "claude-3-5-haiku-20241022", "claude-sonnet-4-6"]
+      : fam === "opus"
+        ? [
+            "claude-opus-4-6",
+            "claude-opus-4-5-20251101",
+            "claude-opus-4-1-20250805",
+            "claude-sonnet-4-6"
+          ]
+        : [
+            "claude-sonnet-4-6",
+            "claude-sonnet-4-5-20250929",
+            "claude-sonnet-4-20250514",
+            "claude-3-7-sonnet-20250219",
+            "claude-haiku-4-5-20251001"
+          ];
+
+  const merged = [...new Set([...liveIds, ...familyOrder, ...CLAUDE_CODE_DEFAULT_MODELS])];
+  return merged.filter((id) => id && id !== normalized && id !== requestedModel);
+}
+
+function deriveDeterministicUuid(seed) {
+  const h = crypto.createHash("sha256").update(String(seed)).digest("hex");
+  const variant = ((parseInt(h[16], 16) & 0x3) | 0x8).toString(16);
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-${variant}${h.slice(17, 20)}-${h.slice(20, 32)}`;
+}
+
+export function buildClaudeOAuthMessagesRequest(
+  anthropicPayload,
+  accessToken,
+  upstreamModel,
+  options = {}
+) {
+  const availableModels = Array.isArray(options.availableModels) ? options.availableModels : [];
+  const effectiveModel = options.exactModel
+    ? String(upstreamModel || "claude-sonnet-4-6")
+    : resolveClaudeOAuthModel(upstreamModel, availableModels);
+
+  const sessionId =
+    (typeof options.sessionId === "string" && options.sessionId.trim()) ||
+    deriveDeterministicUuid(`session:${accessToken.slice(0, 32)}:${effectiveModel}`);
+  const deviceId = crypto.createHash("sha256").update(`device:${accessToken}`).digest("hex");
+  const accountUuid = deriveDeterministicUuid(`account:${accessToken}`);
+
+  const body = { ...(anthropicPayload || {}), model: effectiveModel };
+
+  // Haiku < 5 rejects adaptive thinking; downgrade cleanly
+  if (
+    /haiku/i.test(effectiveModel) &&
+    !/haiku[-._]?[5-9]/i.test(effectiveModel) &&
+    body.thinking?.type === "adaptive"
+  ) {
+    body.thinking = { type: "enabled", budget_tokens: 4096 };
+  }
+  if (body.thinking?.type === "enabled" && body.max_tokens && body.thinking.budget_tokens >= body.max_tokens) {
+    body.max_tokens = body.thinking.budget_tokens + 1024;
+  }
+
+  // Inject Claude Code OAuth billing header + deterministic user_id metadata
+  const contentHash = crypto
+    .createHash("sha256")
+    .update(JSON.stringify(body))
+    .digest("hex")
+    .slice(0, 5);
+  const buildHash = crypto.randomBytes(2).toString("hex").slice(0, 3);
+  const billingText = `x-anthropic-billing-header: cc_version=${CLAUDE_CLI_VERSION}.${buildHash}; cc_entrypoint=sdk-cli; cch=${contentHash};`;
+  const billingBlock = { type: "text", text: billingText };
+
+  if (Array.isArray(body.system)) {
+    if (!body.system[0]?.text?.startsWith("x-anthropic-billing-header:")) {
+      body.system = [billingBlock, ...body.system];
+    }
+  } else if (typeof body.system === "string" && body.system.trim()) {
+    body.system = [billingBlock, { type: "text", text: body.system }];
+  } else {
+    body.system = [billingBlock];
+  }
+
+  if (!body.metadata?.user_id) {
+    body.metadata = {
+      ...(body.metadata && typeof body.metadata === "object" ? body.metadata : {}),
+      user_id: JSON.stringify({
+        device_id: deviceId,
+        account_uuid: accountUuid,
+        session_id: sessionId
+      })
+    };
+  }
+
+  const rawBase = String(options.baseUrl || "https://api.anthropic.com").replace(/\/+$/, "");
+  let messagesUrl;
+  if (rawBase.endsWith("/messages")) {
+    messagesUrl = rawBase;
+  } else if (rawBase.endsWith("/v1")) {
+    messagesUrl = `${rawBase}/messages`;
+  } else {
+    messagesUrl = `${rawBase}/v1/messages`;
+  }
+  if (options.addBetaQuery !== false && !messagesUrl.includes("beta=")) {
+    messagesUrl += messagesUrl.includes("?") ? "&beta=true" : "?beta=true";
+  }
+
+  const headers = {
+    "content-type": "application/json",
+    authorization: `Bearer ${accessToken}`,
+    "anthropic-version": options.clientAnthropicVersion || "2023-06-01",
+    "anthropic-beta": selectAnthropicBeta(effectiveModel, body),
+    "anthropic-dangerous-direct-browser-access": "true",
+    "user-agent": `claude-cli/${CLAUDE_CLI_VERSION} (external, sdk-cli)`,
+    "x-app": "cli",
+    "x-stainless-helper-method": "stream",
+    "x-stainless-retry-count": "0",
+    "x-stainless-runtime-version": "v24.14.0",
+    "x-stainless-package-version": "0.80.0",
+    "x-stainless-runtime": "node",
+    "x-stainless-lang": "js",
+    "x-stainless-arch": mapStainlessArch(),
+    "x-stainless-os": mapStainlessOs(),
+    "x-stainless-timeout": "600",
+    "x-claude-code-session-id": sessionId
+  };
+
+  return {
+    url: messagesUrl,
+    headers,
+    body,
+    resolvedModel: effectiveModel
+  };
+}
+
+function parseIsoOrUnixReset(val) {
+  if (val === undefined || val === null || val === "") return "";
+  if (typeof val === "number" && Number.isFinite(val) && val > 0) {
+    const ms = val < 1e12 ? val * 1000 : val;
+    return new Date(ms).toISOString();
+  }
+  const ms = Date.parse(String(val));
+  return Number.isFinite(ms) ? new Date(ms).toISOString() : "";
+}
+
+export async function fetchClaudeOAuthUsage(accessToken, options = {}) {
+  const token = String(accessToken || "").trim();
+  if (!token) throw createHttpError(400, "Missing Claude OAuth access token");
+
+  const fetchImpl = options.fetchImpl || upstreamFetch;
+  const dispatcher = options.dispatcher;
+  const headers = {
+    authorization: `Bearer ${token}`,
+    "anthropic-beta": "oauth-2025-04-20",
+    "anthropic-version": "2023-06-01",
+    "user-agent": `claude-cli/${CLAUDE_CLI_VERSION} (external, cli)`,
+    accept: "application/json"
+  };
+
+  const fetchJson = async (url) => {
+    try {
+      const res = await fetchImpl(url, {
+        method: "GET",
+        headers,
+        signal: AbortSignal.timeout(15000),
+        ...(dispatcher ? { dispatcher } : {})
+      });
+      const text = await res.text().catch(() => "");
+      let data = null;
+      try {
+        data = text ? JSON.parse(text) : null;
+      } catch {
+        data = null;
+      }
+      return { ok: res.ok, status: res.status, data, text };
+    } catch (err) {
+      return { ok: false, status: 0, data: null, text: err?.message || "network error" };
+    }
+  };
+
+  const [profileRes, usageRes, modelsRes] = await Promise.all([
+    fetchJson(options.profileUrl || CLAUDE_OAUTH_PROFILE_URL),
+    fetchJson(options.usageUrl || CLAUDE_OAUTH_USAGE_URL),
+    fetchJson(options.modelsUrl || CLAUDE_OAUTH_MODELS_URL)
+  ]);
+
+  const authFailed =
+    [profileRes, usageRes, modelsRes].every((r) => !r.ok) &&
+    [profileRes, usageRes, modelsRes].some((r) => r.status === 401 || r.status === 403);
+  if (authFailed) {
+    const failed = [modelsRes, usageRes, profileRes].find((r) => r.status === 401 || r.status === 403);
+    const errMsg =
+      failed?.data?.error?.message ||
+      failed?.data?.error ||
+      failed?.text?.slice(0, 200) ||
+      `HTTP ${failed?.status}`;
+    throw createHttpError(failed?.status || 401, redactSecrets(String(errMsg), [token]));
+  }
+
+  const profileMeta = profileRes.ok && profileRes.data ? extractClaudeProfileMeta(profileRes.data) : {};
+  const organizationId = String(profileRes.data?.organization?.uuid || "").trim();
+  const organizationName = String(profileRes.data?.organization?.name || "").trim();
+
+  const windows = [];
+  const u = usageRes.ok && usageRes.data && typeof usageRes.data === "object" ? usageRes.data : {};
+  const addWindow = (id, windowType, label, utilization, resetsAt) => {
+    if (typeof utilization !== "number" || !Number.isFinite(utilization)) return;
+    const clampedPct = Math.max(0, Math.min(100, utilization));
+    windows.push({
+      id,
+      family: "claude_gpt",
+      window: windowType,
+      label,
+      remainingFraction: Math.max(0, Math.min(1, (100 - clampedPct) / 100)),
+      resetTime: parseIsoOrUnixReset(resetsAt)
+    });
+  };
+
+  if (u.five_hour && typeof u.five_hour === "object") {
+    addWindow("claude_5h", "5h", "Claude · 5 giờ", u.five_hour.utilization, u.five_hour.resets_at);
+  }
+  if (u.seven_day && typeof u.seven_day === "object") {
+    addWindow("claude_weekly", "weekly", "Claude · tuần", u.seven_day.utilization, u.seven_day.resets_at);
+  }
+  for (const [k, v] of Object.entries(u)) {
+    if (k.startsWith("seven_day_") && k !== "seven_day" && v && typeof v === "object") {
+      const sub = k.replace("seven_day_", "");
+      const title = sub ? sub[0].toUpperCase() + sub.slice(1) : sub;
+      addWindow(`claude_${k}`, "weekly", `Claude ${title} · tuần`, v.utilization, v.resets_at);
+    }
+  }
+  if (Array.isArray(u.limits)) {
+    for (const lim of u.limits) {
+      if (lim?.kind !== "weekly_scoped" || typeof lim.percent !== "number") continue;
+      const mName = String(lim?.scope?.model?.display_name || "").trim();
+      if (!mName) continue;
+      addWindow(
+        `claude_weekly_${mName.toLowerCase()}`,
+        "weekly",
+        `Claude ${mName} · tuần`,
+        lim.percent,
+        lim.resets_at
+      );
+    }
+  }
+
+  const baseWindow =
+    windows.find((w) => w.id === "claude_5h") ||
+    windows.find((w) => w.id === "claude_weekly") ||
+    windows[0] ||
+    null;
+
+  const liveRaw =
+    modelsRes.ok && Array.isArray(modelsRes.data?.data) ? modelsRes.data.data : [];
+  const liveModels = liveRaw
+    .map((m) => {
+      const id = String(m?.id || "").trim();
+      if (!id) return null;
+      return {
+        id,
+        label: String(m?.display_name || m?.name || id).trim(),
+        family: "claude_gpt",
+        kind: "chat",
+        remainingFraction: baseWindow ? baseWindow.remainingFraction : null,
+        resetTime: baseWindow ? baseWindow.resetTime : "",
+        isLive: true
+      };
+    })
+    .filter(Boolean);
+
+  const models =
+    liveModels.length > 0
+      ? liveModels
+      : CLAUDE_CODE_DEFAULT_MODELS.map((id) => ({
+          id,
+          label: id,
+          family: "claude_gpt",
+          kind: "chat",
+          remainingFraction: baseWindow ? baseWindow.remainingFraction : null,
+          resetTime: baseWindow ? baseWindow.resetTime : "",
+          isLive: false
+        }));
+
+  const tierLabel =
+    profileMeta.tierLabel && profileMeta.tierLabel !== "Claude OAuth"
+      ? profileMeta.tierLabel
+      : usageRes.ok || modelsRes.ok
+        ? "Claude Code Plan"
+        : "Claude OAuth";
+
+  return {
+    planOk: Boolean(profileRes.ok || usageRes.ok || modelsRes.ok),
+    quotaOk: Boolean(usageRes.ok || windows.length > 0),
+    catalogOk: models.length > 0,
+    ...(profileMeta.email ? { email: profileMeta.email } : {}),
+    ...(profileMeta.name ? { name: profileMeta.name } : {}),
+    ...(profileMeta.tier ? { tier: profileMeta.tier } : {}),
+    ...(organizationId ? { organizationId } : {}),
+    ...(organizationName ? { organizationName } : {}),
+    tierLabel,
+    windows,
+    buckets: models
+      .filter((m) => typeof m.remainingFraction === "number")
+      .map((m) => ({
+        modelId: m.id,
+        remainingFraction: m.remainingFraction,
+        resetTime: m.resetTime || ""
+      })),
+    models,
+    liveModelIds: liveModels.map((m) => m.id),
+    defaultModelId: models[0]?.id || "claude-sonnet-4-6",
+    perModelHidden: false
+  };
+}
+
+// --- OpenAI Codex OAuth ---
+
+const CODEX_DEFAULT_INSTRUCTIONS =
+  "You are Codex, an expert software engineering assistant. Follow the user's instructions carefully and respond concisely.";
+
+function clampCodexCallId(id) {
+  if (typeof id !== "string" || !id) return `call_${crypto.randomBytes(6).toString("hex")}`;
+  return id.length > 64 ? id.slice(0, 64) : id;
+}
+
+export function resolveCodexOAuthModel(requestedModel, availableModels = []) {
+  const raw = String(requestedModel || "")
+    .trim()
+    .replace(/\([^()]+\)\s*$/, "")
+    .trim();
+  const base = raw
+    .replace(/\[1m\]$/i, "")
+    .replace(/-review$/i, "")
+    .replace(/-(none|minimal|low|medium|high|xhigh)$/i, "")
+    .trim();
+
+  const list = Array.isArray(availableModels) ? availableModels.filter((m) => m?.id) : [];
+  const exact = list.find((m) => m.id === raw || m.id === base);
+  if (exact) return exact.id;
+
+  const isCodexSlug =
+    /^gpt-(?:5|6)/i.test(base) ||
+    /^gpt-(?:daybreak|reserve)/i.test(base) ||
+    base === "codex-auto-review" ||
+    /codex/i.test(base);
+  if (isCodexSlug && list.length === 0) {
+    return base || "gpt-5.3-codex";
+  }
+
+  return list[0]?.id || (isCodexSlug && base ? base : "gpt-5.3-codex");
+}
+
+function extractTextFromMessageContent(content) {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((p) => (typeof p === "string" ? p : typeof p?.text === "string" ? p.text : ""))
+      .filter(Boolean)
+      .join("\n");
+  }
+  return "";
+}
+
+export function buildCodexOAuthRequest(
+  openaiPayload,
+  accessToken,
+  upstreamModel,
+  options = {}
+) {
+  const raw = String(upstreamModel || openaiPayload?.model || "").trim();
+  const effortMatch = raw.match(/-(none|minimal|low|medium|high|xhigh)$/i);
+  const availableModels = Array.isArray(options.availableModels) ? options.availableModels : [];
+  const resolvedModel = resolveCodexOAuthModel(raw, availableModels);
+
+  const rawBody = openaiPayload && typeof openaiPayload === "object" ? openaiPayload : {};
+  const input = [];
+  const instructionsParts = [];
+
+  if (typeof rawBody.instructions === "string" && rawBody.instructions.trim()) {
+    instructionsParts.push(rawBody.instructions.trim());
+  }
+
+  if (Array.isArray(rawBody.input)) {
+    for (const item of rawBody.input) {
+      if (item) input.push(item);
+    }
+  } else if (Array.isArray(rawBody.messages)) {
+    for (const msg of rawBody.messages) {
+      if (!msg || !msg.role) continue;
+      if (msg.role === "system" || msg.role === "developer") {
+        const txt = extractTextFromMessageContent(msg.content).trim();
+        if (txt) instructionsParts.push(txt);
+        continue;
+      }
+      if (msg.role === "tool") {
+        input.push({
+          type: "function_call_output",
+          call_id: clampCodexCallId(msg.tool_call_id),
+          output:
+            typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content ?? "")
+        });
+        continue;
+      }
+      if (msg.role === "user" || msg.role === "assistant") {
+        const contentType = msg.role === "user" ? "input_text" : "output_text";
+        const contentParts =
+          typeof msg.content === "string"
+            ? [{ type: contentType, text: msg.content }]
+            : Array.isArray(msg.content)
+              ? msg.content.map((c) => {
+                  if (typeof c === "string") return { type: contentType, text: c };
+                  if (c?.type === "text" || c?.type === "input_text" || c?.type === "output_text") {
+                    return { type: contentType, text: c.text ?? "" };
+                  }
+                  if (c?.type === "image_url") {
+                    const url = typeof c.image_url === "string" ? c.image_url : c.image_url?.url || "";
+                    return { type: "input_image", image_url: url, detail: c.image_url?.detail || "auto" };
+                  }
+                  return { type: contentType, text: c?.text || JSON.stringify(c) };
+                })
+              : [];
+
+        if (contentParts.length > 0) {
+          input.push({ type: "message", role: msg.role, content: contentParts });
+        }
+
+        if (msg.role === "assistant" && Array.isArray(msg.tool_calls)) {
+          for (const tc of msg.tool_calls) {
+            const name = typeof tc?.function?.name === "string" ? tc.function.name.trim() : "";
+            if (!name) continue;
+            let args = "{}";
+            if (typeof tc.function?.arguments === "string") {
+              args = tc.function.arguments || "{}";
+            } else if (tc.function?.arguments !== undefined) {
+              args = JSON.stringify(tc.function.arguments);
+            }
+            input.push({
+              type: "function_call",
+              call_id: clampCodexCallId(tc.id),
+              name: name.slice(0, 128),
+              arguments: args
+            });
+          }
+        }
+      }
+    }
+  }
+
+  if (input.length === 0) {
+    input.push({
+      type: "message",
+      role: "user",
+      content: [{ type: "input_text", text: "..." }]
+    });
+  }
+
+  const tools = [];
+  if (Array.isArray(rawBody.tools)) {
+    for (const tool of rawBody.tools) {
+      if (!tool || typeof tool !== "object") continue;
+      if (tool.type === "function") {
+        const fn = tool.function && typeof tool.function === "object" ? tool.function : tool;
+        const name = typeof fn.name === "string" ? fn.name.trim() : "";
+        if (!name) continue;
+        const params =
+          fn.parameters && typeof fn.parameters === "object"
+            ? { ...fn.parameters, ...(fn.parameters.type === "object" && !fn.parameters.properties ? { properties: {} } : {}) }
+            : { type: "object", properties: {} };
+        tools.push({
+          type: "function",
+          name: name.slice(0, 128),
+          ...(fn.description ? { description: String(fn.description) } : {}),
+          parameters: params,
+          ...(typeof fn.strict === "boolean" ? { strict: fn.strict } : {})
+        });
+      }
+    }
+  }
+
+  let effort =
+    rawBody.reasoning?.effort ||
+    rawBody.reasoning_effort ||
+    (effortMatch ? effortMatch[1].toLowerCase() : "") ||
+    "low";
+  if (effort === "max" || effort === "ultra") effort = "high";
+  if (!["none", "minimal", "low", "medium", "high", "xhigh"].includes(effort)) {
+    effort = "low";
+  }
+
+  const sessionId =
+    (typeof options.sessionId === "string" && options.sessionId.trim()) ||
+    crypto.createHash("sha256").update(`codex:${accessToken.slice(0, 32)}`).digest("hex").slice(0, 24);
+
+  const payload = {
+    model: resolvedModel,
+    input,
+    instructions: instructionsParts.join("\n\n") || CODEX_DEFAULT_INSTRUCTIONS,
+    stream: true,
+    store: false,
+    prompt_cache_key: sessionId,
+    reasoning: { effort, summary: "auto" },
+    ...(effort !== "none" ? { include: ["reasoning.encrypted_content"] } : {})
+  };
+  if (tools.length > 0) {
+    payload.tools = tools;
+    if (rawBody.tool_choice !== undefined) {
+      if (
+        rawBody.tool_choice &&
+        typeof rawBody.tool_choice === "object" &&
+        rawBody.tool_choice.type === "function" &&
+        rawBody.tool_choice.function?.name
+      ) {
+        payload.tool_choice = { type: "function", name: rawBody.tool_choice.function.name };
+      } else if (
+        typeof rawBody.tool_choice === "string" ||
+        rawBody.tool_choice?.type === "function"
+      ) {
+        payload.tool_choice = rawBody.tool_choice;
+      }
+    }
+  }
+
+  const jwtMeta = extractOpenAIJwtMeta({ access_token: accessToken });
+  const accountId = options.accountId || jwtMeta.accountId || "";
+
+  const headers = {
+    "content-type": "application/json",
+    accept: "text/event-stream",
+    authorization: `Bearer ${accessToken}`,
+    originator: "codex_cli_rs",
+    "user-agent": `codex_cli_rs/${CODEX_CLI_VERSION}`,
+    version: CODEX_CLI_VERSION,
+    session_id: sessionId,
+    ...(accountId ? { "chatgpt-account-id": accountId } : {})
+  };
+
+  return {
+    url: options.url || CODEX_RESPONSES_URL,
+    headers,
+    body: payload,
+    resolvedModel
+  };
+}
+
+export function codexSseEventToOpenAIChunk(eventType, parsed, state) {
+  const type = parsed?.type || eventType || "";
+  if (!state.chatId) {
+    state.chatId = `chatcmpl-${crypto.randomBytes(8).toString("hex")}`;
+    state.created = Math.floor(Date.now() / 1000);
+    state.toolIdxMap = new Map();
+    state.nextToolIdx = 0;
+  }
+  const makeChunk = (delta, finishReason = null, usage = undefined) => ({
+    id: state.chatId,
+    object: "chat.completion.chunk",
+    created: state.created,
+    model: state.model || "gpt-5.3-codex",
+    choices: [{ index: 0, delta, finish_reason: finishReason }],
+    ...(usage ? { usage } : {})
+  });
+
+  if (type === "error" || type === "response.failed") {
+    const err = parsed?.error || parsed?.response?.error;
+    const msg = err?.message || (typeof err === "string" ? err : JSON.stringify(err || "Codex error"));
+    return { error: msg };
+  }
+  if (type === "response.output_text.delta" && typeof parsed?.delta === "string" && parsed.delta) {
+    return makeChunk({ content: parsed.delta });
+  }
+  if (
+    type === "response.reasoning_summary_text.delta" &&
+    typeof parsed?.delta === "string" &&
+    parsed.delta
+  ) {
+    return makeChunk({ reasoning_content: parsed.delta });
+  }
+  if (
+    type === "response.output_item.added" &&
+    (parsed?.item?.type === "function_call" || parsed?.item?.type === "custom_tool_call")
+  ) {
+    const item = parsed.item;
+    const itemKey = item.id || parsed.item_id || item.call_id;
+    let idx = state.toolIdxMap.get(itemKey);
+    if (idx === undefined) {
+      idx = state.nextToolIdx++;
+      if (itemKey) state.toolIdxMap.set(itemKey, idx);
+    }
+    return makeChunk({
+      tool_calls: [
+        {
+          index: idx,
+          id: item.call_id || `call_${idx}`,
+          type: "function",
+          function: { name: item.name || "", arguments: "" }
+        }
+      ]
+    });
+  }
+  if (
+    (type === "response.function_call_arguments.delta" ||
+      type === "response.custom_tool_call_input.delta") &&
+    typeof parsed?.delta === "string" &&
+    parsed.delta
+  ) {
+    const idx =
+      (parsed.item_id ? state.toolIdxMap.get(parsed.item_id) : undefined) ??
+      Math.max(0, state.nextToolIdx - 1);
+    return makeChunk({ tool_calls: [{ index: idx, function: { arguments: parsed.delta } }] });
+  }
+  if (type === "response.completed" || type === "response.done") {
+    const u = parsed?.response?.usage;
+    const promptTokens = Number(u?.input_tokens ?? u?.prompt_tokens) || 0;
+    const completionTokens = Number(u?.output_tokens ?? u?.completion_tokens) || 0;
+    const cachedTokens = Number(u?.input_tokens_details?.cached_tokens) || 0;
+    const finishReason = state.nextToolIdx > 0 ? "tool_calls" : "stop";
+    state.done = true;
+    state.usage = { promptTokens, completionTokens, cachedTokens };
+    return makeChunk(
+      {},
+      finishReason,
+      u
+        ? {
+            prompt_tokens: promptTokens,
+            completion_tokens: completionTokens,
+            total_tokens: promptTokens + completionTokens,
+            ...(cachedTokens ? { prompt_tokens_details: { cached_tokens: cachedTokens } } : {})
+          }
+        : undefined
+    );
+  }
+  return null;
+}
+
+export function aggregateCodexResponsesStream(sseText, requestedModel) {
+  let content = "";
+  let reasoning = "";
+  const toolCallsByKey = new Map();
+  let promptTokens = 0;
+  let completionTokens = 0;
+  let cachedTokens = 0;
+  let streamError = "";
+
+  let currentEvent = "";
+  for (const rawLine of String(sseText || "").split(/\r?\n/)) {
+    const line = rawLine.trimEnd();
+    if (!line) {
+      currentEvent = "";
+      continue;
+    }
+    if (line.startsWith("event:")) {
+      currentEvent = line.slice(6).trim();
+      continue;
+    }
+    if (!line.startsWith("data:")) continue;
+    const payload = line.slice(5).trim();
+    if (!payload || payload === "[DONE]") continue;
+    let parsed;
+    try {
+      parsed = JSON.parse(payload);
+    } catch {
+      continue;
+    }
+    const type = parsed?.type || currentEvent || "";
+    if (type === "error" || type === "response.failed") {
+      const err = parsed?.error || parsed?.response?.error;
+      streamError = err?.message || (typeof err === "string" ? err : JSON.stringify(err || "Codex stream failed"));
+      break;
+    }
+    if (type === "response.output_text.delta" && typeof parsed?.delta === "string") {
+      content += parsed.delta;
+    } else if (type === "response.reasoning_summary_text.delta" && typeof parsed?.delta === "string") {
+      reasoning += parsed.delta;
+    } else if (
+      type === "response.output_item.added" &&
+      (parsed?.item?.type === "function_call" || parsed?.item?.type === "custom_tool_call")
+    ) {
+      const k = parsed.item.id || parsed.item_id || parsed.item.call_id || String(toolCallsByKey.size);
+      toolCallsByKey.set(k, {
+        id: parsed.item.call_id || `call_${toolCallsByKey.size}`,
+        type: "function",
+        function: { name: parsed.item.name || "tool", arguments: "" }
+      });
+    } else if (
+      (type === "response.function_call_arguments.delta" ||
+        type === "response.custom_tool_call_input.delta") &&
+      typeof parsed?.delta === "string"
+    ) {
+      const k = parsed.item_id || [...toolCallsByKey.keys()].pop();
+      const entry = k ? toolCallsByKey.get(k) : null;
+      if (entry) entry.function.arguments += parsed.delta;
+    } else if (type === "response.output_item.done" && parsed?.item?.type === "function_call") {
+      const k = parsed.item.id || parsed.item_id || parsed.item.call_id;
+      const entry = k ? toolCallsByKey.get(k) : null;
+      if (entry && !entry.function.arguments && typeof parsed.item.arguments === "string") {
+        entry.function.arguments = parsed.item.arguments;
+      }
+    } else if (type === "response.completed" || type === "response.done") {
+      const u = parsed?.response?.usage;
+      if (u) {
+        promptTokens = Number(u.input_tokens ?? u.prompt_tokens) || 0;
+        completionTokens = Number(u.output_tokens ?? u.completion_tokens) || 0;
+        cachedTokens = Number(u.input_tokens_details?.cached_tokens) || 0;
+      }
+      if (!content && typeof parsed?.response?.output_text === "string") {
+        content = parsed.response.output_text;
+      } else if (!content && Array.isArray(parsed?.response?.output)) {
+        for (const item of parsed.response.output) {
+          if (item?.type === "message" && Array.isArray(item.content)) {
+            content += item.content.map((p) => p?.text || "").join("");
+          }
+        }
+      }
+    }
+  }
+
+  if (streamError) {
+    return { error: { message: streamError } };
+  }
+
+  const toolCalls = [...toolCallsByKey.values()];
+  const message = {
+    role: "assistant",
+    content: content || (toolCalls.length > 0 ? null : ""),
+    ...(reasoning ? { reasoning_content: reasoning } : {}),
+    ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {})
+  };
+
+  return {
+    id: `chatcmpl-${crypto.randomBytes(10).toString("hex")}`,
+    object: "chat.completion",
+    created: Math.floor(Date.now() / 1000),
+    model: requestedModel || "gpt-5.3-codex",
+    choices: [
+      {
+        index: 0,
+        message,
+        finish_reason: toolCalls.length > 0 ? "tool_calls" : "stop"
+      }
+    ],
+    usage: {
+      prompt_tokens: promptTokens,
+      completion_tokens: completionTokens,
+      total_tokens: promptTokens + completionTokens,
+      ...(cachedTokens ? { prompt_tokens_details: { cached_tokens: cachedTokens } } : {})
+    }
+  };
+}
+
+export async function fetchCodexOAuthUsage(accessToken, options = {}) {
+  const token = String(accessToken || "").trim();
+  if (!token) throw createHttpError(400, "Missing OpenAI Codex OAuth access token");
+
+  const fetchImpl = options.fetchImpl || upstreamFetch;
+  const dispatcher = options.dispatcher;
+  const jwtMeta = extractOpenAIJwtMeta({ access_token: token });
+  const accountId = options.accountId || jwtMeta.accountId || "";
+
+  const headers = {
+    authorization: `Bearer ${token}`,
+    accept: "application/json",
+    originator: "codex_cli_rs",
+    "user-agent": `codex_cli_rs/${CODEX_CLI_VERSION}`,
+    ...(accountId ? { "chatgpt-account-id": accountId } : {})
+  };
+
+  const fetchJson = async (url) => {
+    try {
+      const res = await fetchImpl(url, {
+        method: "GET",
+        headers,
+        signal: AbortSignal.timeout(15000),
+        ...(dispatcher ? { dispatcher } : {})
+      });
+      const text = await res.text().catch(() => "");
+      let data = null;
+      try {
+        data = text ? JSON.parse(text) : null;
+      } catch {
+        data = null;
+      }
+      return { ok: res.ok, status: res.status, data, text };
+    } catch (err) {
+      return { ok: false, status: 0, data: null, text: err?.message || "network error" };
+    }
+  };
+
+  const [usageRes, modelsRes] = await Promise.all([
+    fetchJson(options.usageUrl || CODEX_USAGE_URL),
+    fetchJson(options.modelsUrl || CODEX_MODELS_URL)
+  ]);
+
+  if (!usageRes.ok && !modelsRes.ok && (usageRes.status === 401 || modelsRes.status === 401)) {
+    throw createHttpError(401, "OpenAI Codex OAuth token invalid or expired");
+  }
+
+  const u = usageRes.ok && usageRes.data && typeof usageRes.data === "object" ? usageRes.data : {};
+  const windows = [];
+  const addWindow = (id, windowType, label, win) => {
+    if (!win || typeof win !== "object") return;
+    const usedPct = Number(win.used_percent ?? win.percent_used);
+    if (!Number.isFinite(usedPct)) return;
+    const rem = Math.max(0, Math.min(1, (100 - Math.max(0, Math.min(100, usedPct))) / 100));
+    windows.push({
+      id,
+      family: "claude_gpt",
+      window: windowType,
+      label,
+      remainingFraction: rem,
+      resetTime: parseIsoOrUnixReset(win.reset_at ?? win.resets_at ?? win.resetAt)
+    });
+  };
+
+  const mainRL = u.rate_limit || u.rate_limits || u.rate_limits_by_limit_id?.codex || null;
+  if (mainRL && typeof mainRL === "object") {
+    addWindow("codex_5h", "5h", "Codex · 5 giờ", mainRL.primary_window || mainRL.primary);
+    addWindow("codex_weekly", "weekly", "Codex · tuần", mainRL.secondary_window || mainRL.secondary);
+  }
+  const revRL = u.code_review_rate_limit || u.review_rate_limit || u.rate_limits_by_limit_id?.code_review || null;
+  if (revRL && typeof revRL === "object") {
+    addWindow("codex_review_5h", "5h", "Review · 5 giờ", revRL.primary_window || revRL.primary);
+    addWindow("codex_review_weekly", "weekly", "Review · tuần", revRL.secondary_window || revRL.secondary);
+  }
+
+  const baseWindow =
+    windows.find((w) => w.id === "codex_5h") ||
+    windows.find((w) => w.id === "codex_weekly") ||
+    windows[0] ||
+    null;
+
+  const rawList = Array.isArray(modelsRes.data?.models)
+    ? modelsRes.data.models
+    : Array.isArray(modelsRes.data?.data)
+      ? modelsRes.data.data
+      : [];
+  const liveModels = rawList
+    .map((m) => {
+      const id = String(m?.slug || m?.id || m?.model || m?.name || "").trim();
+      if (!id) return null;
+      return {
+        id,
+        label: String(m?.display_name || m?.displayName || m?.title || m?.name || id).trim(),
+        family: "claude_gpt",
+        kind: (m?.type || "").toLowerCase() === "image" ? "image" : "chat",
+        remainingFraction: baseWindow ? baseWindow.remainingFraction : null,
+        resetTime: baseWindow ? baseWindow.resetTime : "",
+        isLive: true
+      };
+    })
+    .filter(Boolean);
+
+  const models =
+    liveModels.length > 0
+      ? liveModels
+      : CODEX_DEFAULT_MODELS.map((id) => ({
+          id,
+          label: id,
+          family: "claude_gpt",
+          kind: "chat",
+          remainingFraction: baseWindow ? baseWindow.remainingFraction : null,
+          resetTime: baseWindow ? baseWindow.resetTime : "",
+          isLive: false
+        }));
+
+  const rawPlan = String(u.plan_type || u.summary?.plan || jwtMeta.tier || "").trim().toLowerCase();
+  let tierLabel = jwtMeta.tierLabel || "OpenAI Codex";
+  if (rawPlan === "pro") tierLabel = "ChatGPT Pro";
+  else if (rawPlan === "plus") tierLabel = "ChatGPT Plus";
+  else if (rawPlan === "team") tierLabel = "ChatGPT Team";
+  else if (rawPlan === "enterprise" || rawPlan === "edu") {
+    tierLabel = `ChatGPT ${rawPlan[0].toUpperCase()}${rawPlan.slice(1)}`;
+  } else if (rawPlan === "free") tierLabel = "ChatGPT Free";
+
+  return {
+    planOk: Boolean(usageRes.ok || modelsRes.ok || jwtMeta.email || accountId),
+    quotaOk: Boolean(usageRes.ok || windows.length > 0),
+    catalogOk: models.length > 0,
+    ...(jwtMeta.email ? { email: jwtMeta.email } : {}),
+    ...(accountId ? { accountId } : {}),
+    ...(rawPlan ? { tier: rawPlan } : {}),
+    tierLabel,
+    windows,
+    buckets: models
+      .filter((m) => typeof m.remainingFraction === "number")
+      .map((m) => ({
+        modelId: m.id,
+        remainingFraction: m.remainingFraction,
+        resetTime: m.resetTime || ""
+      })),
+    models,
+    liveModelIds: liveModels.map((m) => m.id),
+    defaultModelId: models[0]?.id || "gpt-5.3-codex",
+    perModelHidden: false
+  };
+}
+
+// --- Kimi Code OAuth ---
+
+const KIMI_PLAN_LEVELS = {
+  LEVEL_BASIC: "Moderato",
+  LEVEL_INTERMEDIATE: "Allegretto",
+  LEVEL_ADVANCED: "Allegro",
+  LEVEL_STANDARD: "Vivace"
+};
+
+export async function fetchKimiOAuthUsage(accessToken, apiKey = "", options = {}) {
+  const token = String(accessToken || "").trim();
+  const key = String(apiKey || "").trim();
+  if (!token && !key) throw createHttpError(400, "Missing Kimi Code credential");
+
+  const fetchImpl = options.fetchImpl || upstreamFetch;
+  const dispatcher = options.dispatcher;
+  const authHeaders = key
+    ? { "x-api-key": key }
+    : {
+        authorization: `Bearer ${token}`,
+        ...buildKimiHeaders(options.deviceId)
+      };
+
+  const res = await fetchImpl(options.usageUrl || KIMI_CODING_USAGE_URL, {
+    method: "GET",
+    headers: {
+      ...authHeaders,
+      "content-type": "application/json",
+      accept: "application/json"
+    },
+    signal: AbortSignal.timeout(15000),
+    ...(dispatcher ? { dispatcher } : {})
+  });
+  const text = await res.text().catch(() => "");
+  let data = null;
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch {
+    data = null;
+  }
+
+  if (res.status === 401) {
+    throw createHttpError(401, "Kimi authentication expired or invalid");
+  }
+
+  const windows = [];
+  if (res.ok && data && typeof data === "object") {
+    const usageObj = data.usage && typeof data.usage === "object" ? data.usage : {};
+    const wLimit = Number(usageObj.limit ?? usageObj.Limit);
+    const wUsed = Number(usageObj.used ?? usageObj.Used) || 0;
+    const wRem = Number(usageObj.remaining ?? usageObj.Remaining);
+    if (Number.isFinite(wLimit) && wLimit > 0) {
+      const rem = Number.isFinite(wRem) ? wRem : Math.max(0, wLimit - wUsed);
+      windows.push({
+        id: "kimi_weekly",
+        family: "claude_gpt",
+        window: "weekly",
+        label: "Kimi · tuần",
+        remainingFraction: Math.max(0, Math.min(1, rem / wLimit)),
+        resetTime: parseIsoOrUnixReset(
+          usageObj.resetTime || usageObj.ResetTime || usageObj.reset_at || usageObj.resetAt
+        )
+      });
+    }
+    for (const item of Array.isArray(data.limits) ? data.limits : []) {
+      const d = item?.detail && typeof item.detail === "object" ? item.detail : null;
+      if (!d) continue;
+      const l = Number(d.limit ?? d.Limit);
+      const r = Number(d.remaining ?? d.Remaining);
+      if (Number.isFinite(l) && l > 0) {
+        const rem = Number.isFinite(r) ? r : l;
+        windows.push({
+          id: `kimi_limit_${windows.length}`,
+          family: "claude_gpt",
+          window: "5h",
+          label: "Kimi · giới hạn ngắn hạn",
+          remainingFraction: Math.max(0, Math.min(1, rem / l)),
+          resetTime: parseIsoOrUnixReset(d.resetTime || d.reset_at || d.resetAt)
+        });
+      }
+    }
+  }
+
+  const level = data?.user?.membership?.level;
+  const planSuffix = level ? KIMI_PLAN_LEVELS[level] || String(level).replace(/^LEVEL_/, "") : "";
+  const tierLabel = planSuffix ? `Kimi Code · ${planSuffix}` : "Kimi Code Plan";
+  const baseWindow = windows[0] || null;
+  const models = KIMI_CODE_DEFAULT_MODELS.map((id) => ({
+    id,
+    label: id,
+    family: "claude_gpt",
+    kind: "chat",
+    remainingFraction: baseWindow ? baseWindow.remainingFraction : null,
+    resetTime: baseWindow ? baseWindow.resetTime : "",
+    isLive: res.ok
+  }));
+
+  return {
+    planOk: res.ok || res.status === 403,
+    quotaOk: res.ok && windows.length > 0,
+    catalogOk: true,
+    tierLabel,
+    windows,
+    buckets: models
+      .filter((m) => typeof m.remainingFraction === "number")
+      .map((m) => ({
+        modelId: m.id,
+        remainingFraction: m.remainingFraction,
+        resetTime: m.resetTime || ""
+      })),
+    models,
+    liveModelIds: res.ok ? KIMI_CODE_DEFAULT_MODELS : [],
+    defaultModelId: KIMI_CODE_DEFAULT_MODELS[0],
+    perModelHidden: false,
+    ...(!res.ok ? { warning: text.slice(0, 200) || `HTTP ${res.status}` } : {})
+  };
 }

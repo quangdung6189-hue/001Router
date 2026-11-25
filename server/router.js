@@ -1,5 +1,11 @@
 import { nanoid } from "nanoid";
-import { PRESETS, buildUpstreamUrl, getPreset, isKeyOptionalProvider } from "./presets.js";
+import {
+  PRESETS,
+  buildUpstreamUrl,
+  getPreset,
+  isKeyOptionalProvider,
+  isLocalUrl
+} from "./presets.js";
 import {
   catalogChatModelIds,
   explainCloudCode429,
@@ -12,6 +18,18 @@ import {
   resolveCatalogModel,
   syncProviderModelsWithCatalog
 } from "./geminiCliOAuth.js";
+import {
+  KIMI_CODING_BASE_URL,
+  aggregateCodexResponsesStream,
+  buildClaudeOAuthMessagesRequest,
+  buildCodexOAuthRequest,
+  buildKimiHeaders,
+  codexSseEventToOpenAIChunk,
+  getClaudeFallbackCandidates,
+  isClaudeOAuthKey,
+  isCodexOAuthKey,
+  isKimiOAuthKey
+} from "./oauthFlows.js";
 import {
   aggregateCloudCodeStream,
   buildCloudCodeRequest,
@@ -230,6 +248,8 @@ export function sanitizeUpstreamPayload(payload, provider, upstreamModel) {
   const modelLower = String(upstreamModel || payload.model || "").toLowerCase();
 
   const isOpenRouter = preset === "openrouter" || baseUrl.includes("openrouter.ai");
+  const isNousResearch =
+    preset === "nous" || baseUrl.includes("inference-api.nousresearch.com");
   const isOfficialOpenAI =
     preset === "openai" || baseUrl.includes("api.openai.com");
   const isGeminiOpenAI =
@@ -240,6 +260,11 @@ export function sanitizeUpstreamPayload(payload, provider, upstreamModel) {
     isOfficialOpenAI && /^(o1|o3|o4|gpt-5)([-./]|$)/i.test(modelLower);
 
   const out = { ...payload, model: upstreamModel || payload.model };
+  if (isNousResearch) {
+    if (!out.product) out.product = "9router";
+    if (!out.client) out.client = "9router";
+    if (!out.user) out.user = "9router";
+  }
 
   // Strip OpenRouter/client-specific meta fields on non-OpenRouter upstreams
   if (!isOpenRouter) {
@@ -843,6 +868,27 @@ export class RouterService {
       note = note || this.modelCooldownNotes.get(mk) || "";
     }
     return { note, untilMs };
+  }
+
+  /**
+   * Clear per-model in-memory cooldowns and Cloud Code strike caches for a provider (or one key).
+   * @param {string} providerId
+   * @param {string | null} [keyId]
+   */
+  clearProviderCooldowns(providerId, keyId = null) {
+    if (!providerId) return;
+    const prefix = keyId ? `${providerId}|${keyId}|` : `${providerId}|`;
+    for (const map of [
+      this.modelCooldowns,
+      this.modelCooldownNotes,
+      this.cloudCodeStrikes,
+      this.cloudCodeProbes
+    ]) {
+      if (!map) continue;
+      for (const k of [...map.keys()]) {
+        if (k.startsWith(prefix)) map.delete(k);
+      }
+    }
   }
 
   /**
@@ -1518,6 +1564,97 @@ export class RouterService {
                 };
               }
 
+              const isClaudeOAuth =
+                !isEmbeddings && !isGeminiCliKey && isClaudeOAuthKey(keyEntry, resolvedSecret);
+              const isCodexOAuth =
+                !isEmbeddings && !isGeminiCliKey && !isClaudeOAuth && isCodexOAuthKey(keyEntry);
+              const isKimiOAuth =
+                !isEmbeddings &&
+                !isGeminiCliKey &&
+                !isClaudeOAuth &&
+                !isCodexOAuth &&
+                isKimiOAuthKey(keyEntry);
+              let effectiveUpstreamFormat = upstreamFormat;
+              let codexResponsesFoldStream = false;
+              let claudeBaseAnthropicBody = null;
+              let claudeSentModel = target.upstreamModel;
+
+              if (isClaudeOAuth) {
+                effectiveUpstreamFormat = "anthropic";
+                claudeBaseAnthropicBody =
+                  upstreamFormat === "anthropic"
+                    ? { ...upstreamPayload }
+                    : openaiToClaudeRequest(
+                        normalizedClientFormat === "anthropic"
+                          ? claudeToOpenAIRequest(savedBody, target.upstreamModel)
+                          : savedBody,
+                        target.upstreamModel
+                      );
+                const builtClaude = buildClaudeOAuthMessagesRequest(
+                  claudeBaseAnthropicBody,
+                  resolvedSecret,
+                  target.upstreamModel,
+                  {
+                    baseUrl: provider.baseUrl || "https://api.anthropic.com",
+                    clientAnthropicVersion,
+                    availableModels: keyEntry?.oauthMeta?.availableModels,
+                    sessionId: savedBody?.metadata?.session_id
+                  }
+                );
+                effectiveUrl = builtClaude.url;
+                effectiveHeaders = builtClaude.headers;
+                effectiveBody = JSON.stringify(builtClaude.body);
+                claudeSentModel = builtClaude.resolvedModel;
+              } else if (isCodexOAuth) {
+                effectiveUpstreamFormat = "openai";
+                codexResponsesFoldStream = !isStream;
+                const openAiBody =
+                  upstreamFormat === "openai"
+                    ? upstreamPayload
+                    : claudeToOpenAIRequest(savedBody, target.upstreamModel);
+                const isLoopbackCodex = isLocalUrl(provider.baseUrl);
+                const codexTargetUrl = isLoopbackCodex
+                  ? String(provider.baseUrl || "").replace(/\/+$/, "").endsWith("/responses")
+                    ? provider.baseUrl
+                    : buildUpstreamUrl(provider.baseUrl, "openai", "responses")
+                  : undefined;
+                const builtCodex = buildCodexOAuthRequest(
+                  openAiBody,
+                  resolvedSecret,
+                  target.upstreamModel,
+                  {
+                    ...(codexTargetUrl ? { url: codexTargetUrl } : {}),
+                    accountId:
+                      keyEntry?.oauthMeta?.accountId ||
+                      keyEntry?.oauthCredentials?.accountId ||
+                      "",
+                    availableModels: keyEntry?.oauthMeta?.availableModels,
+                    sessionId: savedBody?.metadata?.session_id
+                  }
+                );
+                effectiveUrl = builtCodex.url;
+                effectiveHeaders = builtCodex.headers;
+                effectiveBody = JSON.stringify(builtCodex.body);
+              } else if (isKimiOAuth) {
+                const kimiHeaders = buildKimiHeaders(
+                  keyEntry?.oauthMeta?.deviceId || keyEntry?.oauthCredentials?.deviceId || ""
+                );
+                effectiveHeaders = {
+                  ...kimiHeaders,
+                  ...headers
+                };
+                if (
+                  !isLocalUrl(provider.baseUrl) &&
+                  String(provider.baseUrl || "").toLowerCase().includes("moonshot.cn")
+                ) {
+                  effectiveUrl = buildUpstreamUrl(
+                    KIMI_CODING_BASE_URL,
+                    provider.formatType,
+                    upstreamPath
+                  );
+                }
+              }
+
               let upstreamRes = await (cloudCodeFetch || upstreamFetch)(effectiveUrl, {
                 method: "POST",
                 headers: effectiveHeaders,
@@ -1525,6 +1662,81 @@ export class RouterService {
                 signal: controller.signal,
                 ...(dispatcher ? { dispatcher } : {})
               });
+
+              // Claude OAuth: if requested model (e.g. un-aliased claude-sonnet-5-5) is rejected
+              // with 400/404 model error, retry on live/fallback Claude models on the same account.
+              if (
+                isClaudeOAuth &&
+                claudeBaseAnthropicBody &&
+                (upstreamRes.status === 404 || upstreamRes.status === 400) &&
+                !clientAborted
+              ) {
+                const firstErrText = await upstreamRes.text().catch(() => "");
+                const looksLikeModelError =
+                  upstreamRes.status === 404 ||
+                  /not_found_error|\bmodel\b.*(invalid|not\s+found|unsupported|unavailable|unknown)/i.test(
+                    firstErrText
+                  );
+                if (looksLikeModelError) {
+                  const candidates = getClaudeFallbackCandidates(
+                    claudeSentModel,
+                    keyEntry?.oauthMeta?.availableModels
+                  ).slice(0, 3);
+                  const tried = new Set([claudeSentModel]);
+                  let resolvedRes = null;
+                  let lastFallbackBody = firstErrText;
+                  let lastFallbackStatus = upstreamRes.status;
+                  let lastFallbackHeaders = upstreamRes.headers;
+                  for (const cand of candidates) {
+                    if (tried.has(cand) || clientAborted) continue;
+                    tried.add(cand);
+                    const nextBuilt = buildClaudeOAuthMessagesRequest(
+                      claudeBaseAnthropicBody,
+                      resolvedSecret,
+                      cand,
+                      {
+                        exactModel: true,
+                        baseUrl: provider.baseUrl || "https://api.anthropic.com",
+                        clientAnthropicVersion,
+                        sessionId: savedBody?.metadata?.session_id
+                      }
+                    );
+                    const nextRes = await upstreamFetch(nextBuilt.url, {
+                      method: "POST",
+                      headers: nextBuilt.headers,
+                      body: JSON.stringify(nextBuilt.body),
+                      signal: controller.signal,
+                      ...(dispatcher ? { dispatcher } : {})
+                    });
+                    if (nextRes.ok) {
+                      resolvedRes = nextRes;
+                      break;
+                    }
+                    lastFallbackStatus = nextRes.status;
+                    lastFallbackHeaders = nextRes.headers;
+                    lastFallbackBody = await nextRes.text().catch(() => "");
+                    if (nextRes.status !== 404 && nextRes.status !== 400) {
+                      resolvedRes = new Response(lastFallbackBody, {
+                        status: lastFallbackStatus,
+                        headers: lastFallbackHeaders
+                      });
+                      break;
+                    }
+                  }
+                  upstreamRes =
+                    resolvedRes ||
+                    new Response(lastFallbackBody, {
+                      status: lastFallbackStatus,
+                      headers: lastFallbackHeaders
+                    });
+                } else {
+                  upstreamRes = new Response(firstErrText, {
+                    status: upstreamRes.status,
+                    statusText: upstreamRes.statusText,
+                    headers: upstreamRes.headers
+                  });
+                }
+              }
 
               // Antigravity flags certain systemInstruction texts with a detail-free HTTP 429
               // even with 100% quota left. Retry once with systemInstruction folded into the
@@ -1598,6 +1810,10 @@ export class RouterService {
               if (
                 upstreamRes.status === 401 &&
                 resolvedSecret &&
+                !isGeminiCliKey &&
+                !isClaudeOAuth &&
+                !isCodexOAuth &&
+                !isKimiOAuth &&
                 provider.formatType === "anthropic" &&
                 !String(provider.baseUrl || "").toLowerCase().includes("api.anthropic.com")
               ) {
@@ -1740,7 +1956,8 @@ export class RouterService {
                   // Per-model rate/capacity limit: keep the key usable for every other model.
                   const mk = this._modelCooldownKey(provider.id, keyEntry.id, target.upstreamModel);
                   this.modelCooldowns.set(mk, cooldownUntil);
-                  if (cloudCodeVerdict?.note) this.modelCooldownNotes.set(mk, cloudCodeVerdict.note);
+                  const noteText = cloudCodeVerdict?.note || cleanMsg.slice(0, 260);
+                  if (noteText) this.modelCooldownNotes.set(mk, noteText);
                   else this.modelCooldownNotes.delete(mk);
                 }
 
@@ -1796,6 +2013,15 @@ export class RouterService {
                       invalidBodyMsg = "Upstream stream ended without a response";
                       throw new Error(invalidBodyMsg);
                     }
+                  } else if (codexResponsesFoldStream) {
+                    upstreamJson = aggregateCodexResponsesStream(jsonText, target.upstreamModel);
+                    if (upstreamJson?.error) {
+                      invalidBodyMsg = `upstream ${provider.slug} stream error: ${sanitizeSecrets(
+                        String(upstreamJson.error.message || "unknown").slice(0, 300),
+                        [...this._allSecretKeys(), ...(resolvedSecret ? [resolvedSecret] : [])]
+                      )}`;
+                      throw new Error(invalidBodyMsg);
+                    }
                   } else {
                     upstreamJson = JSON.parse(jsonText);
                   }
@@ -1822,7 +2048,7 @@ export class RouterService {
                   break;
                 }
 
-                if (upstreamFormat === "anthropic") {
+                if (effectiveUpstreamFormat === "anthropic") {
                   promptTokens = upstreamJson?.usage?.input_tokens ?? 0;
                   completionTokens = upstreamJson?.usage?.output_tokens ?? 0;
                   cachedTokens = upstreamJson?.usage?.cache_read_input_tokens ?? 0;
@@ -1847,15 +2073,15 @@ export class RouterService {
                 }
 
                 let responseBody;
-                if (isEmbeddings || clientFormat === upstreamFormat) {
+                if (isEmbeddings || clientFormat === effectiveUpstreamFormat) {
                   responseBody = upstreamJson;
                 } else if (clientFormat === "openai-responses") {
                   const asOpenAI =
-                    upstreamFormat === "anthropic"
+                    effectiveUpstreamFormat === "anthropic"
                       ? claudeToOpenAIResponse(upstreamJson, requestedModel)
                       : upstreamJson;
                   responseBody = openAIToResponsesResponse(asOpenAI, requestedModel);
-                } else if (clientFormat === "anthropic" && upstreamFormat === "openai") {
+                } else if (clientFormat === "anthropic" && effectiveUpstreamFormat === "openai") {
                   responseBody = openaiToClaudeResponse(upstreamJson, requestedModel);
                 } else {
                   responseBody = claudeToOpenAIResponse(upstreamJson, requestedModel);
@@ -2043,12 +2269,13 @@ export class RouterService {
                 upstreamRes,
                 res,
                 clientFormat,
-                upstreamFormat,
+                upstreamFormat: effectiveUpstreamFormat,
                 requestedModel,
                 timeoutTimer: timer,
                 isClientAborted: () => clientAborted,
                 isTimedOut: () => timedOut,
                 cloudCode: isGeminiCliKey,
+                codexResponses: isCodexOAuth,
                 onFirstByteSent: () => {
                   hasSentBytesToClient = true;
                 }
@@ -2340,7 +2567,8 @@ export class RouterService {
     isClientAborted,
     isTimedOut,
     onFirstByteSent,
-    cloudCode = false
+    cloudCode = false,
+    codexResponses = false
   }) {
     const reader = upstreamRes.body.getReader();
     const decoder = new TextDecoder();
@@ -2487,6 +2715,133 @@ export class RouterService {
           midStreamError: firstByteSent,
           timedOut: Boolean(isTimedOut?.()) || err?.name === "AbortError",
           error: err?.message || "Upstream Cloud Code stream interrupted",
+          promptTokens,
+          completionTokens
+        };
+      }
+    }
+
+    // OpenAI Codex OAuth (chatgpt.com/backend-api/codex/responses) emits Responses API SSE events.
+    // Translate events to OpenAI chunks (and optionally to Anthropic/Responses via createStreamTransformer).
+    if (codexResponses) {
+      const codexState = { model: requestedModel };
+      const tx =
+        clientFormat === "openai"
+          ? null
+          : createStreamTransformer(clientFormat, "openai", requestedModel);
+      let finalizedSent = false;
+      let roleSent = false;
+      let streamFailure = "";
+
+      const emitTail = () => {
+        if (finalizedSent) return;
+        finalizedSent = true;
+        if (tx) {
+          const tail = tx.finalize();
+          if (tail) writeToClient(tail);
+        } else if (firstByteSent) {
+          writeToClient("data: [DONE]\n\n");
+        }
+      };
+
+      const parser = createSSEParser(({ event, data }) => {
+        if (!data || data === "[DONE]") {
+          if (data === "[DONE]") emitTail();
+          return;
+        }
+        let parsed;
+        try {
+          parsed = JSON.parse(data);
+        } catch {
+          return;
+        }
+        const chunk = codexSseEventToOpenAIChunk(event, parsed, codexState);
+        if (!chunk) return;
+        if (chunk.error) {
+          streamFailure = chunk.error;
+          return;
+        }
+        if (codexState.usage) {
+          promptTokens = codexState.usage.promptTokens || promptTokens;
+          completionTokens = codexState.usage.completionTokens || completionTokens;
+        }
+        if (!roleSent && chunk.choices?.[0]?.delta) {
+          roleSent = true;
+          chunk.choices[0].delta = { role: "assistant", ...chunk.choices[0].delta };
+        }
+        if (clientFormat === "openai") {
+          writeToClient(`data: ${JSON.stringify(chunk)}\n\n`);
+        } else {
+          const out = tx.pushChunk(chunk);
+          if (out) writeToClient(out);
+        }
+        if (chunk.choices?.[0]?.finish_reason) {
+          emitTail();
+        }
+      });
+
+      try {
+        while (true) {
+          if (isClientAborted()) {
+            await reader.cancel().catch(() => {});
+            return {
+              failedBeforeFirstByte: !firstByteSent,
+              abortedByClient: true,
+              midStreamError: false,
+              promptTokens,
+              completionTokens
+            };
+          }
+
+          const { value, done } = await reader.read();
+          if (done) {
+            parser.flush();
+            if (firstByteSent) emitTail();
+            break;
+          }
+          if (value && value.length > 0) {
+            clearTtfbTimer();
+            parser.feed(decoder.decode(value, { stream: true }));
+          }
+        }
+
+        if (!firstByteSent) {
+          return {
+            failedBeforeFirstByte: true,
+            timedOut: false,
+            error: streamFailure || "Upstream Codex stream ended with no data",
+            promptTokens,
+            completionTokens
+          };
+        }
+
+        return {
+          failedBeforeFirstByte: false,
+          abortedByClient: false,
+          midStreamError: Boolean(streamFailure),
+          ...(streamFailure ? { error: streamFailure } : {}),
+          promptTokens,
+          completionTokens
+        };
+      } catch (err) {
+        clearTtfbTimer();
+        await reader.cancel().catch(() => {});
+        if (isClientAborted()) {
+          return {
+            failedBeforeFirstByte: !firstByteSent,
+            abortedByClient: true,
+            midStreamError: false,
+            error: "Client aborted stream",
+            promptTokens,
+            completionTokens
+          };
+        }
+        return {
+          failedBeforeFirstByte: !firstByteSent,
+          abortedByClient: false,
+          midStreamError: firstByteSent,
+          timedOut: Boolean(isTimedOut?.()) || err?.name === "AbortError",
+          error: err?.message || "Upstream Codex stream interrupted",
           promptTokens,
           completionTokens
         };

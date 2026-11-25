@@ -9,9 +9,10 @@ export const FAMILY_LABELS = {
 };
 const FAMILY_ORDER = ['gemini', 'gemini_argon', 'claude_gpt', ''];
 
-/** "Gemini · tuần" / "Claude & GPT · 5 giờ" for a quota window. */
+/** "Gemini · tuần" / "Claude & GPT · 5 giờ" for a quota window, preferring server label. */
 export function windowLabel(w) {
-  const family = FAMILY_LABELS[w?.family] || w?.label || 'Quota';
+  if (typeof w?.label === 'string' && w.label.trim()) return w.label.trim();
+  const family = FAMILY_LABELS[w?.family] || 'Quota';
   return `${family} · ${w?.window === 'weekly' ? 'tuần' : '5 giờ'}`;
 }
 
@@ -202,9 +203,10 @@ export function CloudCodeQuota({
   const showPct = !perModelHidden;
   const effectiveWindows =
     Array.isArray(windows) && windows.length ? windows : deriveMetersFromModels(chat);
-  const groups = FAMILY_ORDER.map((f) => ({
+  const extraFamilies = [...new Set(chat.map((m) => m.family || '').filter((f) => !FAMILY_ORDER.includes(f)))];
+  const groups = [...FAMILY_ORDER, ...extraFamilies].map((f) => ({
     family: f,
-    label: FAMILY_LABELS[f] || 'Khác',
+    label: FAMILY_LABELS[f] || f || 'Khác',
     items: chat.filter((m) => (m.family || '') === f),
   })).filter((g) => g.items.length);
 

@@ -49,6 +49,7 @@ import { Switch } from '../components/Switch';
 import { CopyButton } from '../components/CopyButton';
 import { ProviderLogo } from '../components/ProviderLogo';
 import { ProviderCard } from '../components/providers/ProviderCard';
+import { CloudCodeQuota } from '../components/providers/CloudCodeQuota';
 import { GoogleMark } from '../components/providers/GoogleMark';
 import { AntigravitySignIn } from '../components/providers/AntigravitySignIn';
 import {
@@ -1258,12 +1259,16 @@ export function ProvidersPage() {
   const syncConnectedProviderPlan = useCallback(
     async (savedProv) => {
       if (!savedProv?.id) return savedProv;
-      await Promise.all([
-        providersApi.fetchModels(savedProv.id).catch(() => null),
-        providersApi.inspectAccount(savedProv.id, { checkBilling: false }).catch(() => null),
-      ]);
+      const inspectRes = await providersApi
+        .inspectAccount(savedProv.id, { checkBilling: false })
+        .catch(() => null);
+      if (inspectRes) {
+        setAccountReport(inspectRes);
+      }
+      const modelsRes = await providersApi.fetchModels(savedProv.id).catch(() => null);
       const freshRes = await providersApi.get(savedProv.id).catch(() => null);
-      const latest = freshRes?.provider || savedProv;
+      const latest =
+        freshRes?.provider || modelsRes?.provider || inspectRes?.provider || savedProv;
       await loadProviders();
       if (latest) {
         setForm((prev) =>
@@ -1820,6 +1825,12 @@ export function ProvidersPage() {
         keyId ? { keyId, checkBilling: true } : { checkBilling: true }
       );
       setAccountReport(res);
+      if (res?.provider) {
+        setProviders((prev) => prev.map((p) => (p.id === res.provider.id ? res.provider : p)));
+        setForm((prev) => (prev && prev.id === res.provider.id ? providerToForm(res.provider) : prev));
+      } else {
+        await loadProviders();
+      }
       if (res?.billingStatus === 'inactive') {
         toast.error(res.billingMessage || 'Cảnh báo: Tài khoản chưa bật Billing hoặc hết credit');
       } else if (res?.ok) {
@@ -2054,13 +2065,19 @@ export function ProvidersPage() {
     if (!flowObj?.flowId || !flowObj?.provider) return;
     setDevicePolling(true);
     try {
+      const isKimiDevice =
+        flowObj.provider === 'kimi' || flowObj.provider === 'kimi-coding';
+      const kimiBaseOverride =
+        isKimiDevice &&
+        (!form?.baseUrl ||
+          String(form.baseUrl).toLowerCase().includes('moonshot.cn'))
+          ? 'https://api.kimi.com/coding/v1'
+          : form?.baseUrl || '';
       const res = await providersApi.pollDeviceCode(flowObj.provider, {
         flowId: flowObj.flowId,
         ...(form?.id ? { providerId: form.id } : {}),
         ...(oauth2Label.trim() ? { label: oauth2Label.trim() } : {}),
-        ...(form?.baseUrl && !(flowObj.provider === 'kimi' && !form?.id)
-          ? { providerBaseUrl: form.baseUrl }
-          : {}),
+        ...(kimiBaseOverride ? { providerBaseUrl: kimiBaseOverride } : {}),
       });
       if (!isMountedRef.current) return;
 
@@ -2333,6 +2350,33 @@ export function ProvidersPage() {
       if (specificModel) {
         setModelTestResults((prev) => ({ ...prev, [specificModel]: res }));
       }
+      if (res?.ok) {
+        setForm((prev) =>
+          prev
+            ? {
+                ...prev,
+                apiKeys: (prev.apiKeys || []).map((k) => ({
+                  ...k,
+                  cooldownUntil: null,
+                  lastError: '',
+                })),
+              }
+            : prev
+        );
+        setProviders((prev) =>
+          prev.map((p) =>
+            p.id === saved.id
+              ? {
+                  ...p,
+                  apiKeys: (p.apiKeys || []).map((k) => ({
+                    ...k,
+                    cooldownUntil: null,
+                  })),
+                }
+              : p
+          )
+        );
+      }
       // A per-model test on a Cloud Code key (Gemini CLI / Antigravity) sends one real chat, so it
       // carries the model's own answer and token usage; the generic probe only has a status line.
       const usageLine =
@@ -2368,10 +2412,17 @@ export function ProvidersPage() {
       }
       const res = await providersApi.fetchModels(saved.id);
       const nextModels = Array.isArray(res?.models) ? res.models : [];
-      setForm((prev) => (prev ? { ...prev, models: nextModels } : prev));
-      setProviders((prev) =>
-        prev.map((p) => (p.id === saved.id ? { ...p, models: nextModels } : p))
-      );
+      if (res?.provider) {
+        setForm((prev) => (prev && prev.id === res.provider.id ? providerToForm(res.provider) : prev));
+        setProviders((prev) =>
+          prev.map((p) => (p.id === res.provider.id ? res.provider : p))
+        );
+      } else {
+        setForm((prev) => (prev ? { ...prev, models: nextModels } : prev));
+        setProviders((prev) =>
+          prev.map((p) => (p.id === saved.id ? { ...p, models: nextModels } : p))
+        );
+      }
       setModalFeedback({
         type: res?.ok ? 'success' : 'error',
         message: res?.ok
@@ -3341,6 +3392,28 @@ export function ProvidersPage() {
                                     {form.slug}/{m}
                                   </code>
                                 ))}
+                              </div>
+                            ) : null}
+
+                            {(Array.isArray(accountReport.quotaWindows) &&
+                              accountReport.quotaWindows.length > 0) ||
+                            (Array.isArray(accountReport.availableModels) &&
+                              accountReport.availableModels.length > 0) ? (
+                              <div className="border-t border-[var(--border-subtle)] pt-2">
+                                <CloudCodeQuota
+                                  quota={{
+                                    tierLabel: accountReport.tierLabel,
+                                    email: accountReport.email,
+                                    projectId: accountReport.projectId,
+                                    windows: accountReport.quotaWindows || [],
+                                    models: accountReport.availableModels || [],
+                                    live: true,
+                                  }}
+                                  onPickModel={(id) => {
+                                    navigator.clipboard?.writeText(`${form.slug}/${id}`).catch(() => {});
+                                    toast.success(`Đã sao chép ${form.slug}/${id}`);
+                                  }}
+                                />
                               </div>
                             ) : null}
                           </div>
@@ -4407,6 +4480,38 @@ export function ProvidersPage() {
                                   {oauth2Busy ? 'Đang kết nối…' : 'Hoàn tất kết nối & nhận gói'}
                                 </button>
                               </div>
+
+                              {(form.apiKeys || [])
+                                .filter(
+                                  (k) =>
+                                    k.enabled !== false &&
+                                    ((Array.isArray(k.oauthMeta?.quotaWindows) &&
+                                      k.oauthMeta.quotaWindows.length > 0) ||
+                                      (Array.isArray(k.oauthMeta?.availableModels) &&
+                                        k.oauthMeta.availableModels.length > 0))
+                                )
+                                .map((k) => (
+                                  <div
+                                    key={k.localId || k.id}
+                                    className="border-t border-emerald-500/20 pt-2.5"
+                                  >
+                                    <CloudCodeQuota
+                                      quota={{
+                                        tierLabel: k.oauthMeta?.tierLabel || k.label,
+                                        email: k.oauthMeta?.email || '',
+                                        projectId: k.oauthMeta?.projectId || '',
+                                        windows: k.oauthMeta?.quotaWindows || [],
+                                        models: k.oauthMeta?.availableModels || [],
+                                        checkedAt: k.oauthMeta?.checkedAt || '',
+                                        live: true,
+                                      }}
+                                      onPickModel={(id) => {
+                                        navigator.clipboard?.writeText(`${form.slug}/${id}`).catch(() => {});
+                                        toast.success(`Đã sao chép ${form.slug}/${id}`);
+                                      }}
+                                    />
+                                  </div>
+                                ))}
                             </div>
                           );
                         })()}
@@ -4503,6 +4608,38 @@ export function ProvidersPage() {
                               </div>
                             </div>
                           )}
+
+                          {(form.apiKeys || [])
+                            .filter(
+                              (k) =>
+                                k.enabled !== false &&
+                                ((Array.isArray(k.oauthMeta?.quotaWindows) &&
+                                  k.oauthMeta.quotaWindows.length > 0) ||
+                                  (Array.isArray(k.oauthMeta?.availableModels) &&
+                                    k.oauthMeta.availableModels.length > 0))
+                            )
+                            .map((k) => (
+                              <div
+                                key={k.localId || k.id}
+                                className="border-t border-orange-500/20 pt-2.5"
+                              >
+                                <CloudCodeQuota
+                                  quota={{
+                                    tierLabel: k.oauthMeta?.tierLabel || k.label,
+                                    email: k.oauthMeta?.email || '',
+                                    projectId: k.oauthMeta?.projectId || '',
+                                    windows: k.oauthMeta?.quotaWindows || [],
+                                    models: k.oauthMeta?.availableModels || [],
+                                    checkedAt: k.oauthMeta?.checkedAt || '',
+                                    live: true,
+                                  }}
+                                  onPickModel={(id) => {
+                                    navigator.clipboard?.writeText(`${form.slug}/${id}`).catch(() => {});
+                                    toast.success(`Đã sao chép ${form.slug}/${id}`);
+                                  }}
+                                />
+                              </div>
+                            ))}
                         </div>
 
                         <div className="flex items-center gap-3 text-[11px] text-[var(--text-muted)]">
