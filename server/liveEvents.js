@@ -14,6 +14,8 @@ export class LiveEventsHub {
   constructor() {
     /** @type {Map<string, number>} providerSlug -> active in-flight count */
     this.activeRequests = new Map();
+    /** @type {Map<string, string[]>} providerSlug -> active in-flight model ids */
+    this.activeModels = new Map();
     /** @type {Array<any>} */
     this.recentRequests = [];
     /** @type {{ provider: string, message: string, at: string } | null} */
@@ -80,10 +82,21 @@ export class LiveEventsHub {
   /**
    * Record that an upstream request has started on `providerSlug`.
    * @param {string} providerSlug
+   * @param {{ model?: string } | null} [meta]
    */
-  markRequestStart(providerSlug) {
+  markRequestStart(providerSlug, meta = null) {
     if (!providerSlug) return;
     this.activeRequests.set(providerSlug, (this.activeRequests.get(providerSlug) || 0) + 1);
+    const rawModel = typeof meta?.model === "string" ? meta.model.trim() : "";
+    if (rawModel) {
+      const cleanModel = rawModel.startsWith(`${providerSlug}/`)
+        ? rawModel.slice(providerSlug.length + 1)
+        : rawModel;
+      const list = this.activeModels.get(providerSlug) || [];
+      list.push(cleanModel);
+      if (list.length > 16) list.splice(0, list.length - 16);
+      this.activeModels.set(providerSlug, list);
+    }
     this._broadcastUsageSnapshot();
   }
 
@@ -95,8 +108,23 @@ export class LiveEventsHub {
   markRequestEnd(providerSlug, summary = null) {
     if (providerSlug) {
       const current = this.activeRequests.get(providerSlug) || 0;
-      if (current <= 1) this.activeRequests.delete(providerSlug);
-      else this.activeRequests.set(providerSlug, current - 1);
+      if (current <= 1) {
+        this.activeRequests.delete(providerSlug);
+        this.activeModels.delete(providerSlug);
+      } else {
+        this.activeRequests.set(providerSlug, current - 1);
+        const list = this.activeModels.get(providerSlug);
+        if (list && list.length > 0) {
+          const rawModel = String(summary?.model || summary?.resolvedModel || "").trim();
+          const cleanModel = rawModel.startsWith(`${providerSlug}/`)
+            ? rawModel.slice(providerSlug.length + 1)
+            : rawModel;
+          const idx = cleanModel ? list.indexOf(cleanModel) : -1;
+          if (idx >= 0) list.splice(idx, 1);
+          else list.shift();
+          if (list.length === 0) this.activeModels.delete(providerSlug);
+        }
+      }
     }
 
     if (summary) {
@@ -152,12 +180,20 @@ export class LiveEventsHub {
 
   getUsageSnapshot(limit = 50) {
     const active = {};
+    const activeModels = {};
     for (const [k, v] of this.activeRequests.entries()) {
-      if (v > 0) active[k] = v;
+      if (v > 0) {
+        active[k] = v;
+        const models = this.activeModels.get(k);
+        if (models && models.length > 0) {
+          activeModels[k] = [...new Set(models)];
+        }
+      }
     }
     const maxItems = Math.max(1, Math.min(Number(limit) || 50, MAX_RECENT_REQUESTS));
     return {
       activeRequests: active,
+      activeModels,
       recentRequests: this.recentRequests.slice(0, maxItems),
       errorProvider: this.errorProvider,
       timestamp: new Date().toISOString()

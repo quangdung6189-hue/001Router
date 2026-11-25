@@ -4793,7 +4793,7 @@ export function createDashboardRouter(storage, liveEvents = null) {
     const maxItems = Math.max(1, Math.min(Number(limit) || 100, 200));
     const liveSnap = liveEvents
       ? liveEvents.getUsageSnapshot(maxItems)
-      : { activeRequests: {}, recentRequests: [], errorProvider: null };
+      : { activeRequests: {}, activeModels: {}, recentRequests: [], errorProvider: null };
     const persisted = storage.getLogs().slice(0, maxItems).map(mapPersistedLogToRecent);
 
     const byId = new Map();
@@ -4836,6 +4836,7 @@ export function createDashboardRouter(storage, liveEvents = null) {
 
     return {
       activeRequests: liveSnap.activeRequests || {},
+      activeModels: liveSnap.activeModels || {},
       recentRequests: merged,
       errorProvider: liveSnap.errorProvider || null,
       totalLogged: storage.getLogs().length,
@@ -5186,6 +5187,7 @@ export function createDashboardRouter(storage, liveEvents = null) {
       byKey: [...byKeyMap.values()].sort((a, b) => b.requests - a.requests),
       byEndpoint: [...byEndpointMap.values()].sort((a, b) => b.requests - a.requests),
       activeRequests: mergedLive.activeRequests,
+      activeModels: mergedLive.activeModels || {},
       recentRequests: mergedLive.recentRequests,
       errorProvider: mergedLive.errorProvider
     });

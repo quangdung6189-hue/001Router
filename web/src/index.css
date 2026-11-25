@@ -657,15 +657,6 @@ dialog.nav-drawer:modal {
     animation-iteration-count: 1 !important;
     scroll-behavior: auto !important;
   }
-
-  .topology-router-core,
-  .topology-node-active,
-  .topology-edge-silk,
-  .topology-edge-idle-shimmer,
-  .topology-edge-halo,
-  .topology-core-ring {
-    animation: none !important;
-  }
 }
 
 /* ==========================================================================
@@ -819,34 +810,52 @@ dialog.nav-drawer:modal {
 }
 
 /* ==========================================================================
-   Live Provider Topology — Fluid Glassmorphic Conduits & Physics Spring Motion
-   Follows modern-web-guidance: motion (opt-in no-preference) & physics-based-easing
+   Live Provider Topology — Bilateral Circuit Conduits, Spring Motion & Size-Aware Dock
+   Follows modern-web-guidance: motion, physics-based-easing, size-aware-styling,
+   and animate-element-entry-exit
    ========================================================================== */
+.topology-shell {
+  container-type: inline-size;
+}
+
 @keyframes topology-router-breathe {
   0%, 100% {
     box-shadow:
-      0 0 0 1px color-mix(in srgb, var(--accent) 48%, transparent),
-      0 10px 28px -8px color-mix(in srgb, var(--accent) 30%, transparent),
-      0 0 38px -10px rgba(56, 189, 248, 0.22);
+      0 0 0 1px color-mix(in srgb, var(--accent) 52%, transparent),
+      0 12px 30px -8px color-mix(in srgb, var(--accent) 34%, transparent),
+      0 0 42px -10px rgba(56, 189, 248, 0.24);
   }
   50% {
     box-shadow:
-      0 0 0 1.5px color-mix(in srgb, var(--accent) 76%, transparent),
-      0 14px 36px -6px color-mix(in srgb, var(--accent) 42%, transparent),
-      0 0 48px -6px rgba(16, 185, 129, 0.28);
+      0 0 0 1.5px color-mix(in srgb, var(--accent) 82%, transparent),
+      0 16px 38px -6px color-mix(in srgb, var(--accent) 46%, transparent),
+      0 0 54px -6px rgba(16, 185, 129, 0.34);
   }
 }
 
 @keyframes topology-node-glow {
   0%, 100% {
     box-shadow:
-      0 0 0 1px rgba(16, 185, 129, 0.42),
-      0 10px 26px -8px rgba(16, 185, 129, 0.24);
+      0 0 0 1px color-mix(in srgb, var(--node-accent, #10b981) 52%, transparent),
+      0 10px 26px -8px color-mix(in srgb, var(--node-accent, #10b981) 30%, transparent);
   }
   50% {
     box-shadow:
-      0 0 0 1.5px rgba(16, 185, 129, 0.72),
-      0 14px 32px -6px rgba(56, 189, 248, 0.28);
+      0 0 0 1.5px color-mix(in srgb, var(--node-accent, #10b981) 82%, transparent),
+      0 14px 34px -6px color-mix(in srgb, var(--node-accent, #10b981) 42%, transparent);
+  }
+}
+
+@keyframes topology-node-error-pulse {
+  0%, 100% {
+    box-shadow:
+      0 0 0 1px rgba(239, 68, 68, 0.55),
+      0 10px 26px -8px rgba(239, 68, 68, 0.28);
+  }
+  50% {
+    box-shadow:
+      0 0 0 1.5px rgba(239, 68, 68, 0.85),
+      0 14px 32px -6px rgba(239, 68, 68, 0.42);
   }
 }
 
@@ -859,22 +868,31 @@ dialog.nav-drawer:modal {
   }
 }
 
+@keyframes topology-edge-flow-reverse {
+  from {
+    stroke-dashoffset: 0;
+  }
+  to {
+    stroke-dashoffset: 180;
+  }
+}
+
 @keyframes topology-aura-breathe {
   0%, 100% {
-    opacity: 0.14;
+    opacity: 0.16;
   }
   50% {
-    opacity: 0.3;
+    opacity: 0.34;
   }
 }
 
 @keyframes topology-ring-expand {
   0% {
-    transform: scale(0.92);
-    opacity: 0.45;
+    transform: scale(0.94);
+    opacity: 0.5;
   }
   100% {
-    transform: scale(1.22);
+    transform: scale(1.24);
     opacity: 0;
   }
 }
@@ -883,57 +901,143 @@ dialog.nav-drawer:modal {
   --topo-spring: cubic-bezier(0.34, 1.45, 0.64, 1);
   transition:
     transform 0.42s ease-out,
-    border-color 0.25s ease,
-    box-shadow 0.32s ease;
-  transition-timing-function: linear(
-    0, 0.009, 0.035 2.1%, 0.141 4.4%, 0.723 12.9%, 0.938 16.7%, 1.017, 1.077,
-    1.121, 1.149 24.3%, 1.159, 1.163, 1.161, 1.154 29.9%, 1.129 32.8%,
-    1.051 39.6%, 1.017 43.1%, 0.991, 0.977 51%, 0.974 53.8%, 0.975 57.1%,
-    0.997 69.8%, 1.003 76.9%, 1
-  ), ease, ease;
+    opacity 0.22s ease,
+    border-color 0.22s ease,
+    box-shadow 0.28s ease;
+  transition-timing-function:
+    linear(
+      0, 0.009, 0.035 2.1%, 0.141 4.4%, 0.723 12.9%, 0.938 16.7%, 1.017, 1.077,
+      1.121, 1.149 24.3%, 1.159, 1.163, 1.161, 1.154 29.9%, 1.129 32.8%,
+      1.051 39.6%, 1.017 43.1%, 0.991, 0.977 51%, 0.974 53.8%, 0.975 57.1%,
+      0.997 69.8%, 1.003 76.9%, 1
+    ),
+    ease,
+    ease,
+    ease;
 }
 
 @supports not (transition-timing-function: linear(0, 1)) {
   .topology-card-spring {
-    transition-timing-function: var(--topo-spring), ease, ease;
+    transition-timing-function: var(--topo-spring), ease, ease, ease;
   }
+}
+
+.topology-telemetry-pill,
+.topology-model-dock {
+  opacity: 1;
+  translate: 0 0;
+  transition:
+    opacity 0.22s ease-out,
+    translate 0.26s cubic-bezier(0.22, 1, 0.36, 1),
+    display 0.22s;
+  transition-behavior: allow-discrete;
+}
+
+@starting-style {
+  .topology-telemetry-pill {
+    opacity: 0;
+    translate: 0 6px;
+  }
+
+  .topology-model-dock {
+    opacity: 0;
+    translate: 0 8px;
+  }
+}
+
+.topology-model-dock[hidden],
+.topology-telemetry-pill[hidden] {
+  display: none;
+  opacity: 0;
+  translate: 0 6px;
 }
 
 @media (prefers-reduced-motion: no-preference) {
   .topology-router-core {
-    animation: topology-router-breathe 2.6s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+    animation: topology-router-breathe 2.4s cubic-bezier(0.4, 0, 0.2, 1) infinite;
   }
 
   .topology-node-active {
-    animation: topology-node-glow 2.4s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+    animation: topology-node-glow 2.1s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+  }
+
+  .topology-node-error {
+    animation: topology-node-error-pulse 2s cubic-bezier(0.4, 0, 0.2, 1) infinite;
   }
 
   .topology-edge-halo {
-    animation: topology-aura-breathe 2.4s ease-in-out infinite;
+    animation: topology-aura-breathe 2.2s ease-in-out infinite;
   }
 
   .topology-edge-silk {
-    stroke-dasharray: 42 138;
-    animation: topology-edge-flow 1.45s cubic-bezier(0.35, 0, 0.25, 1) infinite;
+    stroke-dasharray: 44 136;
+    animation: topology-edge-flow 1.4s cubic-bezier(0.35, 0, 0.25, 1) infinite;
+  }
+
+  .topology-edge-return {
+    stroke-dasharray: 36 144;
+    animation: topology-edge-flow-reverse 1.25s cubic-bezier(0.25, 0.1, 0.25, 1) infinite;
   }
 
   .topology-edge-idle-shimmer {
-    stroke-dasharray: 22 158;
-    animation: topology-edge-flow 4.2s linear infinite;
+    stroke-dasharray: 20 160;
+    animation: topology-edge-flow 4.8s linear infinite;
   }
 
   .topology-core-ring {
-    animation: topology-ring-expand 2.2s cubic-bezier(0.2, 0.8, 0.2, 1) infinite;
+    animation: topology-ring-expand 2.1s cubic-bezier(0.2, 0.8, 0.2, 1) infinite;
+  }
+
+  .topology-core-ring-delayed {
+    animation: topology-ring-expand 2.1s cubic-bezier(0.2, 0.8, 0.2, 1) 1.05s infinite;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .topology-card-spring {
+    transition: opacity 0.12s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+  }
+
+  .topology-telemetry-pill,
+  .topology-model-dock {
+    translate: none;
+    transition: opacity 0.1s ease;
+  }
+
+  .topology-telemetry-pill[hidden],
+  .topology-model-dock[hidden] {
+    translate: none;
+  }
+}
+
+@starting-style {
+  @media (prefers-reduced-motion: reduce) {
+    .topology-telemetry-pill,
+    .topology-model-dock {
+      translate: none;
+    }
   }
 }
 
 .topology-paused .topology-router-core,
 .topology-paused .topology-node-active,
+.topology-paused .topology-node-error,
 .topology-paused .topology-edge-halo,
 .topology-paused .topology-edge-silk,
+.topology-paused .topology-edge-return,
 .topology-paused .topology-edge-idle-shimmer,
-.topology-paused .topology-core-ring {
+.topology-paused .topology-core-ring,
+.topology-paused .topology-core-ring-delayed {
   animation-play-state: paused !important;
+}
+
+@container (max-width: 620px) {
+  .topology-header-meta {
+    display: none;
+  }
+  .topology-dock-hint {
+    display: none;
+  }
 }
 
 @keyframes live-req-enter {

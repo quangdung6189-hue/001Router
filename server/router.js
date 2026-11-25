@@ -1391,7 +1391,9 @@ export class RouterService {
                 clientAnthropicVersion,
                 authCtx.extraHeaders
               );
-              this.liveEvents?.markRequestStart(provider.slug);
+              this.liveEvents?.markRequestStart(provider.slug, {
+                model: target.upstreamModel
+              });
               markedActive = true;
 
               // Gemini CLI / Antigravity (Cloud Code Assist) keys speak a different wire format:

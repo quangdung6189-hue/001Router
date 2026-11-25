@@ -127,11 +127,15 @@ export function UsagePage() {
   const [usage, setUsage] = useState(null);
   const [providers, setProviders] = useState([]);
   const [activeRequests, setActiveRequests] = useState({});
+  const [activeModels, setActiveModels] = useState({});
   const [recentRequests, setRecentRequests] = useState([]);
   const [recentPulseSlugs, setRecentPulseSlugs] = useState({});
+  const [recentPulses, setRecentPulses] = useState({});
   const [newArrivalIds, setNewArrivalIds] = useState(() => new Set());
   const [errorProvider, setErrorProvider] = useState(null);
   const [sseLive, setSseLive] = useState(false);
+  const [hoveredTopologySlug, setHoveredTopologySlug] = useState('');
+  const [selectedTopologySlug, setSelectedTopologySlug] = useState('');
 
   const seenReqIdsRef = useRef(new Set());
   const hydratedRecentRef = useRef(false);
@@ -203,6 +207,33 @@ export function UsagePage() {
 
       const slugsToPulse = [...new Set(newlyArrived.map((x) => x.item.provider).filter(Boolean))];
       if (slugsToPulse.length > 0) {
+        const pulseSeq = Date.now() + Math.random();
+        const latestBySlug = {};
+        for (const { item } of newlyArrived) {
+          if (!item?.provider || latestBySlug[item.provider]) continue;
+          const code =
+            typeof item.httpStatus === 'number'
+              ? item.httpStatus
+              : typeof item.status === 'number'
+                ? item.status
+                : item.status === 'ok'
+                  ? 200
+                  : 500;
+          const ok = item.status === 'ok' || (code >= 200 && code < 400);
+          const rawModel = String(item.model || item.resolvedModel || item.requestedModel || '');
+          const cleanModel = rawModel.startsWith(`${item.provider}/`)
+            ? rawModel.slice(item.provider.length + 1)
+            : rawModel;
+          latestBySlug[item.provider] = {
+            seq: pulseSeq,
+            model: cleanModel,
+            httpStatus: code,
+            ok,
+            latencyMs: Number(item.latencyMs) || 0,
+            tokens: (Number(item.promptTokens) || 0) + (Number(item.completionTokens) || 0),
+          };
+        }
+
         setRecentPulseSlugs((prev) => {
           const next = { ...prev };
           for (const slug of slugsToPulse) {
@@ -210,6 +241,8 @@ export function UsagePage() {
           }
           return next;
         });
+        setRecentPulses((prev) => ({ ...prev, ...latestBySlug }));
+
         const clearBeamTimer = setTimeout(() => {
           setRecentPulseSlugs((prev) => {
             const next = { ...prev };
@@ -220,7 +253,14 @@ export function UsagePage() {
             }
             return next;
           });
-        }, 2800);
+          setRecentPulses((prev) => {
+            const next = { ...prev };
+            for (const slug of slugsToPulse) {
+              if (next[slug]?.seq === pulseSeq) delete next[slug];
+            }
+            return next;
+          });
+        }, 3200);
         pulseTimersRef.current.push(clearBeamTimer);
       }
     }
@@ -238,6 +278,7 @@ export function UsagePage() {
         setUsage(usageRes || null);
         setProviders(provRes?.providers || []);
         if (usageRes?.activeRequests) setActiveRequests(usageRes.activeRequests);
+        if (usageRes?.activeModels) setActiveModels(usageRes.activeModels);
         if (Array.isArray(usageRes?.recentRequests) && usageRes.recentRequests.length > 0) {
           ingestRecentBatch(usageRes.recentRequests, { animateNew: silent });
         }
@@ -307,6 +348,7 @@ export function UsagePage() {
       try {
         const msg = JSON.parse(evt.data);
         if (msg.activeRequests) setActiveRequests(msg.activeRequests);
+        if (msg.activeModels) setActiveModels(msg.activeModels);
         if (Array.isArray(msg.recentRequests) && msg.recentRequests.length > 0) {
           const arrived = ingestRecentBatch(msg.recentRequests, { animateNew: true });
           if (arrived.length > 0) scheduleUsageRefresh();
@@ -327,6 +369,7 @@ export function UsagePage() {
         if (closed || !snap) return;
         setSseLive(true);
         if (snap.activeRequests) setActiveRequests(snap.activeRequests);
+        if (snap.activeModels) setActiveModels(snap.activeModels);
         if (snap.errorProvider !== undefined) setErrorProvider(snap.errorProvider);
         if (Array.isArray(snap.recentRequests) && snap.recentRequests.length > 0) {
           const arrived = ingestRecentBatch(snap.recentRequests, { animateNew: true });
@@ -617,36 +660,66 @@ export function UsagePage() {
               <ProviderTopology
                 providers={providers}
                 activeRequests={activeRequests}
+                activeModels={activeModels}
                 recentPulseSlugs={recentPulseSlugs}
+                recentPulses={recentPulses}
+                recentRequests={recentRequests}
                 errorProvider={errorProvider}
                 byProvider={byProvider}
+                byModel={byModel}
                 sseLive={sseLive}
+                highlightedSlug={hoveredTopologySlug}
+                onSelectProvider={setSelectedTopologySlug}
+                onHoverProvider={setHoveredTopologySlug}
               />
             </div>
 
-            <div className="r-card flex h-[430px] flex-col overflow-hidden xl:col-span-4">
-              <div className="flex items-center justify-between border-b border-[var(--border-subtle)] bg-[var(--bg-subtle)] px-4 py-2.5">
-                <div className="flex items-center gap-2">
+            <div className="r-card flex h-[468px] flex-col overflow-hidden xl:col-span-4">
+              <div className="flex items-center justify-between gap-2 border-b border-[var(--border-subtle)] bg-[var(--bg-subtle)] px-4 py-2.5">
+                <div className="flex min-w-0 items-center gap-2">
                   <Radio
-                    className={`h-3.5 w-3.5 ${sseLive ? 'text-emerald-500' : 'text-[var(--text-muted)]'}`}
+                    className={`h-3.5 w-3.5 shrink-0 ${sseLive ? 'text-emerald-500' : 'text-[var(--text-muted)]'}`}
                     aria-hidden="true"
                   />
-                  <span className="text-xs font-semibold uppercase tracking-wide text-[var(--text-primary)]">
+                  <span className="truncate text-xs font-semibold uppercase tracking-wide text-[var(--text-primary)]">
                     Live Recent Requests
                   </span>
                 </div>
-                <span className="rounded-full bg-[var(--bg-card)] px-2 py-0.5 font-mono text-[10.5px] font-semibold text-[var(--text-secondary)]">
-                  {recentRequests.length} saved
-                </span>
+                <div className="flex shrink-0 items-center gap-1.5">
+                  {selectedTopologySlug ? (
+                    <button
+                      type="button"
+                      onClick={() => setSelectedTopologySlug('')}
+                      className="inline-flex items-center gap-1 rounded-full bg-[#E56A4A]/15 px-2 py-0.5 font-mono text-[10px] font-semibold text-[#E56A4A] hover:bg-[#E56A4A]/25"
+                      title="Clear provider filter"
+                    >
+                      {selectedTopologySlug} ×
+                    </button>
+                  ) : null}
+                  <span className="rounded-full bg-[var(--bg-card)] px-2 py-0.5 font-mono text-[10.5px] font-semibold text-[var(--text-secondary)]">
+                    {selectedTopologySlug
+                      ? recentRequests.filter((r) => r.provider === selectedTopologySlug).length
+                      : recentRequests.length}{' '}
+                    saved
+                  </span>
+                </div>
               </div>
 
               <div className="flex-1 divide-y divide-[var(--border-subtle)] overflow-y-auto">
-                {recentRequests.length === 0 ? (
-                  <div className="flex h-full items-center justify-center p-6 text-center text-xs text-[var(--text-muted)]">
-                    Live requests stream here in real time as clients call 001Router.
-                  </div>
-                ) : (
-                  recentRequests.map((r, idx) => {
+                {(() => {
+                  const visibleRecent = selectedTopologySlug
+                    ? recentRequests.filter((r) => r.provider === selectedTopologySlug)
+                    : recentRequests;
+                  if (visibleRecent.length === 0) {
+                    return (
+                      <div className="flex h-full items-center justify-center p-6 text-center text-xs text-[var(--text-muted)]">
+                        {selectedTopologySlug
+                          ? `No recent requests for '${selectedTopologySlug}' yet.`
+                          : 'Live requests stream here in real time as clients call 001Router.'}
+                      </div>
+                    );
+                  }
+                  return visibleRecent.map((r, idx) => {
                     const reqKey =
                       r.id || `${r.timestamp}-${r.provider}-${r.model}-${r.latencyMs}-${idx}`;
                     const httpCode =
@@ -660,11 +733,15 @@ export function UsagePage() {
                     const ok =
                       r.status === 'ok' || (httpCode >= 200 && httpCode < 400);
                     const isFresh = newArrivalIds.has(reqKey);
+                    const isCrossHovered =
+                      Boolean(hoveredTopologySlug) && r.provider === hoveredTopologySlug;
                     const totalTok = (Number(r.promptTokens) || 0) + (Number(r.completionTokens) || 0);
                     return (
                       <button
                         key={reqKey}
                         type="button"
+                        onMouseEnter={() => setHoveredTopologySlug(r.provider || '')}
+                        onMouseLeave={() => setHoveredTopologySlug('')}
                         onClick={() =>
                           setSelectedLog({
                             ...r,
@@ -674,7 +751,11 @@ export function UsagePage() {
                           })
                         }
                         className={`block w-full space-y-1.5 px-4 py-2.5 text-left text-xs transition-colors hover:bg-[var(--bg-elevated)]/70 ${
-                          isFresh ? 'live-req-new bg-emerald-500/[0.06]' : ''
+                          isFresh
+                            ? 'live-req-new bg-emerald-500/[0.06]'
+                            : isCrossHovered
+                              ? 'bg-[#E56A4A]/[0.06]'
+                              : ''
                         }`}
                       >
                         <div className="flex items-center justify-between gap-2">
@@ -740,8 +821,8 @@ export function UsagePage() {
                         ) : null}
                       </button>
                     );
-                  })
-                )}
+                  });
+                })()}
               </div>
             </div>
           </section>
