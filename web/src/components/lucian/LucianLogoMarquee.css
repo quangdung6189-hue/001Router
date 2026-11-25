@@ -1,0 +1,68 @@
+/* Ported & adapted from Lucian UX/UI #421 (Customer logo strip) for 001Router */
+.lucian-marquee-wrap {
+  position: relative;
+}
+
+.lucian-marquee-viewport {
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(90deg, transparent, #000 10%, #000 90%, transparent);
+  mask-image: linear-gradient(90deg, transparent, #000 10%, #000 90%, transparent);
+}
+
+.lucian-marquee-track {
+  display: flex;
+  width: max-content;
+  will-change: transform;
+}
+
+.lucian-marquee-list {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin: 0;
+  padding: 6px 7px;
+  list-style: none;
+}
+
+.lucian-marquee-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 14px 7px 8px;
+  border-radius: 14px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-card);
+  color: var(--text-secondary);
+  white-space: nowrap;
+  opacity: 0.9;
+  transition:
+    opacity 0.3s ease,
+    border-color 0.25s ease,
+    color 0.25s ease,
+    transform 0.38s cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 0.25s ease;
+}
+
+.lucian-marquee-viewport:hover .lucian-marquee-pill {
+  opacity: 0.45;
+}
+
+.lucian-marquee-viewport .lucian-marquee-pill:hover {
+  opacity: 1;
+  color: var(--text-primary);
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border-strong));
+  transform: scale(1.05) translateY(-1px);
+  box-shadow: 0 10px 24px -14px var(--ux-shadow-strong);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lucian-marquee-viewport {
+    overflow-x: auto;
+    -webkit-mask-image: none;
+    mask-image: none;
+  }
+
+  .lucian-marquee-track {
+    will-change: auto;
+  }
+}

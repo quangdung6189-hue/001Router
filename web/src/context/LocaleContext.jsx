@@ -107,7 +107,7 @@ const DICT = {
     'page.settings.subtitle': 'Đồng bộ danh mục model, timeout, Token Saver, mật khẩu và sao lưu cấu hình.',
 
     // Login
-    'login.subtitle': 'Local AI Router & Gateway · Cổng 20128',
+    'login.subtitle': 'Local AI Router & Gateway',
     'login.desc': 'Nhập mật khẩu quản trị để quản lý providers, combos và router API keys.',
     'login.passwordLabel': 'Mật khẩu Dashboard',
     'login.hint': 'Gợi ý cài đặt cục bộ: mật khẩu mặc định ban đầu là',
@@ -455,7 +455,7 @@ const DICT = {
     'page.settings.subtitle': 'Model catalog sync, timeouts, Token Saver, password, and configuration backup.',
 
     // Login
-    'login.subtitle': 'Local AI Router & Gateway · Port 20128',
+    'login.subtitle': 'Local AI Router & Gateway',
     'login.desc': 'Enter your dashboard password to manage providers, routing combos, and API keys.',
     'login.passwordLabel': 'Dashboard Password',
     'login.hint': 'Local setup tip: the initial default password is',

@@ -496,13 +496,13 @@ export function ProviderTopology({
     [probeBeams]
   );
 
-  // Fire a REAL upstream request using the selected provider package's stored token/OAuth credentials.
+  // Fire a zero-token live connectivity probe (GET /models / loadCodeAssist / oauth usage — 0 tokens burned).
   const runLiveBeamProbe = async (targetNode) => {
     if (!targetNode?.provider?.id) return;
     const slug = targetNode.provider.slug;
     if (probeBeams[slug]?.phase === 'outbound') return;
 
-    const targetModel =
+    const displayModel =
       targetNode.activeModelLabel ||
       targetNode.rankedModels[0]?.id ||
       stripProviderPrefix(targetNode.provider.models?.[0] || '', slug) ||
@@ -510,10 +510,10 @@ export function ProviderTopology({
     const seq = Date.now() + Math.random();
     const startedAt = performance.now();
 
-    // Phase 1: Outbound streaming request beam while the real API token request is in-flight
+    // Phase 1: Outbound streaming request beam while the 0-token auth/endpoint test runs
     setProbeBeams((prev) => ({
       ...prev,
-      [slug]: { phase: 'outbound', model: targetModel, seq },
+      [slug]: { phase: 'outbound', model: displayModel, seq },
     }));
 
     const scheduleClear = (delayMs) => {
@@ -530,15 +530,11 @@ export function ProviderTopology({
     };
 
     try {
-      const result = await providersApi.test(targetNode.provider.id, targetModel);
+      const result = await providersApi.test(targetNode.provider.id, '', { zeroToken: true });
       if (!mountedRef.current) return;
 
       const latencyMs = Number(result?.latencyMs) || Math.max(1, Math.round(performance.now() - startedAt));
-      const resolvedModel = result?.model || targetModel;
-      const tokens =
-        Number(result?.usage?.totalTokens) ||
-        (Number(result?.usage?.promptTokens) || 0) + (Number(result?.usage?.outputTokens) || 0);
-      const reply = typeof result?.reply === 'string' ? result.reply.trim() : '';
+      const modelsCount = Number(result?.modelsCount) || 0;
 
       if (result?.ok) {
         setProbeBeams((prev) => {
@@ -547,18 +543,18 @@ export function ProviderTopology({
             ...prev,
             [slug]: {
               phase: 'return',
-              model: resolvedModel,
+              model: displayModel,
               status: result.status || 200,
               latencyMs,
-              tokens,
-              reply,
+              tokens: 0,
+              reply: modelsCount > 0 ? `${modelsCount} models` : '0 tok',
               seq,
             },
           };
         });
         showToast(
-          `${targetNode.provider.name}${resolvedModel ? ` · ${resolvedModel}` : ''} trả lời OK (${latencyMs}ms${
-            reply ? ` · "${reply.slice(0, 48)}"` : ''
+          `${targetNode.provider.name}: Kết nối OK (${latencyMs}ms · 0 token${
+            modelsCount > 0 ? ` · ${modelsCount} models` : ''
           })`,
           'success'
         );
@@ -570,7 +566,7 @@ export function ProviderTopology({
             ...prev,
             [slug]: {
               phase: 'error',
-              model: resolvedModel,
+              model: displayModel,
               status: result?.status || 'ERR',
               latencyMs,
               message: errMsg,
@@ -580,7 +576,7 @@ export function ProviderTopology({
         });
         showToast(`${targetNode.provider.name}: ${errMsg}`, 'error');
       }
-      scheduleClear(4500);
+      scheduleClear(4200);
     } catch (err) {
       if (!mountedRef.current) return;
       const latencyMs = Math.max(1, Math.round(performance.now() - startedAt));
@@ -591,7 +587,7 @@ export function ProviderTopology({
           ...prev,
           [slug]: {
             phase: 'error',
-            model: targetModel,
+            model: displayModel,
             status: Number(err?.status) || 'ERR',
             latencyMs,
             message: errMsg,
@@ -600,7 +596,7 @@ export function ProviderTopology({
         };
       });
       showToast(`${targetNode.provider.name}: ${errMsg}`, 'error');
-      scheduleClear(4500);
+      scheduleClear(4200);
     }
   };
 
@@ -726,8 +722,8 @@ export function ProviderTopology({
               className="r-btn-secondary inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px]"
               title={
                 selectedSlug
-                  ? `Test thật gói '${selectedSlug}' bằng token đang kết nối`
-                  : 'Chọn một gói hoặc bấm để test thật bằng token đang kết nối'
+                  ? `Kiểm tra kết nối '${selectedSlug}' (không tốn token)`
+                  : 'Chọn một gói hoặc bấm để kiểm tra kết nối (không tốn token)'
               }
             >
               {isBeamProbing ? (
@@ -1104,7 +1100,7 @@ export function ProviderTopology({
                         ) : null}
                         {node.telemetry.reply ? (
                           <span className="max-w-[96px] truncate text-[var(--text-primary)]">
-                            “{node.telemetry.reply}”
+                            {node.telemetry.reply}
                           </span>
                         ) : null}
                       </div>

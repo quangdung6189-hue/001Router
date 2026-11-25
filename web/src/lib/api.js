@@ -110,10 +110,13 @@ export const providersApi = {
       `/api/providers/${encodeURIComponent(id)}/custom-models/${encodeURIComponent(modelId)}`,
       { method: 'DELETE' }
     ),
-  test: (id, model) =>
+  test: (id, model, options = {}) =>
     apiFetch(`/api/providers/${encodeURIComponent(id)}/test`, {
       method: 'POST',
-      body: model ? { model } : {},
+      body: {
+        ...(model ? { model } : {}),
+        ...(options?.zeroToken ? { zeroToken: true } : {}),
+      },
     }),
   testAll: (params = {}) =>
     apiFetch('/api/providers/test-all', {

@@ -176,12 +176,145 @@ export function resolveProviderLogoUrl({ preset, slug, logo, logoExt = 'png', sr
 }
 
 const SIZE_MAP = {
-  xs: { box: 22, pad: 3, font: 9, radius: 'rounded-md', imgRadius: 'rounded-[3px]' },
-  sm: { box: 28, pad: 4, font: 10, radius: 'rounded-lg', imgRadius: 'rounded-[5px]' },
-  md: { box: 36, pad: 5, font: 11, radius: 'rounded-lg', imgRadius: 'rounded-[6px]' },
-  lg: { box: 40, pad: 6, font: 12, radius: 'rounded-xl', imgRadius: 'rounded-[7px]' },
-  xl: { box: 48, pad: 7, font: 14, radius: 'rounded-xl', imgRadius: 'rounded-[8px]' },
+  xs: { box: 22, font: 9, radius: 'rounded-md' },
+  sm: { box: 28, font: 10, radius: 'rounded-lg' },
+  md: { box: 36, font: 11, radius: 'rounded-lg' },
+  lg: { box: 40, font: 12, radius: 'rounded-xl' },
+  xl: { box: 48, font: 14, radius: 'rounded-xl' },
 };
+
+// Transparent monochrome / dark-ink PNGs that look washed-out or invisible on dark cards:
+// render them on a crisp full-bleed white app-icon plate so every glyph has razor-sharp contrast.
+const LIGHT_PLATE_FILES = new Set([
+  'xai.png',
+  'grok-cli.png',
+  'grok-web.png',
+  'vercel.png',
+  'vercel-ai-gateway.png',
+  'venice.png',
+  'ollama.png',
+  'ollama-local.png',
+  'elevenlabs.png',
+  'chutes.png',
+  'featherless.png',
+  'novita.png',
+  'windsurf.png',
+  'glm.png',
+  'glm-cn.png',
+  'nous.png',
+  'tavily.png',
+  'cohere.png',
+  'jina-ai.png',
+  'jina-reader.png',
+  'vertex.png',
+  'vertex-partner.png',
+  'tencent.png',
+  'byteplus.png',
+  'openrouter.png',
+  'google-tts.png',
+  'cloudflare-ai.png',
+  'alicode.png',
+  'alicode-intl.png',
+  'alitp-intl.png',
+  'alims-intl.png',
+  'deepseek.png',
+  'azure.png',
+  'gitlab.png',
+  'huggingface.png',
+  'gemini.png',
+  'antigravity.png',
+  'searxng.png',
+  'github.png',
+  'copilot.png',
+  'continue.png',
+  'longcat.png',
+  'trae.png',
+  'volcengine-ark.png',
+  'tokenrouter.png',
+  'bluesminds.png',
+  'agentrouter.png',
+  'aws-polly.png',
+  'edge-tts.png',
+]);
+
+// Mid-gray transparent marks that look faint even on light plates — deepen them into crisp black.
+const DEEPEN_GRAY_FILES = new Set([
+  'xai.png',
+  'grok-cli.png',
+  'grok-web.png',
+  'glm.png',
+  'glm-cn.png',
+  'nous.png',
+  'openrouter.png',
+  'tavily.png',
+]);
+
+// Full-bleed dark-background square tiles that need subtle brightness/contrast lift on dark cards.
+const DARK_TILE_BOOST_FILES = new Set([
+  'perplexity.png',
+  'perplexity-agent.png',
+  'perplexity-web.png',
+  'kimi.png',
+  'kimi-coding.png',
+  'cursor.png',
+  'codex.png',
+  'roo.png',
+  'opencode.png',
+  'opencode-go.png',
+  'reka.png',
+  'zed.png',
+  'kilo-gateway.png',
+  'kilocode.png',
+  'linkup.png',
+  'sambanova.png',
+  'blackbox.png',
+  'recraft.png',
+  'inworld.png',
+  'agnes.png',
+  'morph.png',
+  'topaz.png',
+  'cline.png',
+  'gemini-cli.png',
+]);
+
+// Transparent artwork with extra built-in outer transparent margin — scale cleanly to fill the square.
+const LOGO_SCALE_MAP = {
+  'cohere.png': 1.38,
+  'byteplus.png': 1.34,
+  'tokenrouter.png': 1.34,
+  'bluesminds.png': 1.3,
+  'agentrouter.png': 1.3,
+  'jina-ai.png': 1.28,
+  'windsurf.png': 1.26,
+  'vertex.png': 1.24,
+  'vertex-partner.png': 1.24,
+  'tencent.png': 1.22,
+  'google-tts.png': 1.2,
+  'trae.png': 1.18,
+  'muse.png': 1.18,
+  'novita.png': 1.18,
+  'longcat.png': 1.16,
+  'huggingface.png': 1.14,
+  'hyperbolic.png': 1.14,
+  'deepseek.png': 1.12,
+  'cloudflare-ai.png': 1.12,
+  'alicode.png': 1.14,
+  'alicode-intl.png': 1.14,
+  'alitp-intl.png': 1.14,
+  'tavily.png': 1.12,
+  'antigravity.png': 1.1,
+  'gemini.png': 1.08,
+  'azure.png': 1.08,
+  'gitlab.png': 1.06,
+  'elevenlabs.png': 1.06,
+};
+
+function extractLogoFilename(url) {
+  if (typeof url !== 'string') return '';
+  const clean = url.split('?')[0];
+  const idx = clean.lastIndexOf('/');
+  return (idx >= 0 ? clean.slice(idx + 1) : clean).toLowerCase();
+}
 
 function ProviderLogoBase({
   preset,
@@ -203,10 +336,8 @@ function ProviderLogoBase({
     typeof size === 'number'
       ? {
           box: size,
-          pad: Math.max(3, Math.round(size * 0.15)),
           font: Math.max(9, Math.floor(size * 0.33)),
           radius: size <= 24 ? 'rounded-md' : size >= 40 ? 'rounded-xl' : 'rounded-lg',
-          imgRadius: size <= 24 ? 'rounded-[3px]' : 'rounded-[6px]',
         }
       : SIZE_MAP[size] || SIZE_MAP.lg;
 
@@ -231,11 +362,10 @@ function ProviderLogoBase({
           height: `${dims.box}px`,
           fontSize: `${dims.font}px`,
           backgroundColor: base,
-          // Soft top-left highlight so the monogram tile feels like the real logo tiles.
           backgroundImage:
-            'linear-gradient(145deg, rgba(255,255,255,0.22) 0%, rgba(255,255,255,0) 55%, rgba(0,0,0,0.18) 100%)',
+            'linear-gradient(145deg, rgba(255,255,255,0.24) 0%, rgba(255,255,255,0) 55%, rgba(0,0,0,0.18) 100%)',
         }}
-        className={`inline-flex shrink-0 items-center justify-center border border-white/10 font-bold tracking-tight text-white shadow-xs select-none ${dims.radius} ${className}`.trim()}
+        className={`inline-flex shrink-0 items-center justify-center border border-white/15 font-bold tracking-tight text-white shadow-xs select-none ${dims.radius} ${className}`.trim()}
         aria-hidden="true"
       >
         {fallbackChars}
@@ -243,35 +373,79 @@ function ProviderLogoBase({
     );
   }
 
-  // Neutral light backdrop keeps transparent / dark / full-bleed logos readable and uniform
-  // on dark cards; a faint brand tint is blended on top when the preset exposes a colour.
-  const tintBg = isHex
-    ? `linear-gradient(145deg, ${color}38, ${color}14)`
-    : 'linear-gradient(145deg, rgba(255,255,255,0.10), rgba(255,255,255,0.04))';
-  const imgSize = Math.max(12, dims.box - dims.pad * 2);
+  const fileName = extractLogoFilename(effectiveUrl);
+  const isLightPlate = LIGHT_PLATE_FILES.has(fileName);
+  const isDeepenGray = DEEPEN_GRAY_FILES.has(fileName);
+  const isDarkBoost = DARK_TILE_BOOST_FILES.has(fileName);
+  const customScale = LOGO_SCALE_MAP[fileName] || 0;
+
+  // Transparent marks with a white plate use minimal micro-padding so asymmetric icons never clip,
+  // while full-bleed square tiles (OpenAI, Anthropic, Fireworks, Bedrock, Nebius, Together, etc.)
+  // render 100% edge-to-edge with zero outer padding and slight overscan to eliminate corner seams.
+  const isFullBleedTile = !isLightPlate && fileName !== 'muse.png' && fileName !== 'hyperbolic.png';
+  const innerPad = isFullBleedTile
+    ? 0
+    : dims.box <= 24
+      ? 2
+      : dims.box <= 36
+        ? 3
+        : 4;
+
+  const tileStyle = {
+    width: `${dims.box}px`,
+    height: `${dims.box}px`,
+    padding: innerPad ? `${innerPad}px` : undefined,
+    ...(isLightPlate
+      ? {
+          backgroundColor: '#FFFFFF',
+          backgroundImage: 'linear-gradient(180deg, #FFFFFF 0%, #F4F5F7 100%)',
+          boxShadow: 'inset 0 0 0 1px rgba(15, 23, 42, 0.08), 0 1px 2px rgba(0, 0, 0, 0.14)',
+        }
+      : fileName === 'muse.png' || fileName === 'hyperbolic.png'
+        ? {
+            backgroundColor: isHex ? color : '#172554',
+            backgroundImage: isHex
+              ? `linear-gradient(145deg, color-mix(in srgb, ${color} 45%, #0f172a) 0%, color-mix(in srgb, ${color} 22%, #0b1120) 100%)`
+              : 'linear-gradient(145deg, #1e293b 0%, #0f172a 100%)',
+            boxShadow: 'inset 0 0 0 1px rgba(255, 255, 255, 0.14)',
+          }
+        : {
+            backgroundColor: '#16181D',
+            boxShadow: 'inset 0 0 0 1px rgba(255, 255, 255, 0.12)',
+          }),
+  };
+
+  const imgFilter = isDeepenGray
+    ? 'brightness(0.52) contrast(1.65)'
+    : isDarkBoost
+      ? 'brightness(1.22) contrast(1.14) saturate(1.1)'
+      : isLightPlate
+        ? 'contrast(1.06) saturate(1.12)'
+        : 'contrast(1.05) saturate(1.08)';
+
+  const scaleVal = customScale || (isFullBleedTile ? 1.04 : 1);
 
   return (
     <span
-      style={{
-        width: `${dims.box}px`,
-        height: `${dims.box}px`,
-        padding: `${dims.pad}px`,
-        backgroundImage: tintBg,
-      }}
-      className={`inline-flex shrink-0 items-center justify-center overflow-hidden border border-[var(--border-strong)] bg-[var(--bg-subtle)] shadow-xs ${dims.radius} ${className}`.trim()}
+      style={tileStyle}
+      className={`relative inline-flex shrink-0 items-center justify-center overflow-hidden select-none ${dims.radius} ${className}`.trim()}
     >
       <img
         src={effectiveUrl}
         alt={name || preset || slug || 'Provider logo'}
-        width={imgSize}
-        height={imgSize}
+        width={dims.box}
+        height={dims.box}
         {...(priority ? { fetchPriority: 'high' } : { loading: 'lazy' })}
         decoding="async"
         onError={() => {
           failedLogoCache.add(effectiveUrl);
           setFailedUrl(effectiveUrl);
         }}
-        className={`block h-full w-full object-contain ${dims.imgRadius}`}
+        style={{
+          filter: imgFilter,
+          transform: scaleVal !== 1 ? `scale(${scaleVal})` : undefined,
+        }}
+        className={`block h-full w-full ${isFullBleedTile ? 'object-cover' : 'object-contain'}`}
       />
     </span>
   );

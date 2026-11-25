@@ -1514,6 +1514,28 @@ async function runProviderConnectionTest(
           )
         };
       }
+
+      if (saOptions?.zeroToken === true) {
+        clearTimeout(timer);
+        return {
+          ok: true,
+          status: modelsRes.status,
+          latencyMs: Date.now() - started,
+          zeroToken: true,
+          message: "Endpoint reachable (0 tokens spent)"
+        };
+      }
+    }
+
+    if (saOptions?.zeroToken === true) {
+      clearTimeout(timer);
+      return {
+        ok: true,
+        status: 200,
+        latencyMs: Date.now() - started,
+        zeroToken: true,
+        message: "Connection verified (0 tokens spent)"
+      };
     }
 
     const testModel = requestedModel || provider.models?.[0] || "gpt-4o-mini";
@@ -3698,8 +3720,16 @@ export function createDashboardRouter(storage, liveEvents = null) {
       return res.status(404).json({ error: "Provider not found" });
     }
     const body = req.body || {};
-    const requestedModel = typeof body.model === "string" ? body.model.trim() : "";
-    const saOptions = extractServiceAccountOptions(req);
+    const zeroToken = body.zeroToken === true;
+    const requestedModel = zeroToken
+      ? ""
+      : typeof body.model === "string"
+        ? body.model.trim()
+        : "";
+    const saOptions = {
+      ...extractServiceAccountOptions(req),
+      ...(zeroToken ? { zeroToken: true } : {})
+    };
     const result = await runProviderConnectionTest(
       provider,
       storage,
