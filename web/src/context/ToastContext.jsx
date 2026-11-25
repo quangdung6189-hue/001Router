@@ -39,11 +39,6 @@ export function ToastProvider({ children }) {
 
   const notify = useCallback(
     (message, variant = 'info', durationMs = 4200) => {
-      const openModal = document.querySelector('dialog:modal');
-      if (openModal) {
-        return null;
-      }
-
       const id = nextToastId++;
       setToasts((prev) => [...prev.slice(-3), { id, message, variant, durationMs }]);
 
@@ -72,15 +67,23 @@ export function ToastProvider({ children }) {
     if (!supportsPopover) return;
 
     try {
-      if (toasts.length > 0 && !el.matches(':popover-open')) {
-        el.showPopover();
-      } else if (toasts.length === 0 && el.matches(':popover-open')) {
+      if (toasts.length > 0) {
+        if (el.matches(':popover-open')) {
+          // Re-promote above any newly opened top-layer <dialog:modal>
+          if (document.querySelector('dialog:modal')) {
+            el.hidePopover();
+            el.showPopover();
+          }
+        } else {
+          el.showPopover();
+        }
+      } else if (el.matches(':popover-open')) {
         el.hidePopover();
       }
     } catch {
       // Fallback CSS keeps fixed positioning
     }
-  }, [toasts.length]);
+  }, [toasts]);
 
   useEffect(() => {
     return () => {

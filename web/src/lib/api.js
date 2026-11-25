@@ -513,6 +513,7 @@ export const settingsApi = {
     apiFetch('/api/settings/password', {
       method: 'POST',
       body: { currentPassword, newPassword },
+      skipAuthRedirect: true,
     }),
   exportConfig: ({ secrets = 'redacted', passphrase = '', confirmPassword = '' } = {}) => {
     const qs = new URLSearchParams();
@@ -524,7 +525,10 @@ export const settingsApi = {
     if (secrets === 'plain' && confirmPassword) {
       headers['X-Confirm-Password'] = confirmPassword;
     }
-    return apiFetch(`/api/export?${qs.toString()}`, { headers });
+    return apiFetch(`/api/export?${qs.toString()}`, {
+      headers,
+      skipAuthRedirect: secrets === 'plain',
+    });
   },
   importConfig: (payload) => apiFetch('/api/import', { method: 'POST', body: payload }),
 };
@@ -2075,10 +2079,11 @@ export async function copyToClipboard(text) {
     textarea.style.position = 'fixed';
     textarea.style.top = '-9999px';
     textarea.style.opacity = '0';
-    document.body.appendChild(textarea);
+    const host = document.querySelector('dialog:modal') || document.body;
+    host.appendChild(textarea);
     textarea.select();
     const ok = document.execCommand('copy');
-    document.body.removeChild(textarea);
+    host.removeChild(textarea);
     return ok;
   } catch {
     return false;

@@ -71,6 +71,18 @@ export class LiveEventsHub {
 
   clearConsoleLogs() {
     this.consoleLogs = [];
+    const payload = `data: ${JSON.stringify({ type: "clear" })}\n\n`;
+    for (const res of this.consoleClients) {
+      if (res.writableEnded) {
+        this.consoleClients.delete(res);
+        continue;
+      }
+      try {
+        res.write(payload);
+      } catch {
+        this.consoleClients.delete(res);
+      }
+    }
   }
 
   clearRecentRequests() {

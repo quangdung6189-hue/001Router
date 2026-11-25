@@ -18,15 +18,18 @@ export function ModalDialog({
   const dialogRef = useRef(null);
   const titleId = useId();
   const pressedOutsideRef = useRef(false);
+  const programmaticCloseRef = useRef(false);
 
   useEffect(() => {
     const dialog = dialogRef.current;
     if (!dialog) return;
 
     if (open && !dialog.open) {
+      programmaticCloseRef.current = false;
       dialog.returnValue = '';
       dialog.showModal();
     } else if (!open && dialog.open) {
+      programmaticCloseRef.current = true;
       dialog.close();
       dialog.returnValue = '';
     }
@@ -64,6 +67,10 @@ export function ModalDialog({
   const handleClose = () => {
     const dialog = dialogRef.current;
     if (dialog) dialog.returnValue = '';
+    if (programmaticCloseRef.current) {
+      programmaticCloseRef.current = false;
+      return;
+    }
     onClose?.();
   };
 

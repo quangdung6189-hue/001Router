@@ -402,7 +402,8 @@ export class Storage {
         port: this.port
       };
       needsSave = true;
-    } else {
+    }
+    {
       if (typeof loaded.settings.timeoutMs !== "number") {
         loaded.settings.timeoutMs = 120000;
         needsSave = true;

@@ -47,10 +47,7 @@ export function getKeyAuthKind(keyEntry) {
     rawType === 'google-oauth' ||
     rawType.includes('google_oauth') ||
     String(keyEntry.oauthProvider || '').toLowerCase() === 'google' ||
-    keyEntry.oauthMeta?.provider === 'google' ||
-    (!rawType.includes('oauth2') &&
-      !rawType.includes('device') &&
-      Boolean(keyEntry.oauthMeta?.tierLabel || keyEntry.oauthMeta?.tier))
+    keyEntry.oauthMeta?.provider === 'google'
   ) {
     return 'google_oauth';
   }

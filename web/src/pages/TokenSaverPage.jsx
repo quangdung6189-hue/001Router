@@ -246,6 +246,8 @@ export function TokenSaverPage() {
     setSavingSettings(true);
     try {
       await updateSetting({ tokenSaverMaxChars: Math.round(n) }, 'Saved RTK Max Chars');
+    } catch {
+      // toast already shown by updateSetting
     } finally {
       setSavingSettings(false);
     }
@@ -268,6 +270,8 @@ export function TokenSaverPage() {
         },
         'Headroom external proxy settings saved'
       );
+    } catch {
+      // toast already shown by updateSetting
     } finally {
       setSavingSettings(false);
     }
@@ -292,6 +296,8 @@ export function TokenSaverPage() {
   };
 
   const handleToggleWenyan = async (nextWenyan) => {
+    const prevWenyan = wenyanMode;
+    const prevLevel = cavemanLevel;
     setWenyanMode(nextWenyan);
     const nextLvl = nextWenyan ? 'wenyan' : 'full';
     setCavemanLevel(nextLvl);
@@ -301,7 +307,8 @@ export function TokenSaverPage() {
         nextWenyan ? 'Switched Caveman to Wenyan mode (文言文)' : 'Switched Caveman to English mode'
       );
     } catch {
-      setWenyanMode(!nextWenyan);
+      setWenyanMode(prevWenyan);
+      setCavemanLevel(prevLevel);
     }
   };
 
@@ -313,6 +320,8 @@ export function TokenSaverPage() {
         { customPromptEnabled, customPrompt },
         'Custom Global System Prompt saved'
       );
+    } catch {
+      // toast already shown by updateSetting
     } finally {
       setSavingSettings(false);
     }
@@ -491,8 +500,13 @@ export function TokenSaverPage() {
             <Switch
               checked={headroomEnabled}
               onChange={async (v) => {
+                const prev = headroomEnabled;
                 setHeadroomEnabled(v);
-                await updateSetting({ headroomEnabled: v }, `Headroom proxy ${v ? 'enabled' : 'disabled'}`);
+                try {
+                  await updateSetting({ headroomEnabled: v }, `Headroom proxy ${v ? 'enabled' : 'disabled'}`);
+                } catch {
+                  setHeadroomEnabled(prev);
+                }
               }}
               aria-label="Toggle Headroom External Proxy"
             />
@@ -623,11 +637,16 @@ export function TokenSaverPage() {
               <Switch
                 checked={cavemanEnabled}
                 onChange={async (v) => {
+                  const prev = cavemanEnabled;
                   setCavemanEnabled(v);
-                  await updateSetting(
-                    { cavemanEnabled: v, cavemanLevel },
-                    `Caveman Mode ${v ? 'enabled' : 'disabled'}`
-                  );
+                  try {
+                    await updateSetting(
+                      { cavemanEnabled: v, cavemanLevel },
+                      `Caveman Mode ${v ? 'enabled' : 'disabled'}`
+                    );
+                  } catch {
+                    setCavemanEnabled(prev);
+                  }
                 }}
                 aria-label="Toggle Caveman Mode Output Token Saver"
               />
@@ -643,8 +662,13 @@ export function TokenSaverPage() {
                 key={lvl.id}
                 type="button"
                 onClick={async () => {
+                  const prev = cavemanLevel;
                   setCavemanLevel(lvl.id);
-                  await updateSetting({ cavemanLevel: lvl.id }, `Caveman level → ${lvl.id}`);
+                  try {
+                    await updateSetting({ cavemanLevel: lvl.id }, `Caveman level → ${lvl.id}`);
+                  } catch {
+                    setCavemanLevel(prev);
+                  }
                 }}
                 className={`rounded-xl border p-3.5 text-left transition-colors ${
                   active
@@ -700,11 +724,16 @@ export function TokenSaverPage() {
             <Switch
               checked={ponytailEnabled}
               onChange={async (v) => {
+                const prev = ponytailEnabled;
                 setPonytailEnabled(v);
-                await updateSetting(
-                  { ponytailEnabled: v, ponytailLevel },
-                  `Ponytail Mode ${v ? 'enabled' : 'disabled'}`
-                );
+                try {
+                  await updateSetting(
+                    { ponytailEnabled: v, ponytailLevel },
+                    `Ponytail Mode ${v ? 'enabled' : 'disabled'}`
+                  );
+                } catch {
+                  setPonytailEnabled(prev);
+                }
               }}
               aria-label="Toggle Ponytail Mode"
             />
@@ -719,8 +748,13 @@ export function TokenSaverPage() {
                 key={lvl.id}
                 type="button"
                 onClick={async () => {
+                  const prev = ponytailLevel;
                   setPonytailLevel(lvl.id);
-                  await updateSetting({ ponytailLevel: lvl.id }, `Ponytail level → ${lvl.id}`);
+                  try {
+                    await updateSetting({ ponytailLevel: lvl.id }, `Ponytail level → ${lvl.id}`);
+                  } catch {
+                    setPonytailLevel(prev);
+                  }
                 }}
                 className={`rounded-xl border p-3.5 text-left transition-colors ${
                   active
@@ -766,11 +800,16 @@ export function TokenSaverPage() {
             <Switch
               checked={customPromptEnabled}
               onChange={async (v) => {
+                const prev = customPromptEnabled;
                 setCustomPromptEnabled(v);
-                await updateSetting(
-                  { customPromptEnabled: v },
-                  `Custom Global Prompt ${v ? 'enabled' : 'disabled'}`
-                );
+                try {
+                  await updateSetting(
+                    { customPromptEnabled: v },
+                    `Custom Global Prompt ${v ? 'enabled' : 'disabled'}`
+                  );
+                } catch {
+                  setCustomPromptEnabled(prev);
+                }
               }}
               aria-label="Toggle Custom Global System Prompt"
             />
@@ -923,13 +962,17 @@ export function TokenSaverPage() {
           <div>
             <div className="mb-1.5 flex items-center justify-between text-xs">
               <span className="font-medium text-[var(--text-secondary)]">Compressed Output</span>
-              {result?.compressed ? (
-                <CopyButton value={result.compressed} size="xs" label="Copy" />
+              {result?.compressedText ?? result?.compressed ? (
+                <CopyButton
+                  value={result.compressedText ?? result.compressed}
+                  size="xs"
+                  label="Copy"
+                />
               ) : null}
             </div>
             <pre className="code-surface h-[16.5rem] overflow-auto rounded-lg border p-3 font-mono text-xs leading-relaxed whitespace-pre-wrap">
               {result
-                ? result.compressed
+                ? result.compressedText ?? result.compressed ?? ''
                 : 'Click "Compress Now" to run the 12-filter RTK engine on the input.'}
             </pre>
           </div>

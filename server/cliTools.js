@@ -1076,6 +1076,19 @@ export function resetCliToolConfig(toolId, opts = {}) {
         .replace(/\n?# BEGIN 001ROUTER MANAGED[\s\S]*?# END 001ROUTER MANAGED\n?/g, "\n")
         .trimEnd();
       writeFileEnsureDir(paths.configPath, cleaned ? `${cleaned}\n` : "");
+    } else if (toolId === "cline") {
+      if (fs.existsSync(paths.configPath)) {
+        const existing = readJsonSafe(paths.configPath).data;
+        delete existing.apiProvider;
+        delete existing.openAiBaseUrl;
+        delete existing.openAiModelId;
+        writeFileEnsureDir(paths.configPath, JSON.stringify(existing, null, 2) + "\n");
+      }
+      if (paths.secretsPath && fs.existsSync(paths.secretsPath)) {
+        const sec = readJsonSafe(paths.secretsPath).data;
+        delete sec.openAiApiKey;
+        writeFileEnsureDir(paths.secretsPath, JSON.stringify(sec, null, 2) + "\n");
+      }
     }
   }
 

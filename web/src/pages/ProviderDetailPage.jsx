@@ -987,7 +987,7 @@ export function ProviderDetailPage() {
             >
               <option value="openai">OpenAI Compatible</option>
               <option value="anthropic">Anthropic Messages</option>
-              <option value="gemini">Google Gemini</option>
+              <option value="gemini-openai">Google Gemini</option>
             </select>
           </div>
 
@@ -1007,7 +1007,7 @@ export function ProviderDetailPage() {
               <option value="">Direct (No Proxy)</option>
               {proxyPools.map((pool) => (
                 <option key={pool.id} value={pool.id}>
-                  {pool.name} ({pool.protocol || 'http'})
+                  {pool.name} ({pool.type || 'http'})
                 </option>
               ))}
             </select>

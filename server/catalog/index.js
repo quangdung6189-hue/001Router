@@ -486,6 +486,10 @@ export function queryCatalogModels(presets, filters = {}) {
     typeof filters.kind === "string" ? filters.kind.trim().toLowerCase() : "";
   const qFilter =
     typeof filters.q === "string" ? filters.q.trim().toLowerCase() : "";
+  const presetFilter =
+    typeof filters.preset === "string" ? filters.preset.trim().toLowerCase() : "";
+  const tierFilter =
+    typeof filters.tier === "string" ? filters.tier.trim().toLowerCase() : "";
   const sortMode =
     typeof filters.sort === "string" && filters.sort.trim()
       ? filters.sort.trim().toLowerCase()
@@ -503,6 +507,8 @@ export function queryCatalogModels(presets, filters = {}) {
   const models = [];
   for (const preset of presets) {
     if (preset.category === "custom") continue;
+    if (presetFilter && String(preset.preset || "").toLowerCase() !== presetFilter) continue;
+    if (tierFilter && String(preset.tier || "").toLowerCase() !== tierFilter) continue;
     for (const entry of preset.modelCatalog || []) {
       if (kindFilter && kindFilter !== "all") {
         if (kindFilter === "vision") {

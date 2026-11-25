@@ -84,7 +84,7 @@ const DEFAULT_TEMPLATES = [
     ],
   },
   {
-    id: 'free-coding',
+    id: 'free-only',
     name: 'Free Coding Stack ($0 / month)',
     defaultComboName: 'free-coder',
     badge: '100% Free',
@@ -186,7 +186,14 @@ export function CombosPage() {
         aliasesApi.list().catch(() => ({ aliases: {} })),
         settingsApi.get().catch(() => ({ settings: {} })),
       ]);
-      setCombos(combosRes?.combos || []);
+      const loadedCombos = combosRes?.combos || [];
+      setCombos(loadedCombos);
+      setSelectedIds((prev) => {
+        if (prev.size === 0) return prev;
+        const valid = new Set(loadedCombos.map((c) => c.id));
+        const next = new Set([...prev].filter((id) => valid.has(id)));
+        return next.size === prev.size ? prev : next;
+      });
       setProviders(providersRes?.providers || []);
       setAliases(aliasRes?.aliases || {});
       const ca = setRes?.settings?.capacityAdapter;
@@ -263,7 +270,9 @@ export function CombosPage() {
 
   const allProviderSlugs = useMemo(() => new Set(providers.map((p) => p.slug)), [providers]);
 
-  const effectiveSearch = (headerSearch || localSearch).trim().toLowerCase();
+  const search = setHeaderSearch ? headerSearch : localSearch;
+  const setSearch = setHeaderSearch || setLocalSearch;
+  const effectiveSearch = search.trim().toLowerCase();
   const filteredCombos = useMemo(() => {
     if (!effectiveSearch) return combos;
     return combos.filter((c) =>
@@ -324,10 +333,16 @@ export function CombosPage() {
   };
 
   const handleDropOnCombo = (targetId) => {
-    if (!dragId || dragId === targetId) return;
+    if (!dragId || dragId === targetId) {
+      setDragId(null);
+      return;
+    }
     const fromIdx = combos.findIndex((c) => c.id === dragId);
     const toIdx = combos.findIndex((c) => c.id === targetId);
-    if (fromIdx < 0 || toIdx < 0) return;
+    if (fromIdx < 0 || toIdx < 0) {
+      setDragId(null);
+      return;
+    }
     const copy = [...combos];
     const [moved] = copy.splice(fromIdx, 1);
     copy.splice(toIdx, 0, moved);
@@ -336,12 +351,14 @@ export function CombosPage() {
   };
 
   const saveCapacityAdapter = async (nextAdapter, msg = 'Capacity Adapter saved') => {
+    const prevAdapter = capacityAdapter;
     setCapacityAdapter(nextAdapter);
     setSavingAdapter(true);
     try {
       await settingsApi.update({ capacityAdapter: nextAdapter });
       toast.success(msg);
     } catch (err) {
+      setCapacityAdapter(prevAdapter);
       toast.error(err?.message || 'Failed to save Capacity Adapter');
     } finally {
       setSavingAdapter(false);
@@ -605,6 +622,12 @@ export function CombosPage() {
     try {
       await combosApi.remove(deleteTarget.id);
       setCombos((prev) => prev.filter((c) => c.id !== deleteTarget.id));
+      setSelectedIds((prev) => {
+        if (!prev.has(deleteTarget.id)) return prev;
+        const next = new Set(prev);
+        next.delete(deleteTarget.id);
+        return next;
+      });
       toast.success(`Deleted combo "${deleteTarget.name}"`);
       setDeleteTarget(null);
     } catch (err) {
@@ -628,11 +651,8 @@ export function CombosPage() {
             />
             <input
               type="search"
-              value={headerSearch || localSearch}
-              onChange={(e) => {
-                setLocalSearch(e.target.value);
-                setHeaderSearch?.(e.target.value);
-              }}
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
               placeholder={t('combos.searchPlaceholder')}
               className="field-input w-56 py-1.5 pr-3 pl-8 text-xs"
             />
@@ -806,6 +826,7 @@ export function CombosPage() {
                 key={combo.id}
                 draggable={!effectiveSearch}
                 onDragStart={() => setDragId(combo.id)}
+                onDragEnd={() => setDragId(null)}
                 onDragOver={(e) => e.preventDefault()}
                 onDrop={() => handleDropOnCombo(combo.id)}
                 className={`r-card flex flex-col justify-between p-5 transition-colors ${

@@ -62,6 +62,9 @@ export const PRESET_LOGO_MAP = {
   vllm: 'local-device.png',
   llamacpp: 'local-device.png',
   'local-device': 'local-device.png',
+  'self-hosted-stt': 'selfhosted-stt.png',
+  'self-hosted-tts': 'selfhosted-tts.png',
+  'self-hosted-embedding': 'selfhosted-embedding.png',
 
   // Multimodal & Search Service Providers (9 Service Kinds)
   deepgram: 'deepgram.png',

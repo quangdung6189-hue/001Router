@@ -246,7 +246,10 @@ export function ModelsPage() {
 
     // Also include custom models and live plan-synced models from connected providers
     for (const cp of connectedProviders) {
-      const meta = presetMetaMap.get(cp.preset) || {};
+      const isCustomPreset =
+        !cp.preset || cp.preset === 'custom' || String(cp.preset).startsWith('custom-');
+      const meta = isCustomPreset ? {} : presetMetaMap.get(cp.preset) || {};
+      const providerKey = isCustomPreset ? cp.slug : cp.preset;
       const liveMetaById = new Map();
       for (const k of cp.apiKeys || []) {
         for (const am of k?.oauthMeta?.availableModels || []) {
@@ -267,9 +270,9 @@ export function ModelsPage() {
           id: mId,
           name: liveInfo?.label || mId,
           kind: liveInfo?.kind || 'chat',
-          preset: cp.preset || cp.slug,
+          preset: providerKey,
           providerName: cp.name,
-          logo: meta.logo || cp.preset,
+          logo: isCustomPreset ? undefined : meta.logo || cp.preset,
           logoExt: meta.logoExt || 'png',
           color: meta.color || '#E56A4A',
           monogram: String(cp.name || cp.slug).slice(0, 2).toUpperCase(),
@@ -305,7 +308,9 @@ export function ModelsPage() {
     return Array.from(map.values()).sort((a, b) => a.name.localeCompare(b.name));
   }, [allModels]);
 
-  const effectiveSearch = (headerSearch || localSearch).trim().toLowerCase();
+  const search = setHeaderSearch ? headerSearch : localSearch;
+  const setSearch = setHeaderSearch || setLocalSearch;
+  const effectiveSearch = search.trim().toLowerCase();
 
   const filteredModels = useMemo(() => {
     const matched = allModels.filter((m) => {
@@ -525,11 +530,8 @@ export function ModelsPage() {
               />
               <input
                 type="search"
-                value={headerSearch || localSearch}
-                onChange={(e) => {
-                  setLocalSearch(e.target.value);
-                  setHeaderSearch?.(e.target.value);
-                }}
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
                 placeholder="Search 470+ models (e.g. claude, gpt-6, deepseek, flux)…"
                 aria-label="Search models"
                 className="field-input w-56 py-1.5 pr-3 pl-8 text-xs sm:w-64"
@@ -560,14 +562,14 @@ export function ModelsPage() {
               aria-pressed={newOnly}
               className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium transition-colors ${
                 newOnly
-                  ? 'border-emerald-500/50 bg-emerald-500/15 text-emerald-400'
+                  ? 'border-emerald-500/50 bg-emerald-500/15 text-[var(--ux-mint)]'
                   : 'border-[var(--border-subtle)] bg-[var(--bg-card)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
               }`}
             >
-              <Sparkles className="h-3 w-3 text-emerald-400" aria-hidden="true" />
+              <Sparkles className="h-3 w-3 text-[var(--ux-mint)]" aria-hidden="true" />
               Mới 30 ngày (New)
               {stats.newCount > 0 ? (
-                <span className="rounded-full bg-emerald-500/20 px-1.5 py-0.2 font-mono text-[10px] font-bold text-emerald-300">
+                <span className="rounded-full bg-emerald-500/20 px-1.5 py-0.2 font-mono text-[10px] font-bold text-[var(--ux-mint)]">
                   {stats.newCount}
                 </span>
               ) : null}
@@ -636,8 +638,7 @@ export function ModelsPage() {
               setSelectedProvider('all');
               setConnectedOnly(false);
               setNewOnly(false);
-              setLocalSearch('');
-              setHeaderSearch?.('');
+              setSearch('');
             }}
             className="font-medium text-[#E56A4A] hover:underline"
           >
@@ -772,7 +773,7 @@ export function ModelsPage() {
                   ) : null}
 
                   {m.isNew ? (
-                    <span className="inline-flex items-center rounded border border-emerald-500/40 bg-emerald-500/20 px-1.5 py-0.5 text-[10px] font-bold tracking-wide text-emerald-300 uppercase">
+                    <span className="inline-flex items-center rounded border border-emerald-500/40 bg-emerald-500/20 px-1.5 py-0.5 text-[10px] font-bold tracking-wide text-[var(--ux-mint)] uppercase">
                       NEW
                     </span>
                   ) : null}
@@ -920,7 +921,7 @@ export function ModelsPage() {
                         </span>
                       ) : null}
                       {m.isNew ? (
-                        <span className="rounded border border-emerald-500/40 bg-emerald-500/20 px-1.5 py-0.5 text-[10px] font-bold tracking-wide text-emerald-300 uppercase">
+                        <span className="rounded border border-emerald-500/40 bg-emerald-500/20 px-1.5 py-0.5 text-[10px] font-bold tracking-wide text-[var(--ux-mint)] uppercase">
                           NEW
                         </span>
                       ) : null}

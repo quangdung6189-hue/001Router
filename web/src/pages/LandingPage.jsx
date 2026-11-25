@@ -26,7 +26,6 @@ import {
   Zap,
 } from 'lucide-react';
 import { useTheme } from '../context/ThemeContext';
-import { useLocale } from '../context/LocaleContext';
 import { ProviderLogo } from '../components/ProviderLogo';
 import { CopyButton } from '../components/CopyButton';
 import { LucianMagneticButton } from '../components/lucian/LucianMagneticButton';
@@ -218,7 +217,6 @@ const ADVANCED_FEATURES = [
 
 export function LandingPage() {
   const { resolvedTheme, toggleTheme } = useTheme();
-  const { locale, toggleLocale } = useLocale();
   const origin = typeof window !== 'undefined' ? window.location.origin : 'http://localhost:20128';
   const v1Endpoint = `${origin}/v1`;
 
@@ -264,14 +262,6 @@ export function LandingPage() {
           </nav>
 
           <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={toggleLocale}
-              className="r-btn-secondary hidden items-center gap-1.5 px-2.5 py-1.5 text-xs sm:inline-flex"
-            >
-              <Globe className="h-3.5 w-3.5" aria-hidden="true" />
-              {locale === 'vi' ? 'VI' : 'EN'}
-            </button>
             <button
               type="button"
               onClick={toggleTheme}
@@ -406,7 +396,7 @@ export function LandingPage() {
         {/* 3. HOW 001ROUTER WORKS — SMART 3-TIER ROUTING */}
         <section id="how-it-works" className="scroll-mt-20 space-y-6">
           <div className="text-center">
-            <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-xs font-semibold text-emerald-400">
+            <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-xs font-semibold text-[var(--ux-mint)]">
               Resilient Pipeline Architecture
             </span>
             <h2 className="mt-3 text-2xl font-bold tracking-tight sm:text-3xl">
@@ -435,7 +425,7 @@ export function LandingPage() {
               <div className="code-surface rounded-lg border p-3 font-mono text-xs">
                 <div className="text-emerald-400">✓ Multi-key provider pools</div>
                 <div className="mt-1 text-sky-400">✓ Per-client router keys (sk-001r-*)</div>
-                <div className="mt-1 text-[var(--text-secondary)]">✓ Official APIs &amp; Local LLMs</div>
+                <div className="mt-1 text-neutral-300">✓ Official APIs &amp; Local LLMs</div>
               </div>
             </div>
 
@@ -458,7 +448,7 @@ export function LandingPage() {
                   </div>
                 </div>
                 <div className="rounded-lg border border-amber-500/35 bg-amber-500/10 p-2.5">
-                  <div className="font-bold text-amber-400">
+                  <div className="font-bold text-[var(--ux-warn)]">
                     Tier 2 — Cheap Coding ($0.20–$0.60/1M)
                   </div>
                   <div className="mt-0.5 text-[11px] text-[var(--text-secondary)]">
@@ -466,7 +456,7 @@ export function LandingPage() {
                   </div>
                 </div>
                 <div className="rounded-lg border border-emerald-500/35 bg-emerald-500/10 p-2.5">
-                  <div className="font-bold text-emerald-400">
+                  <div className="font-bold text-[var(--ux-mint)]">
                     Tier 3 — FREE Official APIs &amp; Local
                   </div>
                   <div className="mt-0.5 text-[11px] text-[var(--text-secondary)]">
@@ -482,7 +472,7 @@ export function LandingPage() {
                 <span className="flex h-8 w-8 items-center justify-center rounded-full bg-[#E56A4A] text-xs font-bold text-white">
                   3
                 </span>
-                <span className="font-mono text-xs text-emerald-400">localhost:20128</span>
+                <span className="font-mono text-xs text-[var(--ux-mint)]">localhost:20128</span>
               </div>
               <h3 className="text-lg font-bold">Code Non-Stop</h3>
               <p className="text-xs leading-relaxed text-[var(--text-secondary)]">
@@ -595,7 +585,7 @@ export function LandingPage() {
         {/* 6. BUILT-IN BONUS: RTK INPUT TOKEN SAVER + CAVEMAN OUTPUT MODE */}
         <section id="token-saver" className="scroll-mt-20 space-y-6">
           <div className="text-center">
-            <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-xs font-semibold text-emerald-400">
+            <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-xs font-semibold text-[var(--ux-mint)]">
               Built-in Bonus · Free Token Optimization
             </span>
             <h2 className="mt-3 text-2xl font-bold tracking-tight sm:text-3xl">
@@ -613,11 +603,11 @@ export function LandingPage() {
             <div className="r-card flex flex-col justify-between p-6 space-y-4">
               <div>
                 <div className="flex items-center justify-between gap-2">
-                  <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/15 px-2.5 py-1 text-xs font-bold text-emerald-400">
+                  <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/15 px-2.5 py-1 text-xs font-bold text-[var(--ux-mint)]">
                     <Scissors className="h-3.5 w-3.5" aria-hidden="true" />
                     INPUT · RTK Token Saver
                   </span>
-                  <span className="text-xl font-extrabold text-emerald-400">−20–40%</span>
+                  <span className="text-xl font-extrabold text-[var(--ux-mint)]">−20–40%</span>
                 </div>
                 <h3 className="mt-3 text-lg font-bold">
                   Auto-Compress Tool Outputs &amp; Build Logs
@@ -632,12 +622,12 @@ export function LandingPage() {
               <div className="grid grid-cols-2 gap-3 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-subtle)] p-3.5 font-mono text-xs">
                 <div>
                   <div className="text-[10px] uppercase text-[var(--text-muted)]">Before RTK</div>
-                  <div className="mt-1 text-base font-bold text-red-400">− 47,200 tokens</div>
+                  <div className="mt-1 text-base font-bold text-[var(--ux-danger)]">− 47,200 tokens</div>
                   <div className="text-[11px] text-[var(--text-secondary)]">Raw git diff / logs</div>
                 </div>
                 <div>
                   <div className="text-[10px] uppercase text-[var(--text-muted)]">After RTK</div>
-                  <div className="mt-1 text-base font-bold text-emerald-400">+ 28,100 tokens</div>
+                  <div className="mt-1 text-base font-bold text-[var(--ux-mint)]">+ 28,100 tokens</div>
                   <div className="text-[11px] text-[var(--text-secondary)]">
                     Same context · Same answer
                   </div>
@@ -668,7 +658,7 @@ export function LandingPage() {
               <div className="grid grid-cols-2 gap-3 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-subtle)] p-3.5 font-mono text-xs">
                 <div>
                   <div className="text-[10px] uppercase text-[var(--text-muted)]">Verbose Reply</div>
-                  <div className="mt-1 text-base font-bold text-red-400">148 tokens</div>
+                  <div className="mt-1 text-base font-bold text-[var(--ux-danger)]">148 tokens</div>
                   <div className="text-[11px] text-[var(--text-secondary)]">
                     3 paragraphs of prose
                   </div>
@@ -677,7 +667,7 @@ export function LandingPage() {
                   <div className="text-[10px] uppercase text-[var(--text-muted)]">
                     Caveman Reply
                   </div>
-                  <div className="mt-1 text-base font-bold text-emerald-400">32 tokens</div>
+                  <div className="mt-1 text-base font-bold text-[var(--ux-mint)]">32 tokens</div>
                   <div className="text-[11px] text-[var(--text-secondary)]">
                     Root cause + exact fix
                   </div>
@@ -840,7 +830,7 @@ $ curl -sS ${v1Endpoint}/chat/completions \\
           </div>
 
           <div className="flex flex-wrap items-center gap-4">
-            <span className="inline-flex items-center gap-1 text-emerald-400">
+            <span className="inline-flex items-center gap-1 text-[var(--ux-mint)]">
               <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />
               Official API Keys by default (BYOK)
             </span>

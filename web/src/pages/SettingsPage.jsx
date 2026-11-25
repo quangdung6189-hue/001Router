@@ -51,6 +51,7 @@ export function SettingsPage() {
   const [cavemanLevel, setCavemanLevel] = useState('full');
   const [requireKey, setRequireKey] = useState(true);
   const [requireLogin, setRequireLogin] = useState(true);
+  const [publicDeployment, setPublicDeployment] = useState(false);
   const [enableTranslator, setEnableTranslator] = useState(true);
   const [fallbackStrategy, setFallbackStrategy] = useState('round-robin');
   const [stickyRoundRobinLimit, setStickyRoundRobinLimit] = useState('3');
@@ -101,8 +102,17 @@ export function SettingsPage() {
           ? s.cavemanLevel
           : 'full'
       );
-      setRequireKey(s.requireKey !== false);
-      setRequireLogin(s.requireLogin !== false);
+      setPublicDeployment(res?.publicDeployment === true);
+      setRequireKey(
+        typeof res?.effective?.requireKey === 'boolean'
+          ? res.effective.requireKey
+          : s.requireKey !== false
+      );
+      setRequireLogin(
+        typeof res?.effective?.requireLogin === 'boolean'
+          ? res.effective.requireLogin
+          : s.requireLogin !== false
+      );
       setEnableTranslator(s.enableTranslator !== false);
       setFallbackStrategy(
         ['fill-first', 'round-robin', 'sticky-round-robin'].includes(s.fallbackStrategy)
@@ -114,8 +124,8 @@ export function SettingsPage() {
       if (syncRes) setSyncStatus(syncRes);
       if (s.catalogAutoSync !== undefined) {
         setCatalogAutoSync(Boolean(s.catalogAutoSync));
-      } else if (syncRes?.autoSync !== undefined) {
-        setCatalogAutoSync(Boolean(syncRes.autoSync));
+      } else if (syncRes?.autoSyncEnabled !== undefined || syncRes?.autoSync !== undefined) {
+        setCatalogAutoSync(Boolean(syncRes.autoSyncEnabled ?? syncRes.autoSync));
       }
 
       if (secRes) {
@@ -187,27 +197,40 @@ export function SettingsPage() {
     setSavingSettings(true);
     try {
       const stickyLimitNum = Math.max(1, Math.min(100, Number(stickyRoundRobinLimit) || 3));
-      const res = await settingsApi.update({
+      const payload = {
         timeoutMs: Math.round(timeoutNum),
         tokenSaverEnabled,
         tokenSaverMaxChars: Math.round(maxCharsNum),
         cavemanEnabled,
         cavemanLevel,
-        requireKey,
-        requireLogin,
         enableTranslator,
         fallbackStrategy,
         stickyRoundRobinLimit: Math.round(stickyLimitNum),
-      });
+      };
+      if (!publicDeployment) {
+        payload.requireKey = requireKey;
+        payload.requireLogin = requireLogin;
+      }
+      const res = await settingsApi.update(payload);
       const updated = res?.settings;
+      const isPub = res?.publicDeployment === true;
+      setPublicDeployment(isPub);
       if (updated) {
         setTimeoutMs(String(updated.timeoutMs));
         setTokenSaverEnabled(updated.tokenSaverEnabled !== false);
         setTokenSaverMaxChars(String(updated.tokenSaverMaxChars));
         setCavemanEnabled(Boolean(updated.cavemanEnabled));
         setCavemanLevel(updated.cavemanLevel || 'full');
-        setRequireKey(updated.requireKey !== false);
-        setRequireLogin(updated.requireLogin !== false);
+        setRequireKey(
+          typeof res?.effective?.requireKey === 'boolean'
+            ? res.effective.requireKey
+            : updated.requireKey !== false
+        );
+        setRequireLogin(
+          typeof res?.effective?.requireLogin === 'boolean'
+            ? res.effective.requireLogin
+            : updated.requireLogin !== false
+        );
         setEnableTranslator(updated.enableTranslator !== false);
         setFallbackStrategy(updated.fallbackStrategy || 'round-robin');
         setStickyRoundRobinLimit(String(updated.stickyRoundRobinLimit ?? 3));
@@ -385,8 +408,9 @@ export function SettingsPage() {
   };
 
   const isDefaultPwd = defaultPassword || securityStatus?.defaultPassword === true;
-  const lastCatalogSyncLabel = syncStatus?.lastSyncAt
-    ? String(syncStatus.lastSyncAt).slice(0, 10)
+  const lastCatalogSyncIso = syncStatus?.lastSyncedAt || syncStatus?.lastSyncAt;
+  const lastCatalogSyncLabel = lastCatalogSyncIso
+    ? String(lastCatalogSyncIso).slice(0, 10)
     : 'v1.2 Live';
 
   return (
@@ -399,11 +423,11 @@ export function SettingsPage() {
         >
           <div className="flex items-start gap-3">
             <AlertTriangle
-              className="mt-0.5 h-5 w-5 shrink-0 text-amber-400"
+              className="mt-0.5 h-5 w-5 shrink-0 text-[var(--ux-warn)]"
               aria-hidden="true"
             />
             <div>
-              <div className="font-semibold text-amber-400">
+              <div className="font-semibold text-[var(--ux-warn)]">
                 Default Dashboard Password (<code>1234</code>) is Active
               </div>
               <p className="mt-0.5 text-[var(--text-secondary)]">
@@ -415,7 +439,7 @@ export function SettingsPage() {
           </div>
           <a
             href="#pwd-current"
-            className="rounded-lg border border-amber-500/40 bg-amber-500/20 px-3 py-1.5 font-semibold text-amber-300 hover:bg-amber-500/30"
+            className="rounded-lg border border-amber-500/40 bg-amber-500/20 px-3 py-1.5 font-semibold text-[var(--ux-warn)] hover:bg-amber-500/30"
           >
             Change Password →
           </a>
@@ -771,10 +795,15 @@ export function SettingsPage() {
                 <Switch
                   checked={requireLogin}
                   onChange={setRequireLogin}
-                  disabled={loading}
+                  disabled={loading || publicDeployment}
                   aria-label="Require Dashboard Login"
                 />
               </div>
+              {publicDeployment ? (
+                <p className="text-[11px] text-[var(--text-muted)]">
+                  Locked ON because this server is running as a public / non-loopback deployment.
+                </p>
+              ) : null}
             </div>
 
             <div className="r-card-subtle p-3.5">
@@ -791,12 +820,16 @@ export function SettingsPage() {
                 <Switch
                   checked={requireKey}
                   onChange={setRequireKey}
-                  disabled={loading}
+                  disabled={loading || publicDeployment}
                   aria-label="Require Router API Key"
                 />
               </div>
-              {!requireKey ? (
-                <p className="mt-2 rounded bg-amber-500/12 px-2.5 py-1.5 text-[11px] text-amber-500">
+              {publicDeployment ? (
+                <p className="mt-2 text-[11px] text-[var(--text-muted)]">
+                  Enforced automatically on public deployments.
+                </p>
+              ) : !requireKey ? (
+                <p className="mt-2 rounded bg-amber-500/12 px-2.5 py-1.5 text-[11px] text-[var(--ux-warn)]">
                   Warning: Local callers on this machine can hit <code>/v1/*</code> without a key.
                 </p>
               ) : null}

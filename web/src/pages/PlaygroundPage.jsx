@@ -81,8 +81,12 @@ export function PlaygroundPage() {
 
       setSelectedKey((prev) => {
         if (prev) return prev;
+        const firstRemembered =
+          loadedKeys.find((k) => k.enabled !== false && getRememberedRouterKey(k)) ||
+          loadedKeys.find((k) => getRememberedRouterKey(k));
+        if (firstRemembered) return getRememberedRouterKey(firstRemembered);
         const firstActive = loadedKeys.find((k) => k.enabled !== false) || loadedKeys[0];
-        return getRememberedRouterKey(firstActive) || firstActive?.key || '';
+        return firstActive?.key || '';
       });
 
       if (queryModel) {
@@ -221,6 +225,8 @@ export function PlaygroundPage() {
             ],
           };
 
+    const isCurrent = () => abortRef.current === controller && !controller.signal.aborted;
+
     try {
       const res = await fetch(endpoint, {
         method: 'POST',
@@ -229,8 +235,11 @@ export function PlaygroundPage() {
         signal: controller.signal,
       });
 
+      if (!isCurrent()) return;
+
       if (!res.ok) {
         const errText = await res.text().catch(() => '');
+        if (!isCurrent()) return;
         let parsedErr = errText;
         try {
           const json = JSON.parse(errText);
@@ -248,12 +257,12 @@ export function PlaygroundPage() {
           totalTokens: 0,
         });
         setErrorMsg(`HTTP ${res.status}: ${parsedErr || 'Request failed'}`);
-        setRunning(false);
         return;
       }
 
       if (!streaming) {
         const data = await res.json();
+        if (!isCurrent()) return;
         const totalMs = Math.round(performance.now() - startTime);
         setRawEvents(JSON.stringify(data, null, 2));
 
@@ -280,6 +289,7 @@ export function PlaygroundPage() {
         setOutputText(text);
         setThinkingText(thinking);
         const logExtra = await fetchLatestLogMetrics(activeModel);
+        if (!isCurrent()) return;
         setMetrics({
           status: res.status,
           latencyMs: totalMs,
@@ -289,8 +299,11 @@ export function PlaygroundPage() {
           totalTokens: promptTok + compTok,
           ...logExtra,
         });
-        setRunning(false);
         return;
+      }
+
+      if (!res.body) {
+        throw new Error('Empty response stream');
       }
 
       const reader = res.body.getReader();
@@ -303,9 +316,78 @@ export function PlaygroundPage() {
       let compTok = 0;
       let currentEvent = '';
 
+      const processSseLine = (line) => {
+        if (!line.trim()) {
+          currentEvent = '';
+          return;
+        }
+        if (line.startsWith('event:')) {
+          currentEvent = line.slice(6).trim();
+          return;
+        }
+        if (!line.startsWith('data:')) return;
+        const payloadStr = line.slice(5).trim();
+        if (!payloadStr || payloadStr === '[DONE]') return;
+
+        try {
+          const payload = JSON.parse(payloadStr);
+
+          if (format === 'anthropic') {
+            const evType = payload.type || currentEvent;
+            if (evType === 'message_start' && payload.message?.usage) {
+              promptTok = payload.message.usage.input_tokens || promptTok;
+            } else if (evType === 'content_block_delta') {
+              if (payload.delta?.type === 'text_delta' && payload.delta.text) {
+                if (firstTokenMs === null) {
+                  firstTokenMs = Math.round(performance.now() - startTime);
+                }
+                accText += payload.delta.text;
+                setOutputText(accText);
+              } else if (payload.delta?.type === 'thinking_delta' && payload.delta.thinking) {
+                accThinking += payload.delta.thinking;
+                setThinkingText(accThinking);
+              }
+            } else if (evType === 'message_delta' && payload.usage) {
+              compTok = payload.usage.output_tokens || compTok;
+            } else if (evType === 'error') {
+              setErrorMsg(payload.error?.message || 'Upstream streaming error');
+            }
+          } else {
+            if (payload.error) {
+              setErrorMsg(
+                payload.error?.message ||
+                  (typeof payload.error === 'string' ? payload.error : 'Upstream streaming error')
+              );
+            }
+            const delta = payload.choices?.[0]?.delta;
+            if (delta?.content) {
+              if (firstTokenMs === null) {
+                firstTokenMs = Math.round(performance.now() - startTime);
+              }
+              accText += delta.content;
+              setOutputText(accText);
+            }
+            if (delta?.reasoning_content) {
+              accThinking += delta.reasoning_content;
+              setThinkingText(accThinking);
+            }
+            if (payload.usage) {
+              promptTok = payload.usage.prompt_tokens ?? promptTok;
+              compTok = payload.usage.completion_tokens ?? compTok;
+            }
+          }
+        } catch {
+          // Ignore partial non-JSON lines
+        }
+      };
+
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
+        if (!isCurrent()) {
+          reader.cancel().catch(() => {});
+          return;
+        }
         const chunk = decoder.decode(value, { stream: true });
         buffer += chunk;
         accRaw += chunk;
@@ -314,64 +396,27 @@ export function PlaygroundPage() {
         buffer = lines.pop() ?? '';
 
         for (const line of lines) {
-          if (line.startsWith('event:')) {
-            currentEvent = line.slice(6).trim();
-            continue;
-          }
-          if (!line.startsWith('data:')) continue;
-          const payloadStr = line.slice(5).trim();
-          if (!payloadStr || payloadStr === '[DONE]') continue;
-
-          try {
-            const payload = JSON.parse(payloadStr);
-
-            if (format === 'anthropic') {
-              const evType = payload.type || currentEvent;
-              if (evType === 'message_start' && payload.message?.usage) {
-                promptTok = payload.message.usage.input_tokens || promptTok;
-              } else if (evType === 'content_block_delta') {
-                if (payload.delta?.type === 'text_delta' && payload.delta.text) {
-                  if (firstTokenMs === null) {
-                    firstTokenMs = Math.round(performance.now() - startTime);
-                  }
-                  accText += payload.delta.text;
-                  setOutputText(accText);
-                } else if (payload.delta?.type === 'thinking_delta' && payload.delta.thinking) {
-                  accThinking += payload.delta.thinking;
-                  setThinkingText(accThinking);
-                }
-              } else if (evType === 'message_delta' && payload.usage) {
-                compTok = payload.usage.output_tokens || compTok;
-              } else if (evType === 'error') {
-                setErrorMsg(payload.error?.message || 'Upstream streaming error');
-              }
-            } else {
-              const delta = payload.choices?.[0]?.delta;
-              if (delta?.content) {
-                if (firstTokenMs === null) {
-                  firstTokenMs = Math.round(performance.now() - startTime);
-                }
-                accText += delta.content;
-                setOutputText(accText);
-              }
-              if (delta?.reasoning_content) {
-                accThinking += delta.reasoning_content;
-                setThinkingText(accThinking);
-              }
-              if (payload.usage) {
-                promptTok = payload.usage.prompt_tokens ?? promptTok;
-                compTok = payload.usage.completion_tokens ?? compTok;
-              }
-            }
-          } catch {
-            // Ignore partial non-JSON lines
-          }
+          processSseLine(line);
         }
         setRawEvents(accRaw);
       }
 
+      if (!isCurrent()) return;
+      const trailing = decoder.decode();
+      if (trailing) {
+        buffer += trailing;
+        accRaw += trailing;
+      }
+      if (buffer.trim()) {
+        for (const line of buffer.split(/\r?\n/)) {
+          processSseLine(line);
+        }
+      }
+      setRawEvents(accRaw);
+
       const totalMs = Math.round(performance.now() - startTime);
       const logExtra = await fetchLatestLogMetrics(activeModel);
+      if (!isCurrent()) return;
       setMetrics({
         status: res.status,
         latencyMs: totalMs,
@@ -382,11 +427,13 @@ export function PlaygroundPage() {
         ...logExtra,
       });
     } catch (err) {
-      if (err?.name !== 'AbortError') {
+      if (err?.name !== 'AbortError' && isCurrent()) {
         setErrorMsg(err?.message || 'Playground request failed');
       }
     } finally {
-      setRunning(false);
+      if (abortRef.current === controller) {
+        setRunning(false);
+      }
     }
   };
 

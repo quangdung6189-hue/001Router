@@ -14,10 +14,13 @@ export function AuthProvider({ children }) {
 
   const handleUnauthorized = useCallback(() => {
     setAuthenticated(false);
+    setDefaultPassword(false);
+    setPasswordChangeRequired(false);
     if (location.pathname !== '/login' && location.pathname !== '/landing') {
-      navigate('/login', { replace: true, state: { from: location.pathname } });
+      const from = `${location.pathname}${location.search || ''}${location.hash || ''}`;
+      navigate('/login', { replace: true, state: { from } });
     }
-  }, [location.pathname, navigate]);
+  }, [location.pathname, location.search, location.hash, navigate]);
 
   useEffect(() => {
     setUnauthorizedHandler(handleUnauthorized);
@@ -43,15 +46,21 @@ export function AuthProvider({ children }) {
   }, [checkAuth]);
 
   const login = useCallback(async (password) => {
-    await authApi.login(password);
-    setAuthenticated(true);
-    try {
-      const me = await authApi.me();
-      setDefaultPassword(Boolean(me?.defaultPassword));
-      setPasswordChangeRequired(Boolean(me?.passwordChangeRequired));
-    } catch {
-      // ignore
+    const res = await authApi.login(password);
+    let defPwd = Boolean(res?.defaultPassword);
+    let reqChange = Boolean(res?.passwordChangeRequired);
+    if (res?.passwordChangeRequired === undefined) {
+      try {
+        const me = await authApi.me();
+        defPwd = Boolean(me?.defaultPassword);
+        reqChange = Boolean(me?.passwordChangeRequired);
+      } catch {
+        // fallback to login payload
+      }
     }
+    setDefaultPassword(defPwd);
+    setPasswordChangeRequired(reqChange);
+    setAuthenticated(true);
   }, []);
 
   const logout = useCallback(async () => {
@@ -59,6 +68,8 @@ export function AuthProvider({ children }) {
       await authApi.logout();
     } finally {
       setAuthenticated(false);
+      setDefaultPassword(false);
+      setPasswordChangeRequired(false);
       navigate('/login', { replace: true });
     }
   }, [navigate]);

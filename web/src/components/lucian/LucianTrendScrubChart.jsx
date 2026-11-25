@@ -67,7 +67,8 @@ export function LucianTrendScrubChart({
   const targetYs = useMemo(() => {
     if (count === 0) return [];
     const vals = buckets.map((b) => Number(b?.[metric] || 0));
-    const mx = Math.max(...vals, 1);
+    const rawMax = Math.max(...vals, 0);
+    const mx = rawMax > 0 ? rawMax : 1;
     return vals.map((v) => PAD_TOP + (1 - v / mx) * (H - PAD_TOP - PAD_BOT));
   }, [buckets, metric, count]);
 

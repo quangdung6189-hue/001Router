@@ -125,6 +125,9 @@ function deriveMetersFromModels(models) {
   const byFamily = new Map();
   for (const m of Array.isArray(models) ? models : []) {
     if (!m || m.kind === 'other' || m.kind === 'image') continue;
+    if (m.remainingFraction === null || m.remainingFraction === undefined || m.remainingFraction === '') {
+      continue;
+    }
     const fraction = Number(m.remainingFraction);
     if (!Number.isFinite(fraction)) continue;
     const family = inferModelFamily(m);

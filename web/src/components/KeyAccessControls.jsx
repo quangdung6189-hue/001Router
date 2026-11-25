@@ -58,7 +58,7 @@ export function KeyAccessControls({ apiKey, combos = [], providers = [], onChang
             size="sm"
             checked={Boolean(access.restricted)}
             onChange={(checked) => onChange({ restricted: checked, allow: access.allow || [] })}
-            aria-label={`Restrict model access for ${apiKey.name}`}
+            aria-label={`Restrict model access for ${apiKey?.name || 'Key'}`}
           />
         </div>
         {access.restricted ? (

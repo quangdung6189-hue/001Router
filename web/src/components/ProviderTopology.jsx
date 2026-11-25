@@ -211,6 +211,7 @@ export function ProviderTopology({
   byModel = [],
   sseLive = false,
   highlightedSlug = '',
+  selectedSlug: controlledSelectedSlug,
   onSelectProvider,
   onHoverProvider,
 }) {
@@ -219,7 +220,15 @@ export function ProviderTopology({
   const [zoom, setZoom] = useState(1);
   const [sortMode, setSortMode] = useState('traffic'); // traffic | alpha
   const [hoveredSlug, setHoveredSlug] = useState('');
-  const [selectedSlug, setSelectedSlug] = useState('');
+  const [internalSelectedSlug, setInternalSelectedSlug] = useState('');
+  const selectedSlug =
+    controlledSelectedSlug !== undefined ? controlledSelectedSlug : internalSelectedSlug;
+  const setSelectedSlug = (next) => {
+    if (controlledSelectedSlug === undefined) {
+      setInternalSelectedSlug(next);
+    }
+    onSelectProvider?.(next);
+  };
   const [motionPaused, setMotionPaused] = useState(false);
   // Simulated 2-phase beams keyed by slug: { phase: 'outbound' | 'return', model, latencyMs, tokens, seq }
   const [simBeams, setSimBeams] = useState({});
@@ -520,11 +529,8 @@ export function ProviderTopology({
   };
 
   const handleNodeClick = (slug) => {
-    setSelectedSlug((prev) => {
-      const next = prev === slug ? '' : slug;
-      onSelectProvider?.(next);
-      return next;
-    });
+    const next = selectedSlug === slug ? '' : slug;
+    setSelectedSlug(next);
   };
 
   // Pick which provider's models to highlight in the bottom Model Route Dock.
@@ -681,7 +687,6 @@ export function ProviderTopology({
             onClick={() => {
               setZoom(1);
               setSelectedSlug('');
-              onSelectProvider?.('');
             }}
             aria-label="Reset topology zoom and selection"
             className="r-btn-secondary p-1"

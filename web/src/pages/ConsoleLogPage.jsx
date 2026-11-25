@@ -59,7 +59,9 @@ export function ConsoleLogPage() {
   const loadServerLogs = useCallback(async () => {
     try {
       const res = await consoleLogsApi.list(250);
-      setServerLogs(Array.isArray(res?.logs) ? res.logs : []);
+      if (Array.isArray(res?.logs)) {
+        setServerLogs((prev) => (prev.length ? prev : [...res.logs].reverse()));
+      }
     } catch {
       // ignore
     }
@@ -71,6 +73,7 @@ export function ConsoleLogPage() {
     es.onopen = () => setSseConnected(true);
     es.onerror = () => setSseConnected(false);
     es.addEventListener('history', (evt) => {
+      if (serverPausedRef.current) return;
       try {
         const list = JSON.parse(evt.data);
         if (Array.isArray(list)) {
@@ -194,10 +197,10 @@ export function ConsoleLogPage() {
   const allServerText = useMemo(
     () =>
       filteredServerLogs
-        .map(
-          (l) =>
-            `[${l.timestamp || ''}] [${String(l.level || 'INFO').toUpperCase()}] ${l.tag ? `[${l.tag}] ` : ''}${l.message}`
-        )
+        .map((l) => {
+          const scope = l.scope || l.tag;
+          return `[${l.timestamp || ''}] [${String(l.level || 'INFO').toUpperCase()}] ${scope ? `[${scope}] ` : ''}${l.message}`;
+        })
         .join('\n'),
     [filteredServerLogs]
   );
@@ -568,12 +571,12 @@ export function ConsoleLogPage() {
                         Adapter: {selectedLog.adapterUsed}
                       </span>
                     ) : null}
-                    {selectedLog.ponytailApplied ? (
-                      <span className="rounded bg-amber-500/15 px-2 py-0.5 font-mono text-[10.5px] text-amber-400">
+                    {selectedLog.ponytail || selectedLog.ponytailApplied ? (
+                      <span className="rounded bg-amber-500/15 px-2 py-0.5 font-mono text-[10.5px] text-[var(--ux-warn)]">
                         Ponytail
                       </span>
                     ) : null}
-                    {selectedLog.headroomApplied ? (
+                    {selectedLog.headroom || selectedLog.headroomApplied ? (
                       <span className="rounded bg-sky-500/15 px-2 py-0.5 font-mono text-[10.5px] text-sky-400">
                         Headroom
                       </span>

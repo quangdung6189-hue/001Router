@@ -54,7 +54,12 @@ import {
   validateProviderBaseUrl
 } from "../security/redact.js";
 import { getSecurityStatus, runSecurityScan } from "../security/scan.js";
-import { getProxyDispatcher, upstreamFetch as fetch } from "../proxy.js";
+import {
+  clearProxyDispatcherCache,
+  getProxyDispatcher,
+  parseProxyUrl,
+  upstreamFetch as fetch
+} from "../proxy.js";
 import { buildAlternateAuthHeaders, buildUpstreamHeaders } from "../router.js";
 import {
   hasBaseUrlTemplatePlaceholder,
@@ -3734,9 +3739,18 @@ export function createDashboardRouter(storage, liveEvents = null) {
       // 1b. Google OAuth 2.0 / ADC authorized_user -> refresh live email, project & Cloud Billing tier
       if (keyEntry.authMethod === "google_oauth" && keyEntry.oauthCredentials) {
         const { updatedMeta } = await refreshGoogleOAuthConnection(provider, keyEntry, req);
-        const billingStatus = updatedMeta?.billingActive
+        const billingActive =
+          updatedMeta?.billingEnabled === true ||
+          updatedMeta?.billingActive === true ||
+          updatedMeta?.tier === "paid";
+        const isFreeTier =
+          !billingActive &&
+          (updatedMeta?.billingEnabled === false ||
+            updatedMeta?.isFreeTier === true ||
+            updatedMeta?.tier === "free");
+        const billingStatus = billingActive
           ? "active"
-          : updatedMeta?.isFreeTier
+          : isFreeTier
             ? "free_tier"
             : "unknown";
         const report = {
@@ -3748,9 +3762,10 @@ export function createDashboardRouter(storage, liveEvents = null) {
           projectId: updatedMeta?.projectId || "",
           tierLabel: updatedMeta?.tierLabel || "Google OAuth 2.0",
           billingStatus,
-          billingActive: Boolean(updatedMeta?.billingActive),
+          billingActive,
           modelsCount: Number(updatedMeta?.modelsCount) || (provider.models || []).length,
           recommendedModels: ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro"],
+          provider: toPublicProvider(storage.getProviderById(provider.id)),
           latencyMs: Date.now() - started,
           checkedAt: new Date().toISOString()
         };
@@ -5373,7 +5388,7 @@ export function createDashboardRouter(storage, liveEvents = null) {
         if (statusFilter === "success" || statusFilter === "ok") {
           if (!(log.status >= 200 && log.status < 400)) return false;
         } else if (statusFilter === "error") {
-          if (log.status < 400) return false;
+          if (log.status >= 200 && log.status < 400) return false;
         } else if (String(log.status) !== statusFilter) {
           return false;
         }
@@ -6263,10 +6278,16 @@ export function createDashboardRouter(storage, liveEvents = null) {
             : OAUTH_AUTH_METHODS.has(prevKey?.authMethod)
               ? prevKey.authMethod
               : "google_oauth";
+          const hasOAuthCreds = Boolean(rawOAuthCreds || prevKey?.oauthCredentials);
+          const isDeviceStaticKey =
+            resolvedOAuthMethod === "device_code" &&
+            !hasOAuthCreds &&
+            Boolean(rawKey || prevKey?.key);
           const isOAuthKey =
-            OAUTH_AUTH_METHODS.has(item.authMethod) ||
-            OAUTH_AUTH_METHODS.has(prevKey?.authMethod) ||
-            Boolean(rawOAuthCreds);
+            !isDeviceStaticKey &&
+            (OAUTH_AUTH_METHODS.has(item.authMethod) ||
+              OAUTH_AUTH_METHODS.has(prevKey?.authMethod) ||
+              Boolean(rawOAuthCreds));
 
           if (isOAuthKey) {
             const finalOAuthCreds =
@@ -6338,6 +6359,14 @@ export function createDashboardRouter(storage, liveEvents = null) {
                     : prevKey.label || "",
                 key: prevKey.key,
                 authMethod: prevKey.authMethod || "api_key",
+                ...(item.oauthMeta || prevKey?.oauthMeta
+                  ? {
+                      oauthMeta: {
+                        ...(prevKey?.oauthMeta || {}),
+                        ...(item.oauthMeta || {})
+                      }
+                    }
+                  : {}),
                 enabled:
                   item.enabled !== undefined
                     ? item.enabled !== false
@@ -6354,6 +6383,9 @@ export function createDashboardRouter(storage, liveEvents = null) {
                 typeof item.authMethod === "string" && item.authMethod.trim()
                   ? item.authMethod.trim()
                   : "api_key",
+              ...(item.oauthMeta && typeof item.oauthMeta === "object"
+                ? { oauthMeta: { ...item.oauthMeta } }
+                : {}),
               enabled: item.enabled !== false,
               cooldownUntil: null
             });
@@ -6552,6 +6584,69 @@ export function createDashboardRouter(storage, liveEvents = null) {
             monthlyTokenLimit: mTok.ok ? mTok.value : null
           };
         }
+      }
+
+      if (Array.isArray(body.proxyPools)) {
+        const existingPools = Array.isArray(data.proxyPools) ? data.proxyPools : [];
+        const incomingPools = [];
+        for (const item of body.proxyPools) {
+          if (!item || typeof item !== "object") continue;
+          const name = typeof item.name === "string" ? item.name.trim() : "";
+          if (!name) continue;
+          const prevPool =
+            (item.id && existingPools.find((p) => p.id === item.id)) ||
+            existingPools.find((p) => p.name === name) ||
+            null;
+          const rawUrl = typeof item.url === "string" ? item.url.trim() : "";
+          let finalUrl = "";
+          let finalType = typeof item.type === "string" ? item.type.trim().toLowerCase() : "";
+          if (!rawUrl || rawUrl === REDACTED_MARKER) {
+            if (prevPool?.url) {
+              finalUrl = prevPool.url;
+              finalType = prevPool.type || finalType || "http";
+            }
+          } else {
+            const parsed = parseProxyUrl(rawUrl);
+            if (!parsed.ok) continue;
+            const ssrf = classifyHostForSSRF(parsed.host);
+            const allowPrivate = storage.getSettings().allowPrivateUpstreams;
+            if (
+              ssrf.isMetadataOrLinkLocal ||
+              (ssrf.isPrivateLan && allowPrivate !== true) ||
+              (ssrf.isLoopback && allowPrivate === false)
+            ) {
+              continue;
+            }
+            finalUrl = parsed.url;
+            finalType = parsed.type;
+          }
+          if (!finalUrl) continue;
+          incomingPools.push({
+            id: prevPool?.id || item.id || nanoid(),
+            name,
+            type: finalType || "http",
+            url: finalUrl,
+            enabled: item.enabled !== false,
+            createdAt: item.createdAt || prevPool?.createdAt || now,
+            updatedAt: now
+          });
+        }
+        if (mode === "replace") {
+          data.proxyPools = incomingPools;
+        } else {
+          if (!Array.isArray(data.proxyPools)) data.proxyPools = [];
+          for (const pool of incomingPools) {
+            const idx = data.proxyPools.findIndex(
+              (p) => p.id === pool.id || p.name === pool.name
+            );
+            if (idx >= 0) {
+              data.proxyPools[idx] = { ...pool, id: data.proxyPools[idx].id };
+            } else {
+              data.proxyPools.push(pool);
+            }
+          }
+        }
+        clearProxyDispatcherCache();
       }
 
       if (body.settings && typeof body.settings === "object") {

@@ -2191,7 +2191,7 @@ export class RouterService {
                     res.flushHeaders?.();
 
                     const asOpenAI =
-                      upstreamFormat === "anthropic"
+                      effectiveUpstreamFormat === "anthropic"
                         ? claudeToOpenAIResponse(upstreamJson, requestedModel)
                         : upstreamJson;
                     const choice = asOpenAI?.choices?.[0] || {};
@@ -2616,6 +2616,10 @@ export class RouterService {
     // must be translated into OpenAI chunks before they ever reach the client.
     if (cloudCode) {
       const chunkId = `chatcmpl-${nanoid(20)}`;
+      const tx =
+        clientFormat === "openai"
+          ? null
+          : createStreamTransformer(clientFormat, "openai", requestedModel);
       let doneSeen = false;
       let roleSent = false;
 
@@ -2646,11 +2650,8 @@ export class RouterService {
           writeToClient(`data: ${JSON.stringify(chunk)}\n\n`);
           return;
         }
-        const tx = createStreamTransformer(clientFormat, "openai", requestedModel);
         const out = tx.pushChunk(chunk);
         if (out) writeToClient(out);
-        const tail = tx.finalize();
-        if (tail) writeToClient(tail);
       });
 
       try {
@@ -2687,7 +2688,10 @@ export class RouterService {
           };
         }
 
-        if (!doneSeen && clientFormat === "openai") {
+        if (tx) {
+          const tail = tx.finalize();
+          if (tail) writeToClient(tail);
+        } else if (!doneSeen && clientFormat === "openai") {
           writeToClient("data: [DONE]\n\n");
         }
 

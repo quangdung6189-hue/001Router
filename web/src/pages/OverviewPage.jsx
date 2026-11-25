@@ -381,11 +381,11 @@ export function OverviewPage() {
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div className="flex items-start gap-3">
               <AlertTriangle
-                className="mt-0.5 h-5 w-5 shrink-0 text-amber-400"
+                className="mt-0.5 h-5 w-5 shrink-0 text-[var(--ux-warn)]"
                 aria-hidden="true"
               />
               <div>
-                <h2 className="text-sm font-bold text-amber-400">
+                <h2 className="text-sm font-bold text-[var(--ux-warn)]">
                   Copy Your Key Now (Shown Only Once)
                 </h2>
                 <p className="mt-0.5 text-xs text-[var(--text-secondary)]">
@@ -406,7 +406,7 @@ export function OverviewPage() {
           </div>
 
           <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-500/40 bg-[var(--bg-card)] px-3.5 py-2.5">
-            <code className="font-mono text-sm font-bold text-emerald-400 select-all break-all">
+            <code className="font-mono text-sm font-bold text-[var(--ux-mint)] select-all break-all">
               {oneTimeBannerKey.key}
             </code>
             <CopyButton
@@ -695,42 +695,44 @@ export function OverviewPage() {
                       </td>
 
                       <td data-label="Key">
-                        <div className="flex flex-wrap items-center gap-1.5">
-                          <code className="rounded bg-[var(--bg-subtle)] px-2 py-1 text-xs text-[var(--text-primary)]">
-                            {displayKey}
-                          </code>
-                          {fullKey ? (
-                            <>
-                              <button
-                                type="button"
-                                onClick={() => toggleReveal(item.id)}
-                                aria-label={
-                                  isRevealed ? `Mask ${item.name}` : `Reveal ${item.name}`
-                                }
-                                className="rounded p-1.5 text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)]"
-                              >
-                                {isRevealed ? (
-                                  <EyeOff className="h-3.5 w-3.5" aria-hidden="true" />
-                                ) : (
-                                  <Eye className="h-3.5 w-3.5" aria-hidden="true" />
-                                )}
-                              </button>
-                              <CopyButton
-                                value={fullKey}
-                                size="xs"
-                                iconOnly
-                                label={`Copy key ${item.name}`}
-                                toastMessage={`Copied key "${item.name}"`}
-                              />
-                            </>
-                          ) : null}
+                        <div className="min-w-0 flex-1 space-y-1.5">
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <code className="rounded bg-[var(--bg-subtle)] px-2 py-1 text-xs text-[var(--text-primary)]">
+                              {displayKey}
+                            </code>
+                            {fullKey ? (
+                              <>
+                                <button
+                                  type="button"
+                                  onClick={() => toggleReveal(item.id)}
+                                  aria-label={
+                                    isRevealed ? `Mask ${item.name}` : `Reveal ${item.name}`
+                                  }
+                                  className="rounded p-1.5 text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)]"
+                                >
+                                  {isRevealed ? (
+                                    <EyeOff className="h-3.5 w-3.5" aria-hidden="true" />
+                                  ) : (
+                                    <Eye className="h-3.5 w-3.5" aria-hidden="true" />
+                                  )}
+                                </button>
+                                <CopyButton
+                                  value={fullKey}
+                                  size="xs"
+                                  iconOnly
+                                  label={`Copy key ${item.name}`}
+                                  toastMessage={`Copied key "${item.name}"`}
+                                />
+                              </>
+                            ) : null}
+                          </div>
+                          <KeyAccessControls
+                            apiKey={item}
+                            combos={combos}
+                            providers={providers}
+                            onChange={(nextAccess) => handleUpdateKeyAccess(item, nextAccess)}
+                          />
                         </div>
-                        <KeyAccessControls
-                          apiKey={item}
-                          combos={combos}
-                          providers={providers}
-                          onChange={(nextAccess) => handleUpdateKeyAccess(item, nextAccess)}
-                        />
                       </td>
 
                       <td data-label="Status">
@@ -847,13 +849,13 @@ export function OverviewPage() {
       >
         {createdKeyModal ? (
           <div className="space-y-3">
-            <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-2.5 text-xs text-amber-400">
+            <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-2.5 text-xs text-[var(--ux-warn)]">
               <strong>Important:</strong> Copy this secret key now. Only a masked preview (
               <code>{createdKeyModal.keyPreview || 'prefix…last4'}</code>) will remain visible
               after closing.
             </div>
             <div className="flex items-center gap-2 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-subtle)] p-2.5">
-              <code className="flex-1 overflow-x-auto text-xs font-semibold text-emerald-400 select-all">
+              <code className="flex-1 overflow-x-auto text-xs font-semibold text-[var(--ux-mint)] select-all">
                 {createdKeyModal.key}
               </code>
               <CopyButton value={createdKeyModal.key} />

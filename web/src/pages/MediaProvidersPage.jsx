@@ -98,8 +98,19 @@ export function MediaProvidersPage({ forcedKind = '' }) {
         catalogApi.get().catch(() => null),
       ]);
       setProviders(provRes?.providers || []);
-      if (Array.isArray(catRes?.presets) && catRes.presets.length > 0) {
-        setPresets(catRes.presets);
+      const serverPresets =
+        Array.isArray(provRes?.presets) && provRes.presets.length > 0
+          ? provRes.presets
+          : Array.isArray(catRes?.presets) && catRes.presets.length > 0
+            ? catRes.presets
+            : [];
+      if (serverPresets.length > 0) {
+        const merged = [...serverPresets];
+        const seen = new Set(merged.map((p) => p.preset));
+        for (const fb of FALLBACK_PRESETS) {
+          if (!seen.has(fb.preset)) merged.push(fb);
+        }
+        setPresets(merged);
       }
     } catch (err) {
       toast.error(err?.message || 'Failed to load media providers');
@@ -306,7 +317,16 @@ export function MediaProvidersPage({ forcedKind = '' }) {
 
               <div className="mt-4 flex items-center justify-between gap-2 border-t border-[var(--border-subtle)] pt-3">
                 <span className="font-mono text-[11px] text-[var(--text-muted)]">
-                  {(connected?.models || pr.models || []).length} model(s)
+                  {(() => {
+                    const catalogMatches = Array.isArray(pr.modelCatalog)
+                      ? pr.modelCatalog.filter((m) => kindMeta.kinds.includes(m?.kind))
+                      : [];
+                    const count =
+                      catalogMatches.length > 0
+                        ? catalogMatches.length
+                        : (connected?.models || pr.models || []).length;
+                    return `${count} model(s)`;
+                  })()}
                 </span>
                 <Link
                   to={`/media-providers/${kindMeta.id}/${encodeURIComponent(targetId)}`}

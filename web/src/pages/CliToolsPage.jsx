@@ -220,7 +220,7 @@ export function CliToolsPage() {
   const isKeyUnresolved =
     keys.length > 0 &&
     !effectiveRawKeyInput &&
-    !activeToolStatus?.summary?.maskedKey;
+    !(activeToolStatus?.status === 'configured' && activeToolStatus?.summary?.maskedKey);
 
   const buildApplyPayload = (rawKeyOverride = '') => {
     const payload = {
@@ -646,7 +646,7 @@ curl -sS "${cleanOrigin}/v1/messages" \\
           type="button"
           onClick={loadStatuses}
           disabled={loadingStatuses}
-          className="btn-secondary shrink-0 px-2.5 py-1.5 text-[11px]"
+          className="r-btn-secondary inline-flex shrink-0 items-center gap-1.5 px-2.5 py-1.5 text-[11px]"
         >
           <RefreshCw className={`h-3.5 w-3.5 ${loadingStatuses ? 'animate-spin' : ''}`} aria-hidden="true" />
           {t('common.refresh')}
@@ -862,7 +862,7 @@ curl -sS "${cleanOrigin}/v1/messages" \\
                 type="button"
                 onClick={handleApply}
                 disabled={applyingTool === activeBackendId || creatingKey}
-                className="btn-primary text-xs"
+                className="r-btn-primary inline-flex items-center gap-1.5 px-3 py-1.5 text-xs"
               >
                 <Sparkles className="h-3.5 w-3.5" aria-hidden="true" />
                 {applyingTool === activeBackendId ? t('cli.applyingBtn') : t('cli.applyBtn')}
@@ -872,7 +872,7 @@ curl -sS "${cleanOrigin}/v1/messages" \\
                 type="button"
                 onClick={handleCreateKeyAndConnect}
                 disabled={creatingKey || applyingTool === activeBackendId}
-                className="btn-secondary text-xs"
+                className="r-btn-secondary inline-flex items-center gap-1.5 px-3 py-1.5 text-xs"
               >
                 <Plus className="h-3.5 w-3.5" aria-hidden="true" />
                 {creatingKey ? t('cli.creatingKey') : t('cli.createKeyConnectBtn')}
@@ -883,7 +883,7 @@ curl -sS "${cleanOrigin}/v1/messages" \\
                   type="button"
                   onClick={handleReset}
                   disabled={resettingTool === activeBackendId}
-                  className="btn-secondary text-xs text-rose-400 hover:border-rose-500/40"
+                  className="r-btn-secondary inline-flex items-center gap-1.5 px-3 py-1.5 text-xs text-rose-500 hover:border-rose-500/40"
                 >
                   <Undo2 className="h-3.5 w-3.5" aria-hidden="true" />
                   {resettingTool === activeBackendId ? t('cli.resettingBtn') : t('cli.resetBtn')}

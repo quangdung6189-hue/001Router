@@ -594,18 +594,11 @@ function buildSampleJson(preset, form, activePresetMeta, vertexRegion, templateK
     if (preset === 'gemini') {
       return JSON.stringify(
         {
-          web: {
-            client_id: 'YOUR_GOOGLE_OAUTH_CLIENT_ID.apps.googleusercontent.com',
-            project_id: 'your-gcp-project-id',
-            auth_uri: 'https://accounts.google.com/o/oauth2/auth',
-            token_uri: 'https://oauth2.googleapis.com/token',
-            client_secret: 'YOUR_GOOGLE_OAUTH_CLIENT_SECRET',
-            redirect_uris: [
-              typeof window !== 'undefined'
-                ? `${window.location.origin}/providers`
-                : 'http://localhost:20128/providers',
-            ],
-          },
+          type: 'authorized_user',
+          client_id: 'YOUR_GOOGLE_OAUTH_CLIENT_ID.apps.googleusercontent.com',
+          client_secret: 'YOUR_GOOGLE_OAUTH_CLIENT_SECRET',
+          refresh_token: 'YOUR_GOOGLE_OAUTH_REFRESH_TOKEN',
+          quota_project_id: 'your-gcp-project-id',
         },
         null,
         2
@@ -743,6 +736,7 @@ function inspectJsonDraft(rawText, preset = '') {
   }
 
   // 3. Google Cloud Console OAuth Client JSON (client_secret_*.json)
+  //    or nested web/installed ADC authorized_user with refresh_token
   const oauthRoot =
     parsed.web && typeof parsed.web === 'object'
       ? parsed.web
@@ -754,9 +748,24 @@ function inspectJsonDraft(rawText, preset = '') {
     (oauthRoot.client_id || oauthRoot.clientId) &&
     (oauthRoot.client_secret || oauthRoot.clientSecret)
   ) {
+    if (oauthRoot.refresh_token || oauthRoot.refreshToken) {
+      return {
+        empty: false,
+        valid: true,
+        mode: 'google_authorized_user',
+        parsed,
+        wasNormalized,
+        clientId: String(oauthRoot.client_id || oauthRoot.clientId || '').trim(),
+        projectId: String(
+          oauthRoot.quota_project_id || oauthRoot.project_id || oauthRoot.projectId || ''
+        ).trim(),
+      };
+    }
     return {
       empty: false,
-      valid: true,
+      valid: false,
+      error:
+        'client_secret.json (không có refresh_token) đã bị gỡ — dùng "Đăng nhập Antigravity" ở tab Đăng nhập web hoặc dán ADC JSON có refresh_token.',
       mode: 'google_oauth_client',
       parsed,
       wasNormalized,
@@ -1517,12 +1526,6 @@ export function ProvidersPage() {
     });
     setSlugManuallyEdited(false);
     setNewModelInput('');
-    const targetPreset = existingProvider?.preset || presetObj?.preset || '';
-    if (targetPreset === 'openai') {
-      setOauth2RedirectUri('http://localhost:1455/auth/callback');
-    } else if (targetPreset === 'anthropic') {
-      setOauth2RedirectUri('http://localhost:54545/callback');
-    }
     setModalFeedback(null);
     setAccountReport(null);
     setModalOpen(true);
@@ -1629,7 +1632,9 @@ export function ProvidersPage() {
           ? { region: vertexRegion, location: vertexRegion }
           : {}),
         callbackUrl,
-        jsonText,
+        jsonText: jsonDraftInfo.wasNormalized
+          ? JSON.stringify(jsonDraftInfo.parsed)
+          : jsonText,
         json: jsonDraftInfo.parsed,
       };
 
@@ -2061,8 +2066,11 @@ export function ProvidersPage() {
     }
   };
 
+  const devicePollInFlightRef = useRef(false);
+
   const pollDeviceFlowNow = useCallback(async (flowObj) => {
-    if (!flowObj?.flowId || !flowObj?.provider) return;
+    if (!flowObj?.flowId || !flowObj?.provider || devicePollInFlightRef.current) return;
+    devicePollInFlightRef.current = true;
     setDevicePolling(true);
     try {
       const isKimiDevice =
@@ -2100,6 +2108,7 @@ export function ProvidersPage() {
         setModalFeedback({ type: 'error', message: err?.message || 'Device poll failed' });
       }
     } finally {
+      devicePollInFlightRef.current = false;
       if (isMountedRef.current) setDevicePolling(false);
     }
   }, [form, oauth2Label, loadProviders, syncConnectedProviderPlan, t, toast]);
@@ -2463,7 +2472,7 @@ export function ProvidersPage() {
     }
     setTestingSection(sectionId);
     try {
-      const res = await providersApi.testAll({ category: sectionId, providerIds });
+      const res = await providersApi.testAll({ providerIds });
       const results = Array.isArray(res?.results) ? res.results : [];
       const nextMap = {};
       let okCount = 0;
@@ -3401,18 +3410,13 @@ export function ProvidersPage() {
                               accountReport.availableModels.length > 0) ? (
                               <div className="border-t border-[var(--border-subtle)] pt-2">
                                 <CloudCodeQuota
-                                  quota={{
-                                    tierLabel: accountReport.tierLabel,
-                                    email: accountReport.email,
-                                    projectId: accountReport.projectId,
-                                    windows: accountReport.quotaWindows || [],
-                                    models: accountReport.availableModels || [],
-                                    live: true,
-                                  }}
-                                  onPickModel={(id) => {
-                                    navigator.clipboard?.writeText(`${form.slug}/${id}`).catch(() => {});
-                                    toast.success(`Đã sao chép ${form.slug}/${id}`);
-                                  }}
+                                  tierLabel={accountReport.tierLabel}
+                                  email={accountReport.email || ''}
+                                  projectId={accountReport.projectId || ''}
+                                  windows={accountReport.quotaWindows || []}
+                                  models={accountReport.availableModels || []}
+                                  checkedAt={accountReport.checkedAt || ''}
+                                  providerSlug={form.slug}
                                 />
                               </div>
                             ) : null}
@@ -3672,7 +3676,8 @@ export function ProvidersPage() {
                                         </button>
                                         {(authKind === 'oauth2' ||
                                           authKind === 'google_oauth' ||
-                                          authKind === 'service_account') ? (
+                                          authKind === 'service_account' ||
+                                          row.authMethod === 'oauth2') ? (
                                           <button
                                             type="button"
                                             onClick={() => handleRefreshSingleKey(row)}
@@ -4496,19 +4501,13 @@ export function ProvidersPage() {
                                     className="border-t border-emerald-500/20 pt-2.5"
                                   >
                                     <CloudCodeQuota
-                                      quota={{
-                                        tierLabel: k.oauthMeta?.tierLabel || k.label,
-                                        email: k.oauthMeta?.email || '',
-                                        projectId: k.oauthMeta?.projectId || '',
-                                        windows: k.oauthMeta?.quotaWindows || [],
-                                        models: k.oauthMeta?.availableModels || [],
-                                        checkedAt: k.oauthMeta?.checkedAt || '',
-                                        live: true,
-                                      }}
-                                      onPickModel={(id) => {
-                                        navigator.clipboard?.writeText(`${form.slug}/${id}`).catch(() => {});
-                                        toast.success(`Đã sao chép ${form.slug}/${id}`);
-                                      }}
+                                      tierLabel={k.oauthMeta?.tierLabel || k.label}
+                                      email={k.oauthMeta?.email || ''}
+                                      projectId={k.oauthMeta?.projectId || ''}
+                                      windows={k.oauthMeta?.quotaWindows || []}
+                                      models={k.oauthMeta?.availableModels || []}
+                                      checkedAt={k.oauthMeta?.checkedAt || ''}
+                                      providerSlug={form.slug}
                                     />
                                   </div>
                                 ))}
@@ -4624,19 +4623,13 @@ export function ProvidersPage() {
                                 className="border-t border-orange-500/20 pt-2.5"
                               >
                                 <CloudCodeQuota
-                                  quota={{
-                                    tierLabel: k.oauthMeta?.tierLabel || k.label,
-                                    email: k.oauthMeta?.email || '',
-                                    projectId: k.oauthMeta?.projectId || '',
-                                    windows: k.oauthMeta?.quotaWindows || [],
-                                    models: k.oauthMeta?.availableModels || [],
-                                    checkedAt: k.oauthMeta?.checkedAt || '',
-                                    live: true,
-                                  }}
-                                  onPickModel={(id) => {
-                                    navigator.clipboard?.writeText(`${form.slug}/${id}`).catch(() => {});
-                                    toast.success(`Đã sao chép ${form.slug}/${id}`);
-                                  }}
+                                  tierLabel={k.oauthMeta?.tierLabel || k.label}
+                                  email={k.oauthMeta?.email || ''}
+                                  projectId={k.oauthMeta?.projectId || ''}
+                                  windows={k.oauthMeta?.quotaWindows || []}
+                                  models={k.oauthMeta?.availableModels || []}
+                                  checkedAt={k.oauthMeta?.checkedAt || ''}
+                                  providerSlug={form.slug}
                                 />
                               </div>
                             ))}
@@ -5043,8 +5036,10 @@ export function ProvidersPage() {
                         noValidate
                         className="space-y-3 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-card)] p-3.5"
                       >
-                        {form.preset === 'custom' &&
-                        (!form.name.trim() || !form.baseUrl.trim()) ? (
+                        {(form.preset === 'custom' ||
+                          form.preset === 'custom-openai' ||
+                          form.preset === 'custom-anthropic') &&
+                        !form.id ? (
                           <div className="grid gap-3 sm:grid-cols-2">
                             <div>
                               <label

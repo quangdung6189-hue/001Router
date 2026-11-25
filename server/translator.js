@@ -1349,13 +1349,15 @@ export function createOpenAIToResponsesStreamTransformer(requestedModel) {
     );
   };
 
+  let msgOutputIndex = 0;
+
   const ensureMsgStarted = () => {
     if (msgStarted) return "";
     msgStarted = true;
-    const outputIndex = nextOutputIndex++;
+    msgOutputIndex = nextOutputIndex++;
     return (
       emit("response.output_item.added", {
-        output_index: outputIndex,
+        output_index: msgOutputIndex,
         item: {
           id: msgItemId,
           type: "message",
@@ -1366,7 +1368,7 @@ export function createOpenAIToResponsesStreamTransformer(requestedModel) {
       }) +
       emit("response.content_part.added", {
         item_id: msgItemId,
-        output_index: outputIndex,
+        output_index: msgOutputIndex,
         content_index: 0,
         part: { type: "output_text", text: "", annotations: [] }
       })
@@ -1379,18 +1381,18 @@ export function createOpenAIToResponsesStreamTransformer(requestedModel) {
     return (
       emit("response.output_text.done", {
         item_id: msgItemId,
-        output_index: 0,
+        output_index: msgOutputIndex,
         content_index: 0,
         text: textBuffer
       }) +
       emit("response.content_part.done", {
         item_id: msgItemId,
-        output_index: 0,
+        output_index: msgOutputIndex,
         content_index: 0,
         part: { type: "output_text", text: textBuffer, annotations: [] }
       }) +
       emit("response.output_item.done", {
-        output_index: 0,
+        output_index: msgOutputIndex,
         item: {
           id: msgItemId,
           type: "message",
@@ -1419,7 +1421,7 @@ export function createOpenAIToResponsesStreamTransformer(requestedModel) {
         textBuffer += delta.content;
         out += emit("response.output_text.delta", {
           item_id: msgItemId,
-          output_index: 0,
+          output_index: msgOutputIndex,
           content_index: 0,
           delta: delta.content
         });

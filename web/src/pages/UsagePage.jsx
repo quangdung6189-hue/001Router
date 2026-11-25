@@ -295,10 +295,12 @@ export function UsagePage() {
   const loadLogs = useCallback(async () => {
     setLoadingLogs(true);
     try {
+      const effectiveStatus =
+        statusFilter || (outcomeFilter === 'ok' ? 'ok' : outcomeFilter === 'err' ? 'error' : '');
       const res = await usageApi.logs({
         limit,
         offset,
-        status: statusFilter,
+        status: effectiveStatus,
         provider: providerFilter,
         model: modelFilter.trim(),
       });
@@ -309,7 +311,7 @@ export function UsagePage() {
     } finally {
       setLoadingLogs(false);
     }
-  }, [limit, offset, statusFilter, providerFilter, modelFilter, toast]);
+  }, [limit, offset, statusFilter, outcomeFilter, providerFilter, modelFilter, toast]);
 
   useEffect(() => {
     loadUsage();
@@ -640,9 +642,9 @@ export function UsagePage() {
             <LucianGlowCard innerClassName="p-4">
               <div className="flex items-center justify-between text-xs text-[var(--text-secondary)]">
                 <span>Est. Cost</span>
-                <DollarSign className="h-4 w-4 text-emerald-400" aria-hidden="true" />
+                <DollarSign className="h-4 w-4 text-[var(--ux-mint)]" aria-hidden="true" />
               </div>
-              <div className="mt-2 text-2xl font-bold text-emerald-400">
+              <div className="mt-2 text-2xl font-bold text-[var(--ux-mint)]">
                 ~{formatCost(summary.totalCost || 0)}
               </div>
               <div className="mt-1 flex items-center justify-between text-[11px] text-[var(--text-muted)]">
@@ -668,6 +670,7 @@ export function UsagePage() {
                 byProvider={byProvider}
                 byModel={byModel}
                 sseLive={sseLive}
+                selectedSlug={selectedTopologySlug}
                 highlightedSlug={hoveredTopologySlug}
                 onSelectProvider={setSelectedTopologySlug}
                 onHoverProvider={setHoveredTopologySlug}
@@ -875,7 +878,7 @@ export function UsagePage() {
                           </span>
                           <span className="text-[var(--text-secondary)]">
                             {formatNumber(item.requests)} reqs · {formatCompactNumber(item.tokens)}{' '}
-                            tok · <span className="text-emerald-400">{formatCost(item.cost)}</span>
+                            tok · <span className="text-[var(--ux-mint)]">{formatCost(item.cost)}</span>
                           </span>
                         </div>
                         <div className="h-2 overflow-hidden rounded-full bg-[var(--bg-subtle)]">
@@ -907,7 +910,7 @@ export function UsagePage() {
                           </code>
                           <span className="shrink-0 text-[var(--text-secondary)]">
                             {formatNumber(item.requests)} reqs · {formatCompactNumber(item.tokens)}{' '}
-                            tok · <span className="text-emerald-400">{formatCost(item.cost)}</span>
+                            tok · <span className="text-[var(--ux-mint)]">{formatCost(item.cost)}</span>
                           </span>
                         </div>
                         <div className="h-2 overflow-hidden rounded-full bg-[var(--bg-subtle)]">
@@ -961,7 +964,7 @@ export function UsagePage() {
                   onClick={() => setTableMode('costs')}
                   className={`rounded-md px-2.5 py-1 font-medium ${
                     tableMode === 'costs'
-                      ? 'bg-[var(--bg-card)] text-emerald-400 shadow-xs'
+                      ? 'bg-[var(--bg-card)] text-[var(--ux-mint)] shadow-xs'
                       : 'text-[var(--text-secondary)]'
                   }`}
                 >
@@ -1016,7 +1019,7 @@ export function UsagePage() {
                         <td className="text-right font-mono text-[var(--text-secondary)]">
                           {formatCompactNumber(row.completionTokens)}
                         </td>
-                        <td className="text-right font-mono font-semibold text-emerald-400">
+                        <td className="text-right font-mono font-semibold text-[var(--ux-mint)]">
                           {tableMode === 'costs'
                             ? formatCost(row.cost)
                             : formatCompactNumber(row.tokens)}
@@ -1048,7 +1051,10 @@ export function UsagePage() {
             <div className="flex flex-wrap items-center gap-2">
               <select
                 value={outcomeFilter}
-                onChange={(e) => setOutcomeFilter(e.target.value)}
+                onChange={(e) => {
+                  setOutcomeFilter(e.target.value);
+                  setOffset(0);
+                }}
                 aria-label="Filter outcome"
                 className="field-input px-2.5 py-1.5 text-xs"
               >
@@ -1134,10 +1140,10 @@ export function UsagePage() {
                           <span
                             className={`rounded px-1.5 py-0.5 font-mono text-[11px] font-bold ${
                               ok
-                                ? 'bg-emerald-500/15 text-emerald-400'
+                                ? 'bg-emerald-500/15 text-[var(--ux-mint)]'
                                 : log.status === 429
-                                  ? 'bg-amber-500/15 text-amber-400'
-                                  : 'bg-red-500/15 text-red-400'
+                                  ? 'bg-amber-500/15 text-[var(--ux-warn)]'
+                                  : 'bg-red-500/15 text-[var(--ux-danger)]'
                             }`}
                           >
                             {log.status}
@@ -1147,7 +1153,7 @@ export function UsagePage() {
                           <div className="flex items-center gap-1.5">
                             <code className="text-[var(--text-primary)]">{log.requestedModel}</code>
                             {log.fallbackHops > 0 ? (
-                              <span className="inline-flex items-center gap-0.5 rounded bg-amber-500/15 px-1.5 py-0.2 font-mono text-[10px] text-amber-400">
+                              <span className="inline-flex items-center gap-0.5 rounded bg-amber-500/15 px-1.5 py-0.2 font-mono text-[10px] text-[var(--ux-warn)]">
                                 <GitBranch className="h-2.5 w-2.5" aria-hidden="true" />
                                 {log.fallbackHops}
                               </span>
@@ -1162,7 +1168,7 @@ export function UsagePage() {
                         <td className="text-right font-mono">
                           {formatNumber(log.promptTokens || 0)}/{formatNumber(log.completionTokens || 0)}
                         </td>
-                        <td className="text-right font-mono text-emerald-400">
+                        <td className="text-right font-mono text-[var(--ux-mint)]">
                           {formatCost(log.estimatedCost || 0)}
                         </td>
                         <td className="text-right font-mono">{log.latencyMs ?? 0}ms</td>
@@ -1223,7 +1229,7 @@ export function UsagePage() {
         {selectedLog ? (
           <div className="space-y-3 text-xs">
             {selectedLog.error ? (
-              <div className="flex items-start gap-2 rounded-lg border border-red-500/40 bg-red-500/10 p-3 text-red-400">
+              <div className="flex items-start gap-2 rounded-lg border border-red-500/40 bg-red-500/10 p-3 text-[var(--ux-danger)]">
                 <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
                 <pre className="whitespace-pre-wrap font-mono">{selectedLog.error}</pre>
               </div>

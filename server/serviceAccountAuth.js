@@ -236,6 +236,7 @@ export async function getServiceAccountAccessToken(saJsonStringOrObj, options = 
     scope = DEFAULT_CLOUD_PLATFORM_SCOPE,
     tokenUriOverride,
     allowLoopbackTokenUri = false,
+    forceRefresh = false,
     dispatcher,
     nowFn = Date.now
   } = options;
@@ -260,14 +261,16 @@ export async function getServiceAccountAccessToken(saJsonStringOrObj, options = 
 
   const cacheKey = `${sa.client_email}\0${effectiveTokenUri}\0${scope}`;
   const now = nowFn();
-  const cached = tokenCache.get(cacheKey);
-  if (cached && cached.expiresAt - TOKEN_REFRESH_BUFFER_MS > now) {
-    return cached.accessToken;
-  }
+  if (!forceRefresh) {
+    const cached = tokenCache.get(cacheKey);
+    if (cached && cached.expiresAt - TOKEN_REFRESH_BUFFER_MS > now) {
+      return cached.accessToken;
+    }
 
-  const existingFlight = inFlightRequests.get(cacheKey);
-  if (existingFlight) {
-    return existingFlight;
+    const existingFlight = inFlightRequests.get(cacheKey);
+    if (existingFlight) {
+      return existingFlight;
+    }
   }
 
   const flightPromise = (async () => {

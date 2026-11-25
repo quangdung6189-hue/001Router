@@ -129,8 +129,16 @@ function computeRouteInfo(pathname, t) {
     return { meta: ROUTE_META[pathname], breadcrumbs: null };
   }
 
+  const safeDecode = (seg) => {
+    try {
+      return decodeURIComponent(seg);
+    } catch {
+      return seg;
+    }
+  };
+
   if (pathname.startsWith('/providers/')) {
-    const id = decodeURIComponent(pathname.slice('/providers/'.length).split('/')[0] || '');
+    const id = safeDecode(pathname.slice('/providers/'.length).split('/')[0] || '');
     return {
       meta: {
         titleKey: 'page.providerDetail.title',
@@ -148,7 +156,7 @@ function computeRouteInfo(pathname, t) {
       .slice('/media-providers/'.length)
       .split('/')
       .filter(Boolean)
-      .map((p) => decodeURIComponent(p));
+      .map((p) => safeDecode(p));
     const kind = parts[0] || 'embedding';
     const providerId = parts[1] || '';
     const kindLabel = MEDIA_KIND_LABELS[kind] || kind;
@@ -254,7 +262,12 @@ export function SidebarLayout() {
 
   // Modern Web Guidance (menu): Popover toggle sync, anchor positioning fallback, and focusgroup keyboard fallback
   const positionMenuFallback = useCallback(() => {
-    if (typeof CSS !== 'undefined' && CSS.supports?.('position-area: block-end')) return;
+    const hasNativeAnchor =
+      typeof CSS !== 'undefined' &&
+      CSS.supports?.('position-area: block-end') &&
+      typeof HTMLButtonElement !== 'undefined' &&
+      'commandForElement' in HTMLButtonElement.prototype;
+    if (hasNativeAnchor) return;
     const trigger = menuTriggerRef.current;
     const pop = menuPopoverRef.current;
     if (!trigger || !pop) return;
@@ -332,7 +345,11 @@ export function SidebarLayout() {
     if (!pop) return;
     positionMenuFallback();
     if (typeof pop.togglePopover === 'function') {
-      pop.togglePopover();
+      try {
+        pop.togglePopover({ source: menuTriggerRef.current });
+      } catch {
+        pop.togglePopover();
+      }
     } else {
       pop.classList.toggle(':popover-open');
       setMenuOpen(pop.classList.contains(':popover-open'));
@@ -539,14 +556,14 @@ export function SidebarLayout() {
         {/* Default Password Top Nudge Banner if still using 1234 */}
         {defaultPassword && location.pathname !== '/settings' ? (
           <div className="flex flex-wrap items-center justify-between gap-2 border-b border-amber-500/30 bg-amber-500/10 px-4 py-1.5 text-xs sm:px-6 lg:px-8">
-            <span className="inline-flex items-center gap-1.5 text-amber-400">
+            <span className="inline-flex items-center gap-1.5 font-medium text-[var(--ux-warn)]">
               <AlertTriangle className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
               <span>
                 Security tip: Your dashboard is currently using the default password{' '}
                 <code>1234</code>.
               </span>
             </span>
-            <Link to="/settings" className="font-semibold text-amber-300 hover:underline">
+            <Link to="/settings" className="font-semibold text-[var(--ux-warn)] hover:underline">
               Change password in Settings →
             </Link>
           </div>

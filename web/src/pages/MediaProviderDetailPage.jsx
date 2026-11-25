@@ -57,9 +57,29 @@ export function MediaProviderDetailPage() {
     () => MEDIA_PROVIDER_KINDS.find((k) => k.id === kind) || MEDIA_PROVIDER_KINDS[0],
     [kind]
   );
+  const effectiveKind = kindMeta.id;
+
+  const getKindModels = useCallback(
+    (prov, pr) => {
+      const catModels = Array.isArray(pr?.modelCatalog)
+        ? pr.modelCatalog
+            .filter((m) => m?.id && kindMeta.kinds.includes(m.kind))
+            .map((m) => m.id)
+        : [];
+      if (catModels.length > 0) return catModels;
+      if (Array.isArray(prov?.models) && prov.models.length > 0) return prov.models;
+      return Array.isArray(pr?.models) ? pr.models : [];
+    },
+    [kindMeta]
+  );
 
   const loadData = useCallback(async () => {
     setLoading(true);
+    setOutput(null);
+    setAudioUrl((prev) => {
+      if (prev) URL.revokeObjectURL(prev);
+      return '';
+    });
     try {
       const [provListRes, catRes, keysRes] = await Promise.all([
         providersApi.list(),
@@ -67,9 +87,20 @@ export function MediaProviderDetailPage() {
         keysApi.list().catch(() => ({ keys: [] })),
       ]);
       const allProviders = provListRes?.providers || [];
+      const serverPresets =
+        Array.isArray(provListRes?.presets) && provListRes.presets.length > 0
+          ? provListRes.presets
+          : Array.isArray(catRes?.presets) && catRes.presets.length > 0
+            ? catRes.presets
+            : [];
       const allPresets =
-        Array.isArray(catRes?.presets) && catRes.presets.length > 0
-          ? catRes.presets
+        serverPresets.length > 0
+          ? [
+              ...serverPresets,
+              ...FALLBACK_PRESETS.filter(
+                (fb) => !serverPresets.some((sp) => sp.preset === fb.preset)
+              ),
+            ]
           : FALLBACK_PRESETS;
 
       const matchedProvider =
@@ -83,12 +114,8 @@ export function MediaProviderDetailPage() {
       setPreset(matchedPreset);
       setConnectBaseUrl(matchedProvider?.baseUrl || matchedPreset?.baseUrl || '');
 
-      const models = matchedProvider?.models?.length
-        ? matchedProvider.models
-        : matchedPreset?.models || [];
-      if (models.length > 0) {
-        setSelectedModel((prev) => prev || models[0]);
-      }
+      const models = getKindModels(matchedProvider, matchedPreset);
+      setSelectedModel((prev) => (models.includes(prev) ? prev : models[0] || ''));
 
       const loadedKeys = keysRes?.keys || [];
       setRouterKeys(loadedKeys);
@@ -104,14 +131,14 @@ export function MediaProviderDetailPage() {
     } finally {
       setLoading(false);
     }
-  }, [id, toast]);
+  }, [id, effectiveKind, getKindModels, toast]);
 
   useEffect(() => {
     loadData();
   }, [loadData]);
 
   useEffect(() => {
-    if (kind !== 'tts') return;
+    if (effectiveKind !== 'tts') return;
     mediaApi
       .voices(routerKeyInput)
       .then((res) => {
@@ -133,7 +160,7 @@ export function MediaProviderDetailPage() {
         }
       })
       .catch(() => {});
-  }, [kind, routerKeyInput]);
+  }, [effectiveKind, routerKeyInput]);
 
   useEffect(() => {
     return () => {
@@ -146,13 +173,19 @@ export function MediaProviderDetailPage() {
     if (!preset) return;
     setConnecting(true);
     try {
+      const seedModels =
+        Array.isArray(preset.models) && preset.models.length > 0
+          ? preset.models
+          : Array.isArray(preset.modelCatalog)
+            ? preset.modelCatalog.map((m) => m?.id).filter(Boolean)
+            : [];
       const payload = {
         preset: preset.preset,
         name: preset.name,
         slug: preset.preset,
         baseUrl: connectBaseUrl.trim() || preset.baseUrl,
         formatType: preset.formatType || 'openai',
-        models: preset.models || [],
+        models: seedModels,
         apiKeys: connectApiKey.trim()
           ? [{ label: 'Primary Key', key: connectApiKey.trim(), enabled: true }]
           : [],
@@ -177,26 +210,26 @@ export function MediaProviderDetailPage() {
 
   const curlSnippet = useMemo(() => {
     const authHdr = `  -H "Authorization: Bearer ${routerKeyInput || 'sk-001r-YOUR_KEY'}" \\\n`;
-    if (kind === 'embedding') {
+    if (effectiveKind === 'embedding') {
       return `curl -X POST ${origin}/v1/embeddings \\\n${authHdr}  -H "Content-Type: application/json" \\\n  -d '${JSON.stringify({ model: fullModelId, input: embedInput })}'`;
     }
-    if (kind === 'image') {
+    if (effectiveKind === 'image') {
       return `curl -X POST ${origin}/v1/images/generations \\\n${authHdr}  -H "Content-Type: application/json" \\\n  -d '${JSON.stringify({ model: fullModelId, prompt: promptInput, size: '1024x1024' })}'`;
     }
-    if (kind === 'video') {
+    if (effectiveKind === 'video') {
       return `curl -X POST ${origin}/v1/videos/generations \\\n${authHdr}  -H "Content-Type: application/json" \\\n  -d '${JSON.stringify({ model: fullModelId, prompt: promptInput })}'`;
     }
-    if (kind === 'tts') {
+    if (effectiveKind === 'tts') {
       return `curl -X POST ${origin}/v1/audio/speech \\\n${authHdr}  -H "Content-Type: application/json" \\\n  -d '${JSON.stringify({ model: fullModelId, input: ttsInput, voice: ttsVoice })}' \\\n  --output speech.mp3`;
     }
-    if (kind === 'stt') {
+    if (effectiveKind === 'stt') {
       return `curl -X POST ${origin}/v1/audio/transcriptions \\\n${authHdr}  -F "model=${fullModelId}" \\\n  -F "file=@sample.wav"`;
     }
     if (webTab === 'fetch') {
       return `curl -X POST ${origin}/v1/web/fetch \\\n${authHdr}  -H "Content-Type: application/json" \\\n  -d '${JSON.stringify({ provider: slug, url: fetchUrl })}'`;
     }
     return `curl -X POST ${origin}/v1/search \\\n${authHdr}  -H "Content-Type: application/json" \\\n  -d '${JSON.stringify({ provider: slug, query: searchQuery, max_results: 5 })}'`;
-  }, [kind, origin, routerKeyInput, fullModelId, embedInput, promptInput, ttsInput, ttsVoice, webTab, slug, fetchUrl, searchQuery]);
+  }, [effectiveKind, origin, routerKeyInput, fullModelId, embedInput, promptInput, ttsInput, ttsVoice, webTab, slug, fetchUrl, searchQuery]);
 
   const handleRunTryIt = async (e) => {
     e.preventDefault();
@@ -207,25 +240,25 @@ export function MediaProviderDetailPage() {
       setAudioUrl('');
     }
     try {
-      if (kind === 'embedding') {
+      if (effectiveKind === 'embedding') {
         const res = await mediaApi.embeddings(
           { model: fullModelId, input: embedInput },
           routerKeyInput
         );
         setOutput({ type: 'json', data: res });
-      } else if (kind === 'image') {
+      } else if (effectiveKind === 'image') {
         const res = await mediaApi.generateImage(
           { model: fullModelId, prompt: promptInput, size: '1024x1024' },
           routerKeyInput
         );
         setOutput({ type: 'image', data: res });
-      } else if (kind === 'video') {
+      } else if (effectiveKind === 'video') {
         const res = await mediaApi.generateVideo(
           { model: fullModelId, prompt: promptInput },
           routerKeyInput
         );
         setOutput({ type: 'json', data: res });
-      } else if (kind === 'tts') {
+      } else if (effectiveKind === 'tts') {
         const blob = await mediaApi.generateSpeech(
           { model: fullModelId, input: ttsInput, voice: ttsVoice },
           routerKeyInput
@@ -233,7 +266,7 @@ export function MediaProviderDetailPage() {
         const url = URL.createObjectURL(blob);
         setAudioUrl(url);
         setOutput({ type: 'audio', size: blob.size, mime: blob.type });
-      } else if (kind === 'web') {
+      } else if (effectiveKind === 'web') {
         if (webTab === 'fetch') {
           const res = await mediaApi.webFetch({ provider: slug, url: fetchUrl }, routerKeyInput);
           setOutput({ type: 'json', data: res });
@@ -254,7 +287,10 @@ export function MediaProviderDetailPage() {
     }
   };
 
-  const modelsList = provider?.models?.length ? provider.models : preset?.models || [];
+  const modelsList = useMemo(
+    () => getKindModels(provider, preset),
+    [getKindModels, provider, preset]
+  );
 
   return (
     <div className="space-y-6">
@@ -262,7 +298,7 @@ export function MediaProviderDetailPage() {
       <section className="r-card flex flex-wrap items-center justify-between gap-4 p-5">
         <div className="flex items-center gap-3.5">
           <Link
-            to={`/media-providers/${kind}`}
+            to={`/media-providers/${effectiveKind}`}
             aria-label={`Back to ${kindMeta.label}`}
             className="r-btn-secondary flex h-9 w-9 items-center justify-center p-0"
           >
@@ -388,7 +424,7 @@ export function MediaProviderDetailPage() {
           </div>
         </div>
 
-        {kind === 'web' ? (
+        {effectiveKind === 'web' ? (
           <div className="flex items-center gap-2">
             <button
               type="button"
@@ -417,7 +453,7 @@ export function MediaProviderDetailPage() {
           </div>
         ) : null}
 
-        {kind === 'stt' ? (
+        {effectiveKind === 'stt' ? (
           <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-subtle)] p-4 text-xs text-[var(--text-secondary)]">
             Speech-to-Text accepts <code>multipart/form-data</code> audio uploads (WAV, MP3, M4A,
             WebM) at <code>POST {origin}/v1/audio/transcriptions</code>. Use the copyable cURL
@@ -425,7 +461,7 @@ export function MediaProviderDetailPage() {
           </div>
         ) : (
           <form onSubmit={handleRunTryIt} className="space-y-3">
-            {modelsList.length > 0 && kind !== 'web' ? (
+            {modelsList.length > 0 && effectiveKind !== 'web' ? (
               <div className="grid gap-3 sm:grid-cols-2">
                 <div>
                   <label className="block text-xs font-medium text-[var(--text-secondary)]">
@@ -443,7 +479,7 @@ export function MediaProviderDetailPage() {
                     ))}
                   </select>
                 </div>
-                {kind === 'tts' ? (
+                {effectiveKind === 'tts' ? (
                   <div>
                     <label className="block text-xs font-medium text-[var(--text-secondary)]">
                       Voice
@@ -464,7 +500,7 @@ export function MediaProviderDetailPage() {
               </div>
             ) : null}
 
-            {kind === 'embedding' ? (
+            {effectiveKind === 'embedding' ? (
               <textarea
                 rows={3}
                 value={embedInput}
@@ -472,7 +508,7 @@ export function MediaProviderDetailPage() {
                 className="field-input w-full p-3 text-xs"
                 placeholder="Text to embed…"
               />
-            ) : kind === 'image' || kind === 'video' ? (
+            ) : effectiveKind === 'image' || effectiveKind === 'video' ? (
               <textarea
                 rows={3}
                 value={promptInput}
@@ -480,7 +516,7 @@ export function MediaProviderDetailPage() {
                 className="field-input w-full p-3 text-xs"
                 placeholder="Prompt…"
               />
-            ) : kind === 'tts' ? (
+            ) : effectiveKind === 'tts' ? (
               <textarea
                 rows={3}
                 value={ttsInput}

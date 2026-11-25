@@ -179,7 +179,9 @@ export function createCatalogRouter(storage) {
     const q = typeof req.query.q === "string" ? req.query.q : "";
     const sort = typeof req.query.sort === "string" ? req.query.sort : "";
     const days = typeof req.query.days === "string" ? req.query.days : "";
-    return res.json(queryCatalogModels(PRESETS, { kind, q, sort, days }));
+    const preset = typeof req.query.preset === "string" ? req.query.preset : "";
+    const tier = typeof req.query.tier === "string" ? req.query.tier : "";
+    return res.json(queryCatalogModels(PRESETS, { kind, q, sort, days, preset, tier }));
   });
 
   router.get("/catalog/sync-status", (_req, res) => {

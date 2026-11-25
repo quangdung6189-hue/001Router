@@ -369,6 +369,79 @@ export async function createApp(options = {}) {
         }
         return origJson(payload);
       };
+    } else {
+      const origWrite = res.write.bind(res);
+      const origEnd = res.end.bind(res);
+      let sseBuf = "";
+      const translateLines = (chunkStr) => {
+        sseBuf += chunkStr;
+        const lines = sseBuf.split(/\r?\n/);
+        sseBuf = lines.pop() || "";
+        for (const rawLine of lines) {
+          const line = rawLine.trim();
+          if (!line.startsWith("data:")) continue;
+          const dataStr = line.slice(5).trim();
+          if (!dataStr || dataStr === "[DONE]") continue;
+          let parsed;
+          try {
+            parsed = JSON.parse(dataStr);
+          } catch {
+            continue;
+          }
+          const choice = parsed?.choices?.[0];
+          const deltaText = typeof choice?.delta?.content === "string" ? choice.delta.content : "";
+          const finishReason = choice?.finish_reason
+            ? choice.finish_reason === "length"
+              ? "MAX_TOKENS"
+              : "STOP"
+            : undefined;
+          const usage = parsed?.usage;
+          if (!deltaText && !finishReason && !usage) continue;
+          const geminiChunk = {
+            candidates: [
+              {
+                content: { role: "model", parts: [{ text: deltaText }] },
+                index: 0,
+                ...(finishReason ? { finishReason } : {})
+              }
+            ],
+            ...(usage
+              ? {
+                  usageMetadata: {
+                    promptTokenCount: usage.prompt_tokens || 0,
+                    candidatesTokenCount: usage.completion_tokens || 0,
+                    totalTokenCount: usage.total_tokens || 0
+                  }
+                }
+              : {}),
+            modelVersion: parsed.model || modelId
+          };
+          origWrite(`data: ${JSON.stringify(geminiChunk)}\n\n`);
+        }
+      };
+      res.write = (chunk, encoding, cb) => {
+        const ct = String(res.getHeader("Content-Type") || "");
+        if (ct.includes("text/event-stream")) {
+          const text = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk || "");
+          translateLines(text);
+          if (typeof encoding === "function") encoding();
+          else if (typeof cb === "function") cb();
+          return true;
+        }
+        return origWrite(chunk, encoding, cb);
+      };
+      res.end = (chunk, encoding, cb) => {
+        const ct = String(res.getHeader("Content-Type") || "");
+        if (ct.includes("text/event-stream")) {
+          if (chunk) {
+            const text = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
+            translateLines(text);
+          }
+          if (sseBuf.trim()) translateLines("\n");
+          return origEnd(typeof chunk === "function" ? chunk : typeof encoding === "function" ? encoding : cb);
+        }
+        return origEnd(chunk, encoding, cb);
+      };
     }
     return routerService.handleChatCompletions(req, res);
   });

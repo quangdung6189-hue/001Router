@@ -18,7 +18,8 @@ export function AuthGate() {
   }
 
   if (!authenticated) {
-    return <Navigate to="/login" replace state={{ from: location.pathname }} />;
+    const from = `${location.pathname}${location.search || ''}${location.hash || ''}`;
+    return <Navigate to="/login" replace state={{ from }} />;
   }
 
   if (passwordChangeRequired) {
