@@ -426,7 +426,8 @@ export function buildUpstreamHeaders(provider, apiKey, clientAnthropicVersion, e
     (!formatChanged ? presetDef?.authStyle : undefined) ||
     (provider?.formatType === "anthropic" ? "x-api-key" : "bearer");
 
-  if (apiKey) {
+  const hasAuthOverride = Boolean(headers.authorization || headers.Authorization);
+  if (apiKey && !hasAuthOverride) {
     if (authStyle === "api-key") {
       headers["api-key"] = apiKey;
     } else if (authStyle === "x-api-key") {

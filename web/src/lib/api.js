@@ -134,10 +134,13 @@ export const providersApi = {
       method: 'POST',
       body: { callbackUrl },
     }),
-  exchangeOpenRouterOAuth: (code, state) =>
+  exchangeOpenRouterOAuth: (codeOrPayload, state) =>
     apiFetch('/api/providers/oauth/openrouter/exchange', {
       method: 'POST',
-      body: { code, state },
+      body:
+        codeOrPayload && typeof codeOrPayload === 'object'
+          ? codeOrPayload
+          : { code: codeOrPayload, state },
     }),
   startAntigravityOAuth: (payload = {}) =>
     apiFetch('/api/providers/oauth/antigravity/start', {

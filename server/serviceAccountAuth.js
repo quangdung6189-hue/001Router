@@ -454,6 +454,13 @@ export async function resolveAuthContextForKey(keyEntry, options = {}) {
       forceRefresh: options.forceRefresh
     });
     const extraHeaders = {};
+    const oauthProvider = String(keyEntry.oauthMeta?.provider || "").toLowerCase();
+    if (oauthProvider === "claude" || oauthProvider === "anthropic") {
+      extraHeaders.authorization = `Bearer ${accessToken}`;
+      extraHeaders["anthropic-beta"] =
+        "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14";
+      extraHeaders["anthropic-dangerous-direct-browser-access"] = "true";
+    }
     if (keyEntry.oauthMeta?.orgId) {
       extraHeaders["x-kilocode-organizationid"] = String(keyEntry.oauthMeta.orgId);
     }

@@ -21,6 +21,149 @@ export const DEFAULT_NOUS_PORTAL_BASE_URL = "https://portal.nousresearch.com";
 export const DEFAULT_NOUS_OAUTH_CLIENT_ID = "hermes-cli";
 export const DEFAULT_NOUS_OAUTH_SCOPE = "inference:invoke inference:mint_agent_key";
 
+export const DEFAULT_KIMI_AUTH_BASE_URL = "https://auth.kimi.com";
+export const DEFAULT_KIMI_OAUTH_CLIENT_ID = "17e5f671-d194-4dfb-9706-5516cb48c098";
+
+export const DEFAULT_OPENAI_OAUTH_CLIENT_ID =
+  process.env.OPENAI_OAUTH_CLIENT_ID || "app_EMoamEEZ73f0CkXaXp7hrann";
+export const DEFAULT_OPENAI_CALLBACK_URL = "http://localhost:1455/auth/callback";
+
+export const DEFAULT_CLAUDE_OAUTH_CLIENT_ID =
+  process.env.CLAUDE_OAUTH_CLIENT_ID || "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+export const DEFAULT_CLAUDE_CALLBACK_URL = "http://localhost:54545/callback";
+
+function canonicalOAuthProvider(provider) {
+  const p = String(provider || "").trim().toLowerCase();
+  if (p === "codex") return "openai";
+  if (p === "claude") return "anthropic";
+  if (p === "kimi-coding") return "kimi";
+  return p;
+}
+
+function getBuiltInOAuthPkceConfig(provider) {
+  const canonical = canonicalOAuthProvider(provider);
+  if (canonical === "openai") {
+    return {
+      canonical: "openai",
+      clientId: DEFAULT_OPENAI_OAUTH_CLIENT_ID,
+      clientSecret: "",
+      authorizeUrl: "https://auth.openai.com/oauth/authorize",
+      tokenUrl: "https://auth.openai.com/oauth/token",
+      userinfoUrl: "",
+      scope: "openid profile email offline_access",
+      defaultCallbackUrl: DEFAULT_OPENAI_CALLBACK_URL,
+      extraAuthParams: {
+        id_token_add_organizations: "true",
+        codex_cli_simplified_flow: "true",
+        originator: "codex_cli_rs"
+      },
+      tokenEncoding: "form"
+    };
+  }
+  if (canonical === "anthropic") {
+    return {
+      canonical: "anthropic",
+      clientId: DEFAULT_CLAUDE_OAUTH_CLIENT_ID,
+      clientSecret: "",
+      authorizeUrl: "https://claude.ai/oauth/authorize",
+      tokenUrl: "https://api.anthropic.com/v1/oauth/token",
+      userinfoUrl: "https://api.anthropic.com/api/oauth/profile",
+      scope: "org:create_api_key user:profile user:inference",
+      defaultCallbackUrl: DEFAULT_CLAUDE_CALLBACK_URL,
+      extraAuthParams: {
+        code: "true"
+      },
+      tokenEncoding: "json"
+    };
+  }
+  return null;
+}
+
+function decodeJwtPayloadBestEffort(token) {
+  if (typeof token !== "string") return null;
+  const parts = token.split(".");
+  if (parts.length < 2 || !parts[1]) return null;
+  try {
+    const json = Buffer.from(parts[1], "base64url").toString("utf8");
+    const parsed = JSON.parse(json);
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function extractOpenAIJwtMeta(tokenData) {
+  const idClaims = decodeJwtPayloadBestEffort(tokenData?.id_token) || {};
+  const accessClaims = decodeJwtPayloadBestEffort(tokenData?.access_token) || {};
+  const authClaims =
+    (idClaims["https://api.openai.com/auth"] &&
+    typeof idClaims["https://api.openai.com/auth"] === "object"
+      ? idClaims["https://api.openai.com/auth"]
+      : accessClaims["https://api.openai.com/auth"]) || {};
+  const profileClaims =
+    (idClaims["https://api.openai.com/profile"] &&
+    typeof idClaims["https://api.openai.com/profile"] === "object"
+      ? idClaims["https://api.openai.com/profile"]
+      : accessClaims["https://api.openai.com/profile"]) || {};
+
+  const email =
+    String(
+      idClaims.email ||
+        profileClaims.email ||
+        accessClaims.email ||
+        ""
+    ).trim();
+  const rawPlan = String(
+    authClaims.chatgpt_plan_type ||
+      idClaims.chatgpt_plan_type ||
+      idClaims.plan_type ||
+      idClaims.subscription_plan ||
+      accessClaims.chatgpt_plan_type ||
+      ""
+  )
+    .trim()
+    .toLowerCase();
+
+  let tierLabel = "OpenAI Codex";
+  if (rawPlan === "pro") tierLabel = "ChatGPT Pro";
+  else if (rawPlan === "plus") tierLabel = "ChatGPT Plus";
+  else if (rawPlan === "team") tierLabel = "ChatGPT Team";
+  else if (rawPlan === "enterprise" || rawPlan === "edu") tierLabel = `ChatGPT ${rawPlan[0].toUpperCase()}${rawPlan.slice(1)}`;
+  else if (rawPlan === "free") tierLabel = "ChatGPT Free";
+  else if (rawPlan) tierLabel = `ChatGPT ${rawPlan}`;
+
+  const accountId = String(authClaims.chatgpt_account_id || "").trim();
+  return {
+    ...(email ? { email } : {}),
+    ...(accountId ? { accountId } : {}),
+    ...(rawPlan ? { tier: rawPlan } : {}),
+    tierLabel
+  };
+}
+
+function extractClaudeProfileMeta(userInfo) {
+  const email = String(userInfo?.account?.email || userInfo?.email || "").trim();
+  const name = String(userInfo?.account?.full_name || userInfo?.name || "").trim();
+  const orgType = String(
+    userInfo?.organization?.organization_type || userInfo?.organization_type || ""
+  )
+    .trim()
+    .toLowerCase();
+  let tierLabel = "Claude OAuth";
+  if (orgType.includes("max")) tierLabel = "Claude Max";
+  else if (orgType.includes("pro")) tierLabel = "Claude Pro";
+  else if (orgType.includes("team")) tierLabel = "Claude Team";
+  else if (orgType.includes("enterprise")) tierLabel = "Claude Enterprise";
+  else if (userInfo?.has_claude_max) tierLabel = "Claude Max";
+  else if (userInfo?.has_claude_pro) tierLabel = "Claude Pro";
+  return {
+    ...(email ? { email } : {}),
+    ...(name ? { name } : {}),
+    ...(orgType ? { tier: orgType } : {}),
+    tierLabel
+  };
+}
+
 /**
  * @typedef {{
  *   provider: string,
@@ -212,17 +355,30 @@ export function extractCodeAndState(input = {}) {
       throw createHttpError(400, "Pasted callback text is too long. Paste only the address from the browser bar.");
     }
     let params = null;
+    let hashStateFallback = "";
     try {
       const u = new URL(rawUrl);
       const fromQuery = u.searchParams;
-      params = fromQuery.has("code") || fromQuery.has("error")
-        ? fromQuery
-        : new URLSearchParams(u.hash.replace(/^#/, ""));
+      if (fromQuery.has("code") || fromQuery.has("error")) {
+        params = fromQuery;
+        const rawHash = u.hash.replace(/^#/, "").trim();
+        if (rawHash && !rawHash.includes("=")) {
+          hashStateFallback = rawHash;
+        }
+      } else {
+        params = new URLSearchParams(u.hash.replace(/^#/, ""));
+      }
     } catch {
-      // Not a URL: accept a bare query string such as "?code=...&state=..." or "code=...&state=..."
-      const candidate = rawUrl.replace(/^[?#]/, "");
-      if (/^[A-Za-z0-9_.~%+-]+=/.test(candidate)) {
-        params = new URLSearchParams(candidate);
+      // Bare Anthropic format "code#state" (without spaces or URL syntax)
+      const hashCodeMatch = rawUrl.match(/^([A-Za-z0-9_.~/-]+)#([A-Za-z0-9_.~/-]+)$/);
+      if (hashCodeMatch) {
+        params = new URLSearchParams({ code: hashCodeMatch[1], state: hashCodeMatch[2] });
+      } else {
+        // Not a URL: accept a bare query string such as "?code=...&state=..." or "code=...&state=..."
+        const candidate = rawUrl.replace(/^[?#]/, "");
+        if (/^[A-Za-z0-9_.~%+-]+=/.test(candidate)) {
+          params = new URLSearchParams(candidate);
+        }
       }
     }
     if (!params) {
@@ -232,8 +388,14 @@ export function extractCodeAndState(input = {}) {
       );
     }
 
-    const qCode = (params.get("code") || "").trim();
-    const qState = (params.get("state") || "").trim();
+    let qCode = (params.get("code") || "").trim();
+    let qState = (params.get("state") || "").trim() || hashStateFallback;
+    if (qCode.includes("#")) {
+      const hashIdx = qCode.indexOf("#");
+      const splitState = qCode.slice(hashIdx + 1).trim();
+      qCode = qCode.slice(0, hashIdx).trim();
+      if (!qState && splitState) qState = splitState;
+    }
     const qErr = (params.get("error") || "").trim();
     if (qErr && !qCode) {
       const known = OAUTH_ERROR_HINTS[qErr.toLowerCase()];
@@ -272,6 +434,7 @@ function buildOAuth2CacheKey(clientId, refreshToken, tokenUrl) {
  */
 export function startGenericOAuthPkce(provider, params = {}) {
   const normalizedProvider = String(provider || "").trim().toLowerCase();
+  const builtIn = getBuiltInOAuthPkceConfig(normalizedProvider);
   const cleanParams = stripPrototypePollution(params);
   const nowFn = typeof cleanParams.nowFn === "function" ? cleanParams.nowFn : Date.now;
   const allowLoopback = Boolean(cleanParams.allowLoopback);
@@ -281,7 +444,8 @@ export function startGenericOAuthPkce(provider, params = {}) {
   let userinfoUrl = "";
   let baseUrl = "";
   let scope = "";
-  const clientId = typeof cleanParams.clientId === "string" ? cleanParams.clientId.trim() : "";
+  const explicitClientId = typeof cleanParams.clientId === "string" ? cleanParams.clientId.trim() : "";
+  const clientId = explicitClientId || builtIn?.clientId || "";
   const clientSecret =
     typeof cleanParams.clientSecret === "string" ? cleanParams.clientSecret.trim() : "";
 
@@ -309,6 +473,22 @@ export function startGenericOAuthPkce(provider, params = {}) {
       typeof cleanParams.scope === "string" && cleanParams.scope.trim()
         ? cleanParams.scope.trim()
         : DEFAULT_GITLAB_SCOPE;
+  } else if (builtIn) {
+    authorizeUrl =
+      (typeof cleanParams.authorizeUrl === "string" && cleanParams.authorizeUrl.trim()) ||
+      builtIn.authorizeUrl;
+    tokenUrl =
+      (typeof cleanParams.tokenUrl === "string" && cleanParams.tokenUrl.trim()) ||
+      builtIn.tokenUrl;
+    userinfoUrl =
+      (typeof cleanParams.userinfoUrl === "string" && cleanParams.userinfoUrl.trim()) ||
+      builtIn.userinfoUrl;
+    baseUrl =
+      typeof cleanParams.baseUrl === "string"
+        ? cleanParams.baseUrl.trim().replace(/\/+$/, "")
+        : "";
+    scope =
+      (typeof cleanParams.scope === "string" && cleanParams.scope.trim()) || builtIn.scope;
   } else {
     authorizeUrl =
       typeof cleanParams.authorizeUrl === "string" ? cleanParams.authorizeUrl.trim() : "";
@@ -330,10 +510,11 @@ export function startGenericOAuthPkce(provider, params = {}) {
     validateOAuthEndpointUrl(userinfoUrl, "userinfoUrl", { allowLoopback });
   }
 
-  const redirectUri = validateOAuthCallbackUrl(
-    cleanParams.callbackUrl,
-    cleanParams.requestHost || ""
-  );
+  const effectiveCallback =
+    (typeof cleanParams.callbackUrl === "string" && cleanParams.callbackUrl.trim()) ||
+    builtIn?.defaultCallbackUrl ||
+    "";
+  const redirectUri = validateOAuthCallbackUrl(effectiveCallback, cleanParams.requestHost || "");
 
   const now = nowFn();
   pruneMap(pendingPkceStates, now);
@@ -346,6 +527,11 @@ export function startGenericOAuthPkce(provider, params = {}) {
     .digest("base64url");
   const state = `${normalizedProvider || "oauth2"}_${crypto.randomBytes(20).toString("hex")}`;
 
+  if (builtIn?.extraAuthParams) {
+    for (const [k, v] of Object.entries(builtIn.extraAuthParams)) {
+      parsedAuthUrl.searchParams.set(k, v);
+    }
+  }
   parsedAuthUrl.searchParams.set("client_id", clientId);
   parsedAuthUrl.searchParams.set("redirect_uri", redirectUri);
   parsedAuthUrl.searchParams.set("response_type", "code");
@@ -355,7 +541,7 @@ export function startGenericOAuthPkce(provider, params = {}) {
   parsedAuthUrl.searchParams.set("state", state);
 
   pendingPkceStates.set(state, {
-    provider: normalizedProvider || "custom_oauth",
+    provider: builtIn ? builtIn.canonical : normalizedProvider || "custom_oauth",
     codeVerifier,
     clientId,
     clientSecret,
@@ -371,7 +557,8 @@ export function startGenericOAuthPkce(provider, params = {}) {
       name: typeof cleanParams.name === "string" ? cleanParams.name.trim() : "",
       slug: typeof cleanParams.slug === "string" ? cleanParams.slug.trim() : "",
       formatType:
-        typeof cleanParams.formatType === "string" ? cleanParams.formatType.trim() : ""
+        typeof cleanParams.formatType === "string" ? cleanParams.formatType.trim() : "",
+      ...(builtIn ? { tokenEncoding: builtIn.tokenEncoding, rawProvider: normalizedProvider } : {})
     },
     createdAt: now,
     expiresAt: now + OAUTH_STATE_TTL_MS
@@ -383,6 +570,25 @@ export function startGenericOAuthPkce(provider, params = {}) {
     redirectUri,
     expiresInSec: OAUTH_STATE_TTL_SEC
   };
+}
+
+/**
+ * Inspect an active PKCE record without consuming it (for serverless persistence).
+ * @param {string} state
+ */
+export function peekGenericPkceState(state) {
+  return pendingPkceStates.get(state) || null;
+}
+
+/**
+ * Restore a persisted PKCE record into memory before `exchangeGenericOAuthPkce`.
+ * @param {string} state
+ * @param {PendingOAuthPkceRecord} record
+ */
+export function restoreGenericPkceState(state, record) {
+  if (!state || !record || typeof record !== "object") return;
+  if (!record.codeVerifier || !record.expiresAt || record.expiresAt <= Date.now()) return;
+  pendingPkceStates.set(state, record);
 }
 
 /**
@@ -418,8 +624,8 @@ export async function exchangeGenericOAuthPkce(provider, params = {}) {
   if (record.expiresAt <= now) {
     throw createHttpError(400, "OAuth PKCE state has expired");
   }
-  const normalizedProvider = String(provider || "").trim().toLowerCase();
-  if (normalizedProvider && record.provider !== normalizedProvider) {
+  const normalizedProvider = canonicalOAuthProvider(provider);
+  if (normalizedProvider && canonicalOAuthProvider(record.provider) !== normalizedProvider) {
     throw createHttpError(400, "OAuth PKCE state does not match selected provider");
   }
 
@@ -429,15 +635,36 @@ export async function exchangeGenericOAuthPkce(provider, params = {}) {
       : record.tokenUrl;
   const parsedTokenUrl = validateOAuthEndpointUrl(tokenUrl, "tokenUrl", { allowLoopback });
 
-  const form = new URLSearchParams({
-    grant_type: "authorization_code",
-    code,
-    redirect_uri: record.redirectUri,
-    client_id: record.clientId,
-    code_verifier: record.codeVerifier
-  });
-  if (record.clientSecret) {
-    form.set("client_secret", record.clientSecret);
+  const useJsonTokenExchange =
+    record.extra?.tokenEncoding === "json" ||
+    canonicalOAuthProvider(record.provider) === "anthropic" ||
+    /anthropic\.com/i.test(parsedTokenUrl.hostname);
+
+  let reqContentType = "application/x-www-form-urlencoded";
+  let reqBody = "";
+  if (useJsonTokenExchange) {
+    reqContentType = "application/json";
+    reqBody = JSON.stringify({
+      grant_type: "authorization_code",
+      code,
+      state,
+      redirect_uri: record.redirectUri,
+      client_id: record.clientId,
+      code_verifier: record.codeVerifier,
+      ...(record.clientSecret ? { client_secret: record.clientSecret } : {})
+    });
+  } else {
+    const form = new URLSearchParams({
+      grant_type: "authorization_code",
+      code,
+      redirect_uri: record.redirectUri,
+      client_id: record.clientId,
+      code_verifier: record.codeVerifier
+    });
+    if (record.clientSecret) {
+      form.set("client_secret", record.clientSecret);
+    }
+    reqBody = form.toString();
   }
 
   let tokenRes;
@@ -445,10 +672,10 @@ export async function exchangeGenericOAuthPkce(provider, params = {}) {
     tokenRes = await fetchImpl(parsedTokenUrl.toString(), {
       method: "POST",
       headers: {
-        "content-type": "application/x-www-form-urlencoded",
+        "content-type": reqContentType,
         accept: "application/json"
       },
-      body: form.toString(),
+      body: reqBody,
       ...(dispatcher ? { dispatcher } : {})
     });
   } catch (err) {
@@ -522,7 +749,10 @@ export async function exchangeGenericOAuthPkce(provider, params = {}) {
         method: "GET",
         headers: {
           authorization: `Bearer ${accessToken}`,
-          accept: "application/json"
+          accept: "application/json",
+          ...(canonicalOAuthProvider(record.provider) === "anthropic"
+            ? { "anthropic-beta": "oauth-2025-04-20" }
+            : {})
         },
         ...(dispatcher ? { dispatcher } : {})
       });
@@ -533,6 +763,13 @@ export async function exchangeGenericOAuthPkce(provider, params = {}) {
       // Best-effort profile lookup
     }
   }
+
+  const jwtOrProfileMeta =
+    canonicalOAuthProvider(record.provider) === "openai"
+      ? extractOpenAIJwtMeta(tokenData)
+      : canonicalOAuthProvider(record.provider) === "anthropic"
+        ? extractClaudeProfileMeta(userInfo)
+        : {};
 
   const oauthCredentials = {
     provider: record.provider,
@@ -559,6 +796,7 @@ export async function exchangeGenericOAuthPkce(provider, params = {}) {
     ...(userInfo.email ? { email: String(userInfo.email) } : {}),
     ...(userInfo.username ? { username: String(userInfo.username) } : {}),
     ...(userInfo.name ? { name: String(userInfo.name) } : {}),
+    ...jwtOrProfileMeta,
     ...(record.baseUrl ? { baseUrl: record.baseUrl } : {}),
     expiresAt: new Date(expiresAt).toISOString(),
     checkedAt: new Date(nowFn()).toISOString()
@@ -667,25 +905,35 @@ export async function startDeviceCodeFlow(provider, params = {}) {
     };
   }
 
-  // RFC 8628 standard device code flow (`nous` or `custom_oauth`)
-  const isNous = normalizedProvider === "nous";
+  // RFC 8628 standard device code flow (`kimi`, `nous`, or `custom_oauth`)
+  const canonicalDevice = canonicalOAuthProvider(normalizedProvider);
+  const isNous = canonicalDevice === "nous";
+  const isKimi = canonicalDevice === "kimi";
   const portalBase =
     isNous && typeof cleanParams.portalBaseUrl === "string" && cleanParams.portalBaseUrl.trim()
       ? cleanParams.portalBaseUrl.trim().replace(/\/+$/, "")
       : DEFAULT_NOUS_PORTAL_BASE_URL;
+  const kimiAuthBase =
+    isKimi && typeof cleanParams.kimiAuthBaseUrl === "string" && cleanParams.kimiAuthBaseUrl.trim()
+      ? cleanParams.kimiAuthBaseUrl.trim().replace(/\/+$/, "")
+      : DEFAULT_KIMI_AUTH_BASE_URL;
 
   const deviceCodeUrl =
     typeof cleanParams.deviceCodeUrl === "string" && cleanParams.deviceCodeUrl.trim()
       ? cleanParams.deviceCodeUrl.trim()
       : isNous
         ? `${portalBase}/api/oauth/device/code`
-        : "";
+        : isKimi
+          ? `${kimiAuthBase}/api/oauth/device_authorization`
+          : "";
   const tokenUrl =
     typeof cleanParams.tokenUrl === "string" && cleanParams.tokenUrl.trim()
       ? cleanParams.tokenUrl.trim()
       : isNous
         ? `${portalBase}/api/oauth/token`
-        : "";
+        : isKimi
+          ? `${kimiAuthBase}/api/oauth/token`
+          : "";
   const agentKeyUrl =
     typeof cleanParams.agentKeyUrl === "string" && cleanParams.agentKeyUrl.trim()
       ? cleanParams.agentKeyUrl.trim()
@@ -697,7 +945,9 @@ export async function startDeviceCodeFlow(provider, params = {}) {
       ? cleanParams.clientId.trim()
       : isNous
         ? DEFAULT_NOUS_OAUTH_CLIENT_ID
-        : "";
+        : isKimi
+          ? DEFAULT_KIMI_OAUTH_CLIENT_ID
+          : "";
   const clientSecret =
     typeof cleanParams.clientSecret === "string" ? cleanParams.clientSecret.trim() : "";
   const scope =
@@ -767,7 +1017,7 @@ export async function startDeviceCodeFlow(provider, params = {}) {
   const flowId = `dev_${crypto.randomBytes(16).toString("hex")}`;
 
   pendingDeviceFlows.set(flowId, {
-    provider: normalizedProvider || "custom_oauth",
+    provider: canonicalDevice || "custom_oauth",
     tokenUrl,
     pollUrlBase: "",
     profileUrl: "",
@@ -792,7 +1042,7 @@ export async function startDeviceCodeFlow(provider, params = {}) {
 
   return {
     flowId,
-    provider: normalizedProvider || "custom_oauth",
+    provider: canonicalDevice || "custom_oauth",
     deviceCode,
     userCode,
     verificationUri,
@@ -809,7 +1059,7 @@ export async function startDeviceCodeFlow(provider, params = {}) {
  */
 export async function pollDeviceCodeFlow(provider, params = {}) {
   const cleanParams = stripPrototypePollution(params);
-  const normalizedProvider = String(provider || "").trim().toLowerCase();
+  const normalizedProvider = canonicalOAuthProvider(provider);
   const fetchImpl = cleanParams.fetchImpl || upstreamFetch;
   const dispatcher = cleanParams.dispatcher;
   const nowFn = typeof cleanParams.nowFn === "function" ? cleanParams.nowFn : Date.now;
@@ -825,7 +1075,7 @@ export async function pollDeviceCodeFlow(provider, params = {}) {
   if (!record) {
     throw createHttpError(400, "Invalid or expired device authorization session");
   }
-  if (normalizedProvider && record.provider !== normalizedProvider) {
+  if (normalizedProvider && canonicalOAuthProvider(record.provider) !== normalizedProvider) {
     throw createHttpError(400, "Device authorization session does not match provider");
   }
   if (record.expiresAt <= now) {
@@ -1046,6 +1296,7 @@ export async function pollDeviceCodeFlow(provider, params = {}) {
     oauthMeta: {
       provider: record.provider,
       flow: "device_code",
+      ...(record.provider === "kimi" ? { tierLabel: "Kimi Code Plan" } : {}),
       ...(agentKeyExpiresAt ? { agentKeyExpiresAt } : {}),
       expiresAt: new Date(expiresAt).toISOString(),
       checkedAt: new Date(nowFn()).toISOString()
@@ -1146,22 +1397,38 @@ export async function getGenericOAuthAccessToken(oauthCredsStringOrObj, options 
   }
 
   const flightPromise = (async () => {
-    const form = new URLSearchParams({
-      grant_type: "refresh_token",
-      refresh_token: refreshToken
-    });
-    if (clientId) form.set("client_id", clientId);
-    if (clientSecret) form.set("client_secret", clientSecret);
+    const useJsonRefresh =
+      canonicalOAuthProvider(creds.provider) === "anthropic" ||
+      /anthropic\.com/i.test(effectiveTokenUrl);
+    let contentType = "application/x-www-form-urlencoded";
+    let body = "";
+    if (useJsonRefresh) {
+      contentType = "application/json";
+      body = JSON.stringify({
+        grant_type: "refresh_token",
+        refresh_token: refreshToken,
+        ...(clientId ? { client_id: clientId } : {}),
+        ...(clientSecret ? { client_secret: clientSecret } : {})
+      });
+    } else {
+      const form = new URLSearchParams({
+        grant_type: "refresh_token",
+        refresh_token: refreshToken
+      });
+      if (clientId) form.set("client_id", clientId);
+      if (clientSecret) form.set("client_secret", clientSecret);
+      body = form.toString();
+    }
 
     let res;
     try {
       res = await fetchImpl(effectiveTokenUrl, {
         method: "POST",
         headers: {
-          "content-type": "application/x-www-form-urlencoded",
+          "content-type": contentType,
           accept: "application/json"
         },
-        body: form.toString(),
+        body,
         ...(dispatcher ? { dispatcher } : {})
       });
     } catch (err) {

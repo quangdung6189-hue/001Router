@@ -105,11 +105,24 @@ export const ANTIGRAVITY_MODEL_ALIASES = Object.freeze({
   "gemini-4-argon-high": "gemini-4-argon-high(high)",
   "gemini-4-argon-medium": "gemini-4-argon-medium(medium)",
   "gemini-4-argon-low": "gemini-4-argon-low(low)",
+  "gemini-4-neon-high": "gemini-4-neon-high(high)",
+  "gemini-4-neon-medium": "gemini-4-neon-medium(medium)",
+  "gemini-4-neon-low": "gemini-4-neon-low(low)",
+  "gemini-4-neon": "gemini-4-neon-medium(medium)",
   "gemini-3.8-flash-high": "gemini-3.8-flash-high(high)",
   "gemini-3.8-flash-medium": "gemini-3.8-flash-medium(medium)",
   "gemini-3.8-flash-low": "gemini-3.8-flash-low(low)",
   "gemini-3.8-flash": "gemini-3.8-flash-medium(medium)",
+  "gemini-3.7-flash-high": "gemini-3.7-flash-tiered(high)",
+  "gemini-3.7-flash-medium": "gemini-3.7-flash-tiered(medium)",
+  "gemini-3.7-flash-low": "gemini-3.7-flash-tiered(low)",
+  "gemini-3.7-flash": "gemini-3.7-flash-tiered(medium)",
+  "gemini-3.6-flash-high": "gemini-3.6-flash-tiered(high)",
+  "gemini-3.6-flash-medium": "gemini-3.6-flash-tiered(medium)",
+  "gemini-3.6-flash-low": "gemini-3.6-flash-tiered(low)",
+  "gemini-3.6-flash": "gemini-3.6-flash-tiered(medium)",
   "gemini-3.1-pro-high": "gemini-pro-agent",
+  "gemini-pro-agent": "gemini-pro-agent",
   "gemini-3.1-pro-low": "gemini-3.1-pro-low(low)",
   "claude-sonnet-5-5-high": "claude-sonnet-5-5-high(high)",
   "claude-sonnet-5-5-medium": "claude-sonnet-5-5-medium(medium)",
@@ -118,7 +131,11 @@ export const ANTIGRAVITY_MODEL_ALIASES = Object.freeze({
   "claude-opus-5-5-high": "claude-opus-5-5-high(high)",
   "claude-opus-5-5-medium": "claude-opus-5-5-medium(medium)",
   "claude-opus-5-5-low": "claude-opus-5-5-low(low)",
-  "claude-opus-5-5": "claude-opus-5-5-high(high)"
+  "claude-opus-5-5": "claude-opus-5-5-high(high)",
+  "claude-sonnet-4-6": "claude-sonnet-4-6",
+  "claude-opus-4-6-thinking": "claude-opus-4-6-thinking",
+  "gpt-oss-120b": "gpt-oss-120b-medium",
+  "gpt-oss-120b-medium": "gpt-oss-120b-medium"
 });
 
 /**
@@ -1226,8 +1243,21 @@ export function resolveCatalogModel(requested, models, body) {
   if (ids.has(id)) return id;
   const viaAlias = resolveUpstreamModel(id, body, CLOUD_CODE_FLAVORS.antigravity).model;
   if (ids.has(viaAlias)) return viaAlias;
-  for (const tier of ["medium", "high", "low"]) {
+  for (const tier of ["medium", "high", "low", "thinking"]) {
     if (ids.has(`${id}-${tier}`)) return `${id}-${tier}`;
+  }
+  const stemMatch = id.match(/^(.*)-(low|medium|high|minimal|xhigh|thinking)$/i);
+  if (stemMatch) {
+    const stem = stemMatch[1];
+    for (const candidate of [
+      stem,
+      `${stem}-medium`,
+      `${stem}-high`,
+      `${stem}-low`,
+      `${stem}-thinking`
+    ]) {
+      if (ids.has(candidate)) return candidate;
+    }
   }
   return "";
 }

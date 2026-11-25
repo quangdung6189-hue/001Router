@@ -1110,6 +1110,8 @@ export function ProvidersPage() {
   const [oauth2Label, setOauth2Label] = useState('');
   const [oauth2StartedAuthUrl, setOauth2StartedAuthUrl] = useState('');
   const [oauth2PastedCallback, setOauth2PastedCallback] = useState('');
+  const [oauth2RedirectUri, setOauth2RedirectUri] = useState('');
+  const [openRouterPastedUrl, setOpenRouterPastedUrl] = useState('');
   const [oauth2Busy, setOauth2Busy] = useState(false);
   const [deviceFlow, setDeviceFlow] = useState(null);
   const [deviceStarting, setDeviceStarting] = useState(false);
@@ -1171,6 +1173,8 @@ export function ProvidersPage() {
     setOauth2Label('');
     setOauth2StartedAuthUrl('');
     setOauth2PastedCallback('');
+    setOauth2RedirectUri('');
+    setOpenRouterPastedUrl('');
     setOauth2Busy(false);
     setDeviceFlow(null);
     setDeviceStarting(false);
@@ -1250,7 +1254,30 @@ export function ProvidersPage() {
     loadProviders();
   }, [loadProviders]);
 
-  // Handle Official OAuth 2.0 + PKCE redirect callbacks (OpenRouter, GitLab, Custom OAuth)
+  // Sync live plan tier, billing state and model catalog onto a freshly connected provider.
+  const syncConnectedProviderPlan = useCallback(
+    async (savedProv) => {
+      if (!savedProv?.id) return savedProv;
+      await Promise.all([
+        providersApi.fetchModels(savedProv.id).catch(() => null),
+        providersApi.inspectAccount(savedProv.id, { checkBilling: false }).catch(() => null),
+      ]);
+      const freshRes = await providersApi.get(savedProv.id).catch(() => null);
+      const latest = freshRes?.provider || savedProv;
+      await loadProviders();
+      if (latest) {
+        setForm((prev) =>
+          prev && (!prev.id || prev.id === latest.id || prev.preset === latest.preset)
+            ? providerToForm(latest)
+            : prev
+        );
+      }
+      return latest;
+    },
+    [loadProviders]
+  );
+
+  // Handle Official OAuth 2.0 + PKCE redirect callbacks (OpenRouter, OpenAI, Anthropic, GitLab, Custom OAuth)
   useEffect(() => {
     if (oauthHandledRef.current) return;
     const params = new URLSearchParams(window.location.search);
@@ -1261,23 +1288,48 @@ export function ProvidersPage() {
 
     const isGoogleReturn =
       oauthProvider === 'google' || (Boolean(state) && state.startsWith('google_'));
+    const isOpenAIReturn =
+      oauthProvider === 'openai' ||
+      oauthProvider === 'codex' ||
+      (Boolean(state) && /^(openai|codex)_/.test(state));
+    const isAnthropicReturn =
+      oauthProvider === 'anthropic' ||
+      oauthProvider === 'claude' ||
+      (Boolean(state) && /^(anthropic|claude)_/.test(state));
     const isGitLabReturn =
       oauthProvider === 'gitlab' || (Boolean(state) && state.startsWith('gitlab_'));
     const isCustomOAuthReturn =
       oauthProvider === 'custom_oauth' || (Boolean(state) && state.startsWith('custom_oauth_'));
     const isOpenRouterReturn =
       !isGoogleReturn &&
+      !isOpenAIReturn &&
+      !isAnthropicReturn &&
       !isGitLabReturn &&
       !isCustomOAuthReturn &&
       (oauthProvider === 'openrouter' || (!oauthProvider && Boolean(code) && Boolean(state)));
 
-    if (!isGoogleReturn && !isOpenRouterReturn && !isGitLabReturn && !isCustomOAuthReturn) return;
+    if (
+      !isGoogleReturn &&
+      !isOpenAIReturn &&
+      !isAnthropicReturn &&
+      !isOpenRouterReturn &&
+      !isGitLabReturn &&
+      !isCustomOAuthReturn
+    ) {
+      return;
+    }
 
     oauthHandledRef.current = true;
     window.history.replaceState({}, '', window.location.pathname);
 
-    if (isGitLabReturn || isCustomOAuthReturn) {
-      const targetProvider = isGitLabReturn ? 'gitlab' : 'custom_oauth';
+    if (isGitLabReturn || isCustomOAuthReturn || isOpenAIReturn || isAnthropicReturn) {
+      const targetProvider = isGitLabReturn
+        ? 'gitlab'
+        : isOpenAIReturn
+          ? 'openai'
+          : isAnthropicReturn
+            ? 'anthropic'
+            : 'custom_oauth';
       if (oauthError) {
         toast.error(`OAuth 2.0 error (${targetProvider}): ${oauthError}`);
         return;
@@ -1289,10 +1341,21 @@ export function ProvidersPage() {
       setOauthExchanging(targetProvider);
       providersApi
         .exchangeOAuth(targetProvider, { code, state })
-        .then(async () => {
+        .then(async (exRes) => {
           if (!isMountedRef.current) return;
-          await loadProviders();
-          toast.success(`${isGitLabReturn ? 'GitLab Duo' : 'Custom OAuth'} connected via OAuth 2.0!`);
+          if (exRes?.provider) {
+            await syncConnectedProviderPlan(exRes.provider);
+          } else {
+            await loadProviders();
+          }
+          const okLabel = isGitLabReturn
+            ? 'GitLab Duo'
+            : isOpenAIReturn
+              ? 'OpenAI'
+              : isAnthropicReturn
+                ? 'Claude (Anthropic)'
+                : 'Custom OAuth';
+          toast.success(`${okLabel} connected via OAuth 2.0!`);
         })
         .catch((err) => {
           if (!isMountedRef.current) return;
@@ -1406,6 +1469,12 @@ export function ProvidersPage() {
       setSlugManuallyEdited(false);
     }
     setNewModelInput('');
+    const targetPreset = existingProvider?.preset || presetObj?.preset || '';
+    if (targetPreset === 'openai') {
+      setOauth2RedirectUri('http://localhost:1455/auth/callback');
+    } else if (targetPreset === 'anthropic') {
+      setOauth2RedirectUri('http://localhost:54545/callback');
+    }
     setModalFeedback(null);
     setAccountReport(null);
     setModalOpen(true);
@@ -1443,6 +1512,12 @@ export function ProvidersPage() {
     });
     setSlugManuallyEdited(false);
     setNewModelInput('');
+    const targetPreset = existingProvider?.preset || presetObj?.preset || '';
+    if (targetPreset === 'openai') {
+      setOauth2RedirectUri('http://localhost:1455/auth/callback');
+    } else if (targetPreset === 'anthropic') {
+      setOauth2RedirectUri('http://localhost:54545/callback');
+    }
     setModalFeedback(null);
     setAccountReport(null);
     setModalOpen(true);
@@ -1695,7 +1770,16 @@ export function ProvidersPage() {
 
   const completeAntigravitySignIn = async (pastedUrl) => {
     const res = await providersApi.exchangeAntigravityOAuth({ pastedUrl });
-    await loadProviders();
+    const loaded = await loadProviders();
+    const updatedAg =
+      res?.provider || loaded?.providers?.find((p) => p.preset === 'antigravity');
+    if (updatedAg) {
+      setForm((prev) =>
+        prev && (prev.preset === 'antigravity' || prev.id === updatedAg.id)
+          ? providerToForm(updatedAg)
+          : prev
+      );
+    }
     const who = res?.oauthMeta?.email ? ` (${res.oauthMeta.email})` : '';
     toast.success(`Đã kết nối Antigravity${who} — xem provider "Antigravity (Google)".`);
   };
@@ -1705,7 +1789,15 @@ export function ProvidersPage() {
   // Re-read plan + weekly / 5-hour quota from Google and store it on the keys.
   const refreshAntigravity = async () => {
     await providersApi.refreshAntigravity();
-    await loadProviders();
+    const loaded = await loadProviders();
+    const updatedAg = loaded?.providers?.find((p) => p.preset === 'antigravity');
+    if (updatedAg) {
+      setForm((prev) =>
+        prev && (prev.preset === 'antigravity' || prev.id === updatedAg.id)
+          ? providerToForm(updatedAg)
+          : prev
+      );
+    }
   };
 
   const antigravityAccounts = useMemo(() => {
@@ -1801,7 +1893,16 @@ export function ProvidersPage() {
     setModalFeedback(null);
     setOauth2Busy(true);
     try {
-      const callbackUrl = `${window.location.origin}/providers?oauth=${encodeURIComponent(oauthProvider)}`;
+      const defaultCallback =
+        oauthProvider === 'openai'
+          ? 'http://localhost:1455/auth/callback'
+          : oauthProvider === 'anthropic'
+            ? 'http://localhost:54545/callback'
+            : `${window.location.origin}/providers?oauth=${encodeURIComponent(oauthProvider)}`;
+      const callbackUrl =
+        oauthProvider === 'openai' || oauthProvider === 'anthropic'
+          ? oauth2RedirectUri.trim() || defaultCallback
+          : defaultCallback;
       const payload =
         oauthProvider === 'gitlab'
           ? {
@@ -1812,26 +1913,39 @@ export function ProvidersPage() {
               callbackUrl,
               ...(form?.id ? { providerId: form.id } : {}),
             }
-          : {
-              authorizeUrl: oauth2AuthUrl.trim(),
-              tokenUrl: oauth2TokenUrl.trim(),
-              ...(oauth2UserinfoUrl.trim() ? { userinfoUrl: oauth2UserinfoUrl.trim() } : {}),
-              clientId: oauth2ClientId.trim(),
-              ...(oauth2ClientSecret.trim() ? { clientSecret: oauth2ClientSecret.trim() } : {}),
-              ...(oauth2Scope.trim() ? { scope: oauth2Scope.trim() } : {}),
-              callbackUrl,
-              ...(form?.id ? { providerId: form.id } : {}),
-              ...(form?.baseUrl ? { baseUrl: form.baseUrl } : {}),
-              ...(form?.name ? { name: form.name } : {}),
-              ...(form?.formatType ? { formatType: form.formatType } : {}),
-              ...(form?.preset ? { preset: form.preset } : {}),
-            };
+          : oauthProvider === 'openai' || oauthProvider === 'anthropic'
+            ? {
+                callbackUrl,
+                ...(form?.id ? { providerId: form.id } : {}),
+              }
+            : {
+                authorizeUrl: oauth2AuthUrl.trim(),
+                tokenUrl: oauth2TokenUrl.trim(),
+                ...(oauth2UserinfoUrl.trim() ? { userinfoUrl: oauth2UserinfoUrl.trim() } : {}),
+                clientId: oauth2ClientId.trim(),
+                ...(oauth2ClientSecret.trim() ? { clientSecret: oauth2ClientSecret.trim() } : {}),
+                ...(oauth2Scope.trim() ? { scope: oauth2Scope.trim() } : {}),
+                callbackUrl,
+                ...(form?.id ? { providerId: form.id } : {}),
+                ...(form?.baseUrl ? { baseUrl: form.baseUrl } : {}),
+                ...(form?.name ? { name: form.name } : {}),
+                ...(form?.formatType ? { formatType: form.formatType } : {}),
+                ...(form?.preset ? { preset: form.preset } : {}),
+              };
       const res = await providersApi.startOAuth(oauthProvider, payload);
       if (!res?.authUrl) {
         throw new Error('Server did not return an OAuth authorization URL');
       }
       setOauth2StartedAuthUrl(res.authUrl);
-      window.open(res.authUrl, '_blank', 'noopener,noreferrer');
+      const w = window.open(res.authUrl, '_blank', 'noopener,noreferrer');
+      if (oauthProvider === 'openai' || oauthProvider === 'anthropic') {
+        setModalFeedback({
+          type: 'info',
+          message: w
+            ? 'Đã mở tab đăng nhập. Đăng nhập → cho phép quyền, rồi copy toàn bộ địa chỉ từ thanh địa chỉ (hoặc mã code#state) dán vào ô bên dưới.'
+            : 'Trình duyệt chặn popup — bấm liên kết "Mở trang đăng nhập" bên dưới rồi dán địa chỉ callback lại đây.',
+        });
+      }
     } catch (err) {
       setModalFeedback({ type: 'error', message: err?.message || 'Failed to start OAuth 2.0 PKCE' });
     } finally {
@@ -1842,7 +1956,7 @@ export function ProvidersPage() {
   const handleCompletePastedOAuth = async (oauthProvider) => {
     const pastedUrl = oauth2PastedCallback.trim();
     if (!pastedUrl) {
-      setModalFeedback({ type: 'error', message: 'Paste the full callback URL containing code & state.' });
+      setModalFeedback({ type: 'error', message: 'Dán địa chỉ callback URL (chứa ?code=…&state=…) vào ô dưới.' });
       return;
     }
     setModalFeedback(null);
@@ -1852,18 +1966,49 @@ export function ProvidersPage() {
         pastedUrl,
         ...(form?.id ? { providerId: form.id } : {}),
         ...(oauth2Label.trim() ? { label: oauth2Label.trim() } : {}),
-        ...(form?.baseUrl ? { providerBaseUrl: form.baseUrl } : {}),
+        ...(form?.baseUrl && form?.preset !== 'openai' && form?.preset !== 'anthropic'
+          ? { providerBaseUrl: form.baseUrl }
+          : {}),
       });
-      await loadProviders();
-      if (res?.provider) {
-        setForm(providerToForm(res.provider));
+      const synced = res?.provider ? await syncConnectedProviderPlan(res.provider) : null;
+      if (!synced) {
+        await loadProviders();
+        if (res?.provider) setForm(providerToForm(res.provider));
       }
       setOauth2StartedAuthUrl('');
       setOauth2PastedCallback('');
-      setModalFeedback({ type: 'success', message: 'OAuth 2.0 connection authenticated & saved!' });
-      toast.success('OAuth 2.0 connection saved!');
+      const planText = res?.oauthMeta?.tierLabel ? ` (${res.oauthMeta.tierLabel})` : '';
+      const msg = `Kết nối OAuth 2.0 thành công${planText} — đã cập nhật gói và model!`;
+      setModalFeedback({ type: 'success', message: msg });
+      toast.success(msg);
     } catch (err) {
       setModalFeedback({ type: 'error', message: err?.message || 'OAuth exchange failed' });
+    } finally {
+      setOauth2Busy(false);
+    }
+  };
+
+  const handleCompleteOpenRouterPasted = async () => {
+    const pastedUrl = openRouterPastedUrl.trim();
+    if (!pastedUrl) {
+      setModalFeedback({ type: 'error', message: 'Dán URL callback từ OpenRouter (chứa ?code=…&state=…) trước.' });
+      return;
+    }
+    setModalFeedback(null);
+    setOauth2Busy(true);
+    try {
+      const res = await providersApi.exchangeOpenRouterOAuth({ pastedUrl });
+      if (res?.provider) {
+        await syncConnectedProviderPlan(res.provider);
+      } else {
+        await loadProviders();
+      }
+      setOpenRouterPastedUrl('');
+      const msg = 'Đã kết nối OpenRouter & đồng bộ danh sách model!';
+      setModalFeedback({ type: 'success', message: msg });
+      toast.success(msg);
+    } catch (err) {
+      setModalFeedback({ type: 'error', message: err?.message || 'OpenRouter OAuth exchange failed' });
     } finally {
       setOauth2Busy(false);
     }
@@ -1913,15 +2058,18 @@ export function ProvidersPage() {
         flowId: flowObj.flowId,
         ...(form?.id ? { providerId: form.id } : {}),
         ...(oauth2Label.trim() ? { label: oauth2Label.trim() } : {}),
-        ...(form?.baseUrl ? { providerBaseUrl: form.baseUrl } : {}),
+        ...(form?.baseUrl && !(flowObj.provider === 'kimi' && !form?.id)
+          ? { providerBaseUrl: form.baseUrl }
+          : {}),
       });
       if (!isMountedRef.current) return;
 
       if (res?.status === 'approved') {
         setDeviceFlow(null);
-        await loadProviders();
         if (res.provider) {
-          setForm(providerToForm(res.provider));
+          await syncConnectedProviderPlan(res.provider);
+        } else {
+          await loadProviders();
         }
         setModalFeedback({ type: 'success', message: t('providers.web.deviceApproved') });
         toast.success(t('providers.web.deviceApproved'));
@@ -1937,7 +2085,7 @@ export function ProvidersPage() {
     } finally {
       if (isMountedRef.current) setDevicePolling(false);
     }
-  }, [form, oauth2Label, loadProviders, t, toast]);
+  }, [form, oauth2Label, loadProviders, syncConnectedProviderPlan, t, toast]);
 
   useEffect(() => {
     if (!modalOpen || !deviceFlow?.flowId) return;
@@ -2023,13 +2171,17 @@ export function ProvidersPage() {
 
       const testRes = await providersApi.test(saved.id, saved.models?.[0] || undefined);
       setCardTestResults((prev) => ({ ...prev, [saved.id]: testRes }));
+      const synced = await syncConnectedProviderPlan(saved).catch(() => saved);
+      const displayProv = synced || saved;
       setModalFeedback({
         type: testRes?.ok ? 'success' : 'error',
         message: testRes?.ok
-          ? `Connected "${saved.name}" (HTTP ${testRes.status ?? 200}, ${
+          ? `Connected "${displayProv.name}" (HTTP ${testRes.status ?? 200}, ${
               testRes.latencyMs ?? 0
             }ms): ${testRes.message || 'Verified'}${
-              testRes.modelsCount !== undefined ? ` · ${testRes.modelsCount} models` : ''
+              (displayProv.models?.length ?? testRes.modelsCount) !== undefined
+                ? ` · ${displayProv.models?.length ?? testRes.modelsCount} models`
+                : ''
             }`
           : `Saved & encrypted key, but live test returned HTTP ${testRes?.status ?? 'ERR'} (${
               testRes?.latencyMs ?? 0
@@ -2449,6 +2601,23 @@ export function ProvidersPage() {
         byId.set(entry.id, entry);
       }
     }
+    for (const k of form.apiKeys || []) {
+      for (const am of k?.oauthMeta?.availableModels || []) {
+        if (!am?.id) continue;
+        const prev = byId.get(am.id) || {};
+        byId.set(am.id, {
+          ...prev,
+          id: am.id,
+          name: am.label || prev.name || am.id,
+          kind: am.kind || prev.kind || 'chat',
+          remainingFraction:
+            typeof am.remainingFraction === 'number'
+              ? am.remainingFraction
+              : prev.remainingFraction,
+          planFamily: am.family || prev.planFamily || '',
+        });
+      }
+    }
     for (const modelId of form.models || []) {
       if (!byId.has(modelId)) {
         byId.set(modelId, {
@@ -2846,6 +3015,40 @@ export function ProvidersPage() {
                     >
                       <ShieldCheck className="h-3.5 w-3.5" aria-hidden="true" />
                       OpenRouter OAuth PKCE →
+                    </button>
+                  ) : null}
+
+                  {(form.preset === 'openai' || form.preset === 'anthropic') &&
+                  connectionMode !== 'web' ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setConnectionMode('web');
+                        setModalFeedback(null);
+                      }}
+                      className="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/35 bg-emerald-500/10 px-2.5 py-1 text-[11px] font-semibold text-emerald-500 transition-colors hover:bg-emerald-500/15"
+                    >
+                      <ShieldCheck className="h-3.5 w-3.5" aria-hidden="true" />
+                      {form.preset === 'openai'
+                        ? 'OpenAI / ChatGPT OAuth →'
+                        : 'Claude Pro / Max OAuth →'}
+                    </button>
+                  ) : null}
+
+                  {(form.preset === 'kimi' ||
+                    form.preset === 'kilocode' ||
+                    form.preset === 'nous') &&
+                  connectionMode !== 'web' ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setConnectionMode('web');
+                        setModalFeedback(null);
+                      }}
+                      className="inline-flex items-center gap-1.5 rounded-full border border-orange-500/35 bg-orange-500/10 px-2.5 py-1 text-[11px] font-semibold text-orange-400 transition-colors hover:bg-orange-500/15"
+                    >
+                      <KeyRound className="h-3.5 w-3.5" aria-hidden="true" />
+                      Device Auth →
                     </button>
                   ) : null}
 
@@ -3346,6 +3549,14 @@ export function ProvidersPage() {
                                             <span className="inline-flex items-center gap-1 rounded-full border border-orange-500/35 bg-orange-500/15 px-1.5 py-0.2 text-[9.5px] font-semibold text-orange-400">
                                               <KeyRound className="h-2.5 w-2.5" aria-hidden="true" />
                                               {t('providers.badge.deviceCode')}
+                                            </span>
+                                          ) : null}
+                                          {row.oauthMeta?.tierLabel ? (
+                                            <span
+                                              title={row.oauthMeta.tierLabel}
+                                              className="inline-flex items-center gap-1 rounded-full border border-amber-500/35 bg-amber-500/12 px-1.5 py-0.2 text-[9.5px] font-semibold text-amber-500"
+                                            >
+                                              {String(row.oauthMeta.tierLabel).split(' · ')[0]}
                                             </span>
                                           ) : null}
                                           {row.oauthMeta?.orgId ? (
@@ -4053,6 +4264,29 @@ export function ProvidersPage() {
                               openrouter.ai/auth
                             </span>
                           </div>
+
+                          <div className="space-y-1.5 border-t border-indigo-500/20 pt-2.5">
+                            <div className="text-[11px] text-[var(--text-secondary)]">
+                              {t('providers.web.oauthPasteTitle')}
+                            </div>
+                            <div className="flex flex-wrap gap-2">
+                              <input
+                                type="text"
+                                value={openRouterPastedUrl}
+                                onChange={(e) => setOpenRouterPastedUrl(e.target.value)}
+                                placeholder="https://.../providers?oauth=openrouter&state=...&code=..."
+                                className="field-input min-w-[220px] flex-1 px-2.5 py-1.5 font-mono text-xs"
+                              />
+                              <button
+                                type="button"
+                                onClick={handleCompleteOpenRouterPasted}
+                                disabled={oauth2Busy || !openRouterPastedUrl.trim()}
+                                className="r-btn-secondary px-3 py-1.5 text-xs"
+                              >
+                                {oauth2Busy ? 'Đang xử lý…' : t('providers.web.oauthCompleteBtn')}
+                              </button>
+                            </div>
+                          </div>
                         </div>
 
                         <div className="flex items-center gap-3 text-[11px] text-[var(--text-muted)]">
@@ -4063,15 +4297,145 @@ export function ProvidersPage() {
                       </>
                     ) : null}
 
-                    {/* Official Device Authorization Flow (Kilo Code & Nous Research) */}
-                    {(form.preset === 'kilocode' || form.preset === 'nous') ? (
+                    {/* OpenAI (Codex) & Anthropic (Claude Pro / Max) 4-Step Web OAuth PKCE ("Kết nối nhận gói") */}
+                    {(form.preset === 'openai' || form.preset === 'anthropic') ? (
+                      <>
+                        {(() => {
+                          const isOpenAI = form.preset === 'openai';
+                          const defaultCb = isOpenAI
+                            ? 'http://localhost:1455/auth/callback'
+                            : 'http://localhost:54545/callback';
+                          const effCb = oauth2RedirectUri || defaultCb;
+                          return (
+                            <div className="space-y-3 rounded-xl border border-emerald-500/35 bg-emerald-500/8 p-4">
+                              <div className="flex flex-wrap items-center justify-between gap-2">
+                                <div className="flex items-center gap-2">
+                                  <ShieldCheck className="h-4 w-4 text-emerald-500" aria-hidden="true" />
+                                  <h3 className="text-xs font-semibold text-[var(--text-primary)]">
+                                    {isOpenAI
+                                      ? 'Đăng nhập OpenAI / ChatGPT OAuth (Nhận gói Plus/Pro)'
+                                      : 'Đăng nhập Claude Pro / Max OAuth (Anthropic PKCE)'}
+                                  </h3>
+                                </div>
+                                <span className="rounded-full border border-emerald-500/35 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-500">
+                                  OAuth 2.0 PKCE
+                                </span>
+                              </div>
+
+                              <p className="text-xs leading-relaxed text-[var(--text-secondary)]">
+                                {isOpenAI
+                                  ? 'Dùng OAuth client của Codex CLI. Sau khi đăng nhập ChatGPT và đồng ý quyền, dán lại URL callback loopback (hoặc đổi sang OpenRouter/API key nếu endpoint không nhận token subscription).'
+                                  : 'Dùng OAuth PKCE chính thức của Claude (Anthropic). Sau khi đăng nhập claude.ai và đồng ý quyền, copy URL callback hoặc chuỗi code#state dán vào ô bên dưới để tự động nhận gói và model.'}
+                              </p>
+
+                              <ol className="list-decimal space-y-2 pl-4 text-[11px] leading-relaxed text-[var(--text-secondary)]">
+                                <li>
+                                  Redirect URI (loopback):
+                                  <div className="mt-1 flex flex-wrap items-center gap-2">
+                                    <input
+                                      type="text"
+                                      value={effCb}
+                                      onChange={(e) => setOauth2RedirectUri(e.target.value)}
+                                      spellCheck={false}
+                                      aria-label={`${isOpenAI ? 'OpenAI' : 'Claude'} Redirect URI`}
+                                      className="field-input min-w-0 flex-1 px-2.5 py-1.5 font-mono text-xs"
+                                    />
+                                    <CopyButton value={effCb} size="xs" toastMessage={`Copied ${effCb}`} />
+                                  </div>
+                                </li>
+                                <li>
+                                  <div className="flex flex-wrap items-center gap-2.5">
+                                    <button
+                                      type="button"
+                                      onClick={() => handleStartGenericOAuth(form.preset)}
+                                      disabled={oauth2Busy}
+                                      className="r-btn-primary inline-flex items-center gap-1.5 px-3 py-1.5 text-xs"
+                                    >
+                                      {oauth2Busy ? (
+                                        <RefreshCw className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" aria-hidden="true" />
+                                      ) : (
+                                        <ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />
+                                      )}
+                                      <span>{isOpenAI ? 'Mở đăng nhập OpenAI' : 'Mở đăng nhập Claude'}</span>
+                                    </button>
+                                    {oauth2StartedAuthUrl ? (
+                                      <a
+                                        href={oauth2StartedAuthUrl}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="font-semibold text-emerald-500 hover:underline"
+                                      >
+                                        Mở trang đăng nhập (nếu tab không tự mở)
+                                      </a>
+                                    ) : null}
+                                  </div>
+                                </li>
+                                <li>
+                                  Chọn tài khoản → <strong>Allow</strong>. Khi trình duyệt chuyển tới{' '}
+                                  <code>{effCb}</code> và báo <em>“ERR_CONNECTION_REFUSED”</em>,{' '}
+                                  <strong>đó là bình thường</strong> — copy toàn bộ địa chỉ trên thanh URL (hoặc chuỗi <code>code#state</code>).
+                                </li>
+                                <li>Dán vào ô dưới rồi bấm “Hoàn tất kết nối &amp; nhận gói”.</li>
+                              </ol>
+
+                              <textarea
+                                value={oauth2PastedCallback}
+                                onChange={(e) => setOauth2PastedCallback(e.target.value)}
+                                rows={2}
+                                spellCheck={false}
+                                autoComplete="off"
+                                placeholder={`${effCb}?code=...&state=...`}
+                                aria-label={`${isOpenAI ? 'OpenAI' : 'Claude'} callback URL`}
+                                className="field-input w-full px-2.5 py-1.5 font-mono text-xs"
+                              />
+
+                              <div className="flex flex-wrap items-center justify-between gap-2">
+                                <input
+                                  type="text"
+                                  value={oauth2Label}
+                                  onChange={(e) => setOauth2Label(e.target.value)}
+                                  placeholder="Nhãn kết nối (tùy chọn)"
+                                  className="field-input min-w-[160px] flex-1 px-2.5 py-1.5 text-xs"
+                                />
+                                <button
+                                  type="button"
+                                  onClick={() => handleCompletePastedOAuth(form.preset)}
+                                  disabled={oauth2Busy || !oauth2PastedCallback.trim()}
+                                  className="r-btn-primary inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs"
+                                >
+                                  <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />
+                                  {oauth2Busy ? 'Đang kết nối…' : 'Hoàn tất kết nối & nhận gói'}
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })()}
+
+                        <div className="flex items-center gap-3 text-[11px] text-[var(--text-muted)]">
+                          <span className="h-px flex-1 bg-[var(--border-subtle)]" />
+                          <span>{t('providers.web.orManualDivider')}</span>
+                          <span className="h-px flex-1 bg-[var(--border-subtle)]" />
+                        </div>
+                      </>
+                    ) : null}
+
+                    {/* Official Device Authorization Flow (Kilo Code, Kimi Code & Nous Research) */}
+                    {(form.preset === 'kilocode' ||
+                      form.preset === 'nous' ||
+                      form.preset === 'kimi' ||
+                      form.preset === 'kimi-coding') ? (
                       <>
                         <div className="space-y-3 rounded-xl border border-orange-500/35 bg-orange-500/8 p-4">
                           <div className="flex flex-wrap items-center justify-between gap-2">
                             <div className="flex items-center gap-2">
                               <KeyRound className="h-4 w-4 text-orange-400" aria-hidden="true" />
                               <h3 className="text-xs font-semibold text-[var(--text-primary)]">
-                                {t('providers.web.deviceTitle')} · {form.preset === 'kilocode' ? 'Kilo Code' : 'Nous Research'}
+                                {t('providers.web.deviceTitle')} ·{' '}
+                                {form.preset === 'kilocode'
+                                  ? 'Kilo Code'
+                                  : form.preset === 'nous'
+                                    ? 'Nous Research'
+                                    : 'Kimi Code'}
                               </h3>
                             </div>
                             <span className="rounded-full border border-orange-500/35 bg-orange-500/15 px-2 py-0.5 text-[10px] font-semibold text-orange-400">
@@ -4880,6 +5244,20 @@ export function ProvidersPage() {
                                     <span className="inline-flex items-center gap-0.5 rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium text-amber-400">
                                       <Wrench className="h-2.5 w-2.5" aria-hidden="true" />
                                       Tools
+                                    </span>
+                                  ) : null}
+                                  {typeof m.remainingFraction === 'number' &&
+                                  !(form.apiKeys || []).some((k) => k?.oauthMeta?.perModelHidden === true) ? (
+                                    <span
+                                      className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold ${
+                                        m.remainingFraction >= 0.5
+                                          ? 'bg-emerald-500/15 text-emerald-500'
+                                          : m.remainingFraction >= 0.2
+                                            ? 'bg-amber-500/15 text-amber-500'
+                                            : 'bg-red-500/15 text-red-500'
+                                      }`}
+                                    >
+                                      {Math.round(m.remainingFraction * 100)}%
                                     </span>
                                   ) : null}
                                   {mTest ? (

@@ -244,18 +244,29 @@ export function ModelsPage() {
       }
     }
 
-    // Also include any custom models from user-added custom providers
+    // Also include custom models and live plan-synced models from connected providers
     for (const cp of connectedProviders) {
       const meta = presetMetaMap.get(cp.preset) || {};
-      for (const mId of cp.models || []) {
+      const liveMetaById = new Map();
+      for (const k of cp.apiKeys || []) {
+        for (const am of k?.oauthMeta?.availableModels || []) {
+          if (am?.id && !liveMetaById.has(am.id)) {
+            liveMetaById.set(am.id, am);
+          }
+        }
+      }
+      const combinedIds = [...new Set([...(cp.models || []), ...liveMetaById.keys()])];
+      for (const mId of combinedIds) {
+        const liveInfo = liveMetaById.get(mId);
+        if (liveInfo?.kind === 'other' && !(cp.models || []).includes(mId)) continue;
         const fullId = `${cp.slug}/${mId}`;
         if (seenFullIds.has(fullId)) continue;
         seenFullIds.add(fullId);
         list.push({
           fullId,
           id: mId,
-          name: mId,
-          kind: 'chat',
+          name: liveInfo?.label || mId,
+          kind: liveInfo?.kind || 'chat',
           preset: cp.preset || cp.slug,
           providerName: cp.name,
           logo: meta.logo || cp.preset,

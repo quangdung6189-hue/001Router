@@ -78,7 +78,9 @@ import {
   exchangeGenericOAuthPkce,
   extractCodeAndState,
   getGenericOAuthAccessToken,
+  peekGenericPkceState,
   pollDeviceCodeFlow,
+  restoreGenericPkceState,
   startDeviceCodeFlow,
   startGenericOAuthPkce
 } from "../oauthFlows.js";
@@ -457,6 +459,10 @@ function extractOAuthFlowsOptions(req) {
     ...(locals.oauthGitLabBaseUrl ? { gitlabBaseUrl: locals.oauthGitLabBaseUrl } : {}),
     ...(locals.oauthKiloApiBaseUrl ? { kiloApiBaseUrl: locals.oauthKiloApiBaseUrl } : {}),
     ...(locals.oauthNousPortalBaseUrl ? { nousPortalBaseUrl: locals.oauthNousPortalBaseUrl } : {}),
+    ...(locals.oauthKimiAuthBaseUrl ? { kimiAuthBaseUrl: locals.oauthKimiAuthBaseUrl } : {}),
+    ...(locals.oauthAuthorizeUrlOverride
+      ? { authorizeUrlOverride: locals.oauthAuthorizeUrlOverride }
+      : {}),
     ...(locals.oauthTokenUrlOverride ? { tokenUrlOverride: locals.oauthTokenUrlOverride } : {}),
     ...(locals.oauthUserinfoUrlOverride
       ? { userinfoUrlOverride: locals.oauthUserinfoUrlOverride }
@@ -1765,11 +1771,22 @@ export function createDashboardRouter(storage, liveEvents = null) {
     const exchangeUrl = req.app?.locals?.oauthExchangeUrl || undefined;
     const fetchImpl = req.app?.locals?.oauthFetchImpl || undefined;
 
+    let extracted;
+    try {
+      extracted = body.pastedUrl
+        ? extractCodeAndState(body)
+        : { code: body.code, state: body.state };
+    } catch (err) {
+      return res
+        .status(Number(err?.status) || 400)
+        .json({ error: sanitizeSecrets(err?.message || "Invalid OpenRouter callback URL") });
+    }
+
     let mintedKey;
     try {
       const exchanged = await exchangeOpenRouterPkce({
-        code: body.code,
-        state: body.state,
+        code: extracted.code,
+        state: extracted.state,
         ...(exchangeUrl ? { exchangeUrl } : {}),
         ...(fetchImpl ? { fetchImpl } : {}),
         ...(dispatcher ? { dispatcher } : {})
@@ -2656,18 +2673,37 @@ export function createDashboardRouter(storage, liveEvents = null) {
   });
 
   // --- Official Provider Connection Mode 5: OAuth 2.0 PKCE & RFC 8628 Device Code Flows ---
-  // Supports GitLab Duo (`gitlab`), Kilo Code (`kilocode`), Nous Research (`nous`), and BYO `custom_oauth`.
+  // Supports OpenAI/Codex (`openai`/`codex`), Anthropic/Claude (`anthropic`/`claude`),
+  // GitLab Duo (`gitlab`), Kilo Code (`kilocode`), Kimi (`kimi`), Nous Research (`nous`),
+  // and BYO `custom_oauth`.
+
+  const SUPPORTED_GENERIC_PKCE_PROVIDERS = new Set([
+    "gitlab",
+    "custom_oauth",
+    "openai",
+    "codex",
+    "anthropic",
+    "claude"
+  ]);
+
+  const SUPPORTED_DEVICE_CODE_PROVIDERS = new Set([
+    "kilocode",
+    "nous",
+    "kimi",
+    "kimi-coding",
+    "custom_oauth"
+  ]);
 
   function normalizeOAuthRouteProvider(raw) {
     const p = String(raw || "").trim().toLowerCase();
     return p === "custom" ? "custom_oauth" : p;
   }
 
-  router.post("/providers/oauth/:provider/start", (req, res) => {
+  router.post("/providers/oauth/:provider/start", async (req, res) => {
     const oauthProvider = normalizeOAuthRouteProvider(req.params.provider);
-    if (oauthProvider !== "gitlab" && oauthProvider !== "custom_oauth") {
+    if (!SUPPORTED_GENERIC_PKCE_PROVIDERS.has(oauthProvider)) {
       return res.status(400).json({
-        error: `Unsupported OAuth PKCE provider '${oauthProvider}'. Supported: openrouter, google, gitlab, custom_oauth`
+        error: `Unsupported OAuth PKCE provider '${oauthProvider}'. Supported: openrouter, google, openai, anthropic, gitlab, custom_oauth`
       });
     }
 
@@ -2679,9 +2715,38 @@ export function createDashboardRouter(storage, liveEvents = null) {
         ...(oauthProvider === "gitlab" && !body.baseUrl && oauthOpts.gitlabBaseUrl
           ? { baseUrl: oauthOpts.gitlabBaseUrl }
           : {}),
+        ...(!body.authorizeUrl && oauthOpts.authorizeUrlOverride
+          ? { authorizeUrl: oauthOpts.authorizeUrlOverride }
+          : {}),
+        ...(!body.tokenUrl && oauthOpts.tokenUrlOverride
+          ? { tokenUrl: oauthOpts.tokenUrlOverride }
+          : {}),
+        ...(!body.userinfoUrl && oauthOpts.userinfoUrlOverride
+          ? { userinfoUrl: oauthOpts.userinfoUrlOverride }
+          : {}),
         allowLoopback: oauthOpts.allowLoopback,
         requestHost: typeof req.headers?.host === "string" ? req.headers.host : ""
       });
+
+      // Persist PKCE state encrypted so serverless instances can finish the exchange.
+      try {
+        const rec = peekGenericPkceState(started.state);
+        if (rec) {
+          const enc = storage.encryptSecret(JSON.stringify(rec));
+          const nowMs = Date.now();
+          await storage.update((data) => {
+            const list = Array.isArray(data.pendingGenericPkce) ? data.pendingGenericPkce : [];
+            const pruned = list.filter(
+              (item) => item && item.expiresAt > nowMs && item.state !== started.state
+            );
+            pruned.push({ state: started.state, enc, expiresAt: rec.expiresAt });
+            data.pendingGenericPkce = pruned.slice(-30);
+          });
+        }
+      } catch {
+        // Best-effort persistence
+      }
+
       return res.json({
         ok: true,
         ...started
@@ -2698,7 +2763,7 @@ export function createDashboardRouter(storage, liveEvents = null) {
 
   router.post("/providers/oauth/:provider/exchange", async (req, res) => {
     const oauthProvider = normalizeOAuthRouteProvider(req.params.provider);
-    if (oauthProvider !== "gitlab" && oauthProvider !== "custom_oauth") {
+    if (!SUPPORTED_GENERIC_PKCE_PROVIDERS.has(oauthProvider)) {
       return res.status(400).json({
         error: `Unsupported OAuth PKCE provider '${oauthProvider}'`
       });
@@ -2709,6 +2774,39 @@ export function createDashboardRouter(storage, liveEvents = null) {
     const targetHintId = typeof body.providerId === "string" ? body.providerId.trim() : "";
     const existingHint = targetHintId ? storage.getProviderById(targetHintId) : null;
     const dispatcher = existingHint ? getProxyDispatcher(existingHint, storage) : undefined;
+
+    // Restore cross-instance PKCE record if not present in this process memory.
+    try {
+      const parsedPreview = extractCodeAndState(body);
+      if (parsedPreview.state) {
+        const targetState = parsedPreview.state;
+        const inMemory = Boolean(peekGenericPkceState(targetState));
+        let restoredEnc = "";
+        const hasPersisted =
+          Array.isArray(storage.data?.pendingGenericPkce) &&
+          storage.data.pendingGenericPkce.some((item) => item && item.state === targetState);
+        if (hasPersisted) {
+          await storage.update((data) => {
+            const list = Array.isArray(data.pendingGenericPkce) ? data.pendingGenericPkce : [];
+            const idx = list.findIndex((item) => item && item.state === targetState);
+            if (idx >= 0) {
+              restoredEnc = list[idx].enc || "";
+              list.splice(idx, 1);
+              data.pendingGenericPkce = list;
+            }
+          });
+        }
+        if (!inMemory && restoredEnc) {
+          try {
+            restoreGenericPkceState(targetState, JSON.parse(storage.decryptSecret(restoredEnc)));
+          } catch {
+            // Ignore malformed state
+          }
+        }
+      }
+    } catch {
+      // extractCodeAndState inside exchangeGenericOAuthPkce will surface clean validation error
+    }
 
     let exchanged;
     try {
@@ -2731,7 +2829,11 @@ export function createDashboardRouter(storage, liveEvents = null) {
     const presetSlug =
       oauthProvider === "gitlab"
         ? "gitlab"
-        : exchanged.extra?.preset || "custom";
+        : oauthProvider === "openai" || oauthProvider === "codex"
+          ? "openai"
+          : oauthProvider === "anthropic" || oauthProvider === "claude"
+            ? "anthropic"
+            : exchanged.extra?.preset || "custom";
 
     let providerBaseUrl =
       typeof body.providerBaseUrl === "string" ? body.providerBaseUrl.trim() : "";
@@ -2749,11 +2851,20 @@ export function createDashboardRouter(storage, liveEvents = null) {
         "";
     }
 
+    const fallbackLabel =
+      presetSlug === "openai"
+        ? "OpenAI OAuth"
+        : presetSlug === "anthropic"
+          ? "Claude OAuth"
+          : oauthProvider === "gitlab"
+            ? "GitLab OAuth 2.0"
+            : "OAuth 2.0";
+
     const label =
       (typeof body.label === "string" && body.label.trim()) ||
       exchanged.oauthMeta?.email ||
       exchanged.oauthMeta?.username ||
-      (oauthProvider === "gitlab" ? "GitLab OAuth 2.0" : "OAuth 2.0");
+      fallbackLabel;
 
     try {
       const { savedProvider, savedKeyId } = await upsertOAuthProviderConnection(storage, {
@@ -2787,23 +2898,20 @@ export function createDashboardRouter(storage, liveEvents = null) {
 
   router.post("/providers/oauth/:provider/device-code", async (req, res) => {
     const oauthProvider = normalizeOAuthRouteProvider(req.params.provider);
-    if (
-      oauthProvider !== "kilocode" &&
-      oauthProvider !== "nous" &&
-      oauthProvider !== "custom_oauth"
-    ) {
+    if (!SUPPORTED_DEVICE_CODE_PROVIDERS.has(oauthProvider)) {
       return res.status(400).json({
-        error: `Unsupported Device Code provider '${oauthProvider}'. Supported: kilocode, nous, custom_oauth`
+        error: `Unsupported Device Code provider '${oauthProvider}'. Supported: kilocode, kimi, nous, custom_oauth`
       });
     }
 
     const body = req.body || {};
     const oauthOpts = extractOAuthFlowsOptions(req);
+    const lookupPreset = oauthProvider === "kimi-coding" ? "kimi" : oauthProvider;
     const existingProvider =
       (typeof body.providerId === "string" && body.providerId.trim()
         ? storage.getProviderById(body.providerId.trim())
         : null) ||
-      storage.getProviders().find((p) => p.preset === oauthProvider) ||
+      storage.getProviders().find((p) => p.preset === lookupPreset) ||
       null;
     const dispatcher = existingProvider
       ? getProxyDispatcher(existingProvider, storage)
@@ -2817,6 +2925,11 @@ export function createDashboardRouter(storage, liveEvents = null) {
           : {}),
         ...(oauthProvider === "nous" && !body.portalBaseUrl && oauthOpts.nousPortalBaseUrl
           ? { portalBaseUrl: oauthOpts.nousPortalBaseUrl }
+          : {}),
+        ...((oauthProvider === "kimi" || oauthProvider === "kimi-coding") &&
+        !body.kimiAuthBaseUrl &&
+        oauthOpts.kimiAuthBaseUrl
+          ? { kimiAuthBaseUrl: oauthOpts.kimiAuthBaseUrl }
           : {}),
         ...(oauthOpts.fetchImpl ? { fetchImpl: oauthOpts.fetchImpl } : {}),
         allowLoopback: oauthOpts.allowLoopback,
@@ -2838,11 +2951,7 @@ export function createDashboardRouter(storage, liveEvents = null) {
 
   router.post("/providers/oauth/:provider/poll", async (req, res) => {
     const oauthProvider = normalizeOAuthRouteProvider(req.params.provider);
-    if (
-      oauthProvider !== "kilocode" &&
-      oauthProvider !== "nous" &&
-      oauthProvider !== "custom_oauth"
-    ) {
+    if (!SUPPORTED_DEVICE_CODE_PROVIDERS.has(oauthProvider)) {
       return res.status(400).json({
         error: `Unsupported Device Code provider '${oauthProvider}'`
       });
@@ -2851,9 +2960,10 @@ export function createDashboardRouter(storage, liveEvents = null) {
     const body = req.body || {};
     const oauthOpts = extractOAuthFlowsOptions(req);
     const targetHintId = typeof body.providerId === "string" ? body.providerId.trim() : "";
+    const lookupPreset = oauthProvider === "kimi-coding" ? "kimi" : oauthProvider;
     const existingProvider =
       (targetHintId ? storage.getProviderById(targetHintId) : null) ||
-      storage.getProviders().find((p) => p.preset === oauthProvider) ||
+      storage.getProviders().find((p) => p.preset === lookupPreset) ||
       null;
     const dispatcher = existingProvider
       ? getProxyDispatcher(existingProvider, storage)
@@ -2877,13 +2987,17 @@ export function createDashboardRouter(storage, liveEvents = null) {
       return res.json(result);
     }
 
+    const isKimi = oauthProvider === "kimi" || oauthProvider === "kimi-coding";
     const presetSlug =
       oauthProvider === "kilocode" || oauthProvider === "nous"
         ? oauthProvider
-        : result.extra?.preset || "custom";
+        : isKimi
+          ? "kimi"
+          : result.extra?.preset || "custom";
 
     const providerBaseUrl =
       (typeof body.providerBaseUrl === "string" && body.providerBaseUrl.trim()) ||
+      (isKimi ? "https://api.kimi.com/coding/v1" : "") ||
       (oauthProvider === "custom_oauth"
         ? (typeof body.apiBaseUrl === "string" && body.apiBaseUrl.trim()) ||
           result.extra?.baseUrl ||
@@ -2895,7 +3009,9 @@ export function createDashboardRouter(storage, liveEvents = null) {
         ? "Kilo Code Device Auth"
         : oauthProvider === "nous"
           ? "Nous Device Auth"
-          : "OAuth Device Auth";
+          : isKimi
+            ? "Kimi Code Device Auth"
+            : "OAuth Device Auth";
 
     const label =
       (typeof body.label === "string" && body.label.trim()) ||
@@ -3096,7 +3212,23 @@ export function createDashboardRouter(storage, liveEvents = null) {
     return res.json({ keyId: keyEntry.id, ...result });
   });
 
-  // Official Account, Tier & Billing Inspector (OpenAI, Google OAuth/Gemini, OpenRouter, & Generic)
+  async function persistInspectOAuthMeta(providerId, keyId, patch) {
+    if (!providerId || !keyId || !patch || typeof patch !== "object") return;
+    await storage
+      .update((data) => {
+        const target = data.providers.find((p) => p.id === providerId);
+        if (!target) return;
+        const targetKey = (target.apiKeys || []).find((k) => k.id === keyId);
+        if (!targetKey) return;
+        targetKey.oauthMeta = {
+          ...(targetKey.oauthMeta || {}),
+          ...patch
+        };
+      })
+      .catch(() => {});
+  }
+
+  // Official Account, Tier & Billing Inspector (OpenAI, Google OAuth/Gemini, Cloud Code, OpenRouter, & Generic)
   router.post("/providers/:id/inspect-account", async (req, res) => {
     const provider = storage.getProviderById(req.params.id);
     if (!provider) {
@@ -3122,7 +3254,62 @@ export function createDashboardRouter(storage, liveEvents = null) {
     const baseUrlLower = String(provider.baseUrl || "").toLowerCase();
 
     try {
-      // 1. Google OAuth 2.0 / ADC authorized_user -> refresh live email, project & Cloud Billing tier
+      // 1a. Cloud Code Assist (Antigravity / Gemini CLI) -> live plan, windows, and model catalog
+      const cloudFlavor = getCloudCodeFlavorForKey(keyEntry);
+      if (cloudFlavor && keyEntry.oauthCredentials) {
+        const cloudFetch = req.app?.locals?.cloudCodeFetchImpl || req.app?.locals?.googleOAuthFetchImpl;
+        const { accessToken } = await getGeminiCliAccessToken(keyEntry.oauthCredentials, {
+          ...(cloudFetch ? { fetchImpl: cloudFetch } : {}),
+          ...(dispatcher ? { dispatcher } : {})
+        });
+        const usage = await fetchCloudCodeUsage(accessToken, {
+          projectId: keyEntry.oauthMeta?.projectId || "",
+          ...(cloudFetch ? { fetchImpl: cloudFetch } : {}),
+          ...(dispatcher ? { dispatcher } : {}),
+          flavor: cloudFlavor.id
+        });
+        const nowIso = new Date().toISOString();
+        const billingStatus =
+          usage.tier === "paid" ? "active" : usage.tier ? "free_tier" : "unknown";
+        const modelsCount =
+          (Array.isArray(usage.models) && usage.models.length) ||
+          (Array.isArray(usage.buckets) && usage.buckets.length) ||
+          (provider.models || []).length;
+
+        let updatedMeta = keyEntry.oauthMeta || {};
+        await storage
+          .update((data) => {
+            const target = data.providers.find((p) => p.id === provider.id);
+            const targetKey = (target?.apiKeys || []).find((k) => k.id === keyEntry.id);
+            if (!targetKey) return;
+            targetKey.oauthMeta = {
+              ...mergeCloudCodeUsage(targetKey.oauthMeta, usage, nowIso),
+              billingStatus,
+              modelsCount
+            };
+            updatedMeta = targetKey.oauthMeta;
+            if (syncProviderModelsWithCatalog(target)) target.updatedAt = nowIso;
+          })
+          .catch(() => {});
+
+        return res.json({
+          ok: Boolean(usage.planOk || usage.quotaOk),
+          keyId: keyEntry.id,
+          providerType: cloudFlavor.id,
+          authMethod: keyEntry.authMethod,
+          email: updatedMeta?.email || "",
+          projectId: usage.projectId || updatedMeta?.projectId || "",
+          tierLabel: usage.tierLabel || updatedMeta?.tierLabel || `${cloudFlavor.label} · Connected`,
+          billingStatus,
+          billingActive: usage.tier === "paid",
+          modelsCount,
+          recommendedModels: catalogChatModelIds(usage.models).slice(0, 4),
+          latencyMs: Date.now() - started,
+          checkedAt: nowIso
+        });
+      }
+
+      // 1b. Google OAuth 2.0 / ADC authorized_user -> refresh live email, project & Cloud Billing tier
       if (keyEntry.authMethod === "google_oauth" && keyEntry.oauthCredentials) {
         const { updatedMeta } = await refreshGoogleOAuthConnection(provider, keyEntry, req);
         const billingStatus = updatedMeta?.billingActive
@@ -3184,27 +3371,37 @@ export function createDashboardRouter(storage, liveEvents = null) {
             : typeof d.limit === "number" && typeof d.usage === "number"
               ? Math.max(0, d.limit - d.usage)
               : null;
+        const checkedAt = new Date().toISOString();
+        const tierLabel = isFreeTier ? "OpenRouter Free Tier" : "OpenRouter Paid";
+        const billingStatus = !infoRes.ok
+          ? "inactive"
+          : isFreeTier
+            ? "free_tier"
+            : limitRemaining === 0
+              ? "inactive"
+              : "active";
+        const modelsCount = (provider.models || []).length;
+        await persistInspectOAuthMeta(provider.id, keyEntry.id, {
+          tierLabel,
+          billingStatus,
+          modelsCount,
+          checkedAt
+        });
         return res.json({
           ok: infoRes.ok,
           keyId: keyEntry.id,
           providerType: "openrouter",
           authMethod: keyEntry.authMethod || "api_key",
           label: d.label || keyEntry.label || "",
-          tierLabel: isFreeTier ? "OpenRouter Free Tier" : "OpenRouter Paid",
+          tierLabel,
           isFreeTier,
-          billingStatus: !infoRes.ok
-            ? "inactive"
-            : isFreeTier
-              ? "free_tier"
-              : limitRemaining === 0
-                ? "inactive"
-                : "active",
+          billingStatus,
           usage: typeof d.usage === "number" ? d.usage : null,
           limit: typeof d.limit === "number" ? d.limit : null,
           limitRemaining,
-          modelsCount: (provider.models || []).length,
+          modelsCount,
           latencyMs: Date.now() - started,
-          checkedAt: new Date().toISOString(),
+          checkedAt,
           ...(!infoRes.ok
             ? { message: sanitizeSecrets(d?.error?.message || `HTTP ${infoRes.status}`, secrets) }
             : {})
@@ -3286,20 +3483,31 @@ export function createDashboardRouter(storage, liveEvents = null) {
           }
         }
 
+        const checkedAt = new Date().toISOString();
+        const tierLabel =
+          keyEntry.oauthMeta?.tierLabel && keyEntry.authMethod === "oauth2"
+            ? keyEntry.oauthMeta.tierLabel
+            : billingStatus === "active"
+              ? hasFlagship
+                ? "OpenAI API (Billing Active · Flagship)"
+                : "OpenAI API (Billing Active)"
+              : billingStatus === "inactive"
+                ? "OpenAI Billing Inactive / $0 Credit"
+                : "OpenAI API Key";
+        await persistInspectOAuthMeta(provider.id, keyEntry.id, {
+          tierLabel,
+          billingStatus,
+          modelsCount: ids.length,
+          checkedAt
+        });
+
         return res.json({
           ok: billingStatus !== "inactive",
           keyId: keyEntry.id,
           providerType: "openai",
           authMethod: keyEntry.authMethod || "api_key",
           organization: orgHeader,
-          tierLabel:
-            billingStatus === "active"
-              ? hasFlagship
-                ? "OpenAI API (Billing Active · Flagship)"
-                : "OpenAI API (Billing Active)"
-              : billingStatus === "inactive"
-                ? "OpenAI Billing Inactive / $0 Credit"
-                : "OpenAI API Key",
+          tierLabel,
           billingStatus,
           billingMessage,
           billingUrl: "https://platform.openai.com/settings/organization/billing",
@@ -3309,7 +3517,7 @@ export function createDashboardRouter(storage, liveEvents = null) {
             .filter((id) => /^(gpt-4\.1|gpt-4o|gpt-5|o3|o4)/i.test(id))
             .slice(0, 4),
           latencyMs: Date.now() - started,
-          checkedAt: new Date().toISOString()
+          checkedAt
         });
       }
 
@@ -3350,12 +3558,20 @@ export function createDashboardRouter(storage, liveEvents = null) {
         const chatIds = ids.filter(
           (id) => !/(tts|image|transcribe|live|lyria|embedding|aqa|native-audio|imagen|veo)/i.test(id)
         );
+        const checkedAt = new Date().toISOString();
+        const tierLabel = "Google AI Studio API Key";
+        await persistInspectOAuthMeta(provider.id, keyEntry.id, {
+          tierLabel,
+          billingStatus: "active",
+          modelsCount: ids.length,
+          checkedAt
+        });
         return res.json({
           ok: true,
           keyId: keyEntry.id,
           providerType: "gemini_apikey",
           authMethod: keyEntry.authMethod || "api_key",
-          tierLabel: "Google AI Studio API Key",
+          tierLabel,
           billingStatus: "active",
           billingMessage: "Use Google OAuth 2.0 to detect exact GCP Cloud Billing (Free Tier vs Pay-as-you-go)",
           billingUrl: "https://aistudio.google.com/apikey",
@@ -3363,27 +3579,39 @@ export function createDashboardRouter(storage, liveEvents = null) {
           chatModelsCount: chatIds.length,
           recommendedModels: ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro"],
           latencyMs: Date.now() - started,
-          checkedAt: new Date().toISOString()
+          checkedAt
         });
       }
 
       // 5. All other official providers
       const testRes = await runProviderConnectionTest(provider, storage, "", saOptions, keyEntry);
+      const checkedAt = new Date().toISOString();
+      const billingStatus = testRes.ok
+        ? "active"
+        : testRes.status === 402 || testRes.status === 429
+          ? "inactive"
+          : "error";
+      const tierLabel = testRes.ok
+        ? keyEntry.oauthMeta?.tierLabel || `${provider.name} (Verified)`
+        : keyEntry.oauthMeta?.tierLabel || `${provider.name} (Error)`;
+      const modelsCount = testRes.modelsCount ?? (provider.models || []).length;
+      await persistInspectOAuthMeta(provider.id, keyEntry.id, {
+        tierLabel,
+        billingStatus,
+        modelsCount,
+        checkedAt
+      });
       return res.json({
         ok: testRes.ok,
         keyId: keyEntry.id,
         providerType: presetSlug || "custom",
         authMethod: keyEntry.authMethod || "api_key",
-        tierLabel: testRes.ok ? `${provider.name} (Verified)` : `${provider.name} (Error)`,
-        billingStatus: testRes.ok
-          ? "active"
-          : testRes.status === 402 || testRes.status === 429
-            ? "inactive"
-            : "error",
+        tierLabel,
+        billingStatus,
         billingMessage: testRes.message,
-        modelsCount: testRes.modelsCount ?? (provider.models || []).length,
+        modelsCount,
         latencyMs: testRes.latencyMs ?? Date.now() - started,
-        checkedAt: new Date().toISOString()
+        checkedAt
       });
     } catch (err) {
       return res.status(502).json({
@@ -3524,6 +3752,85 @@ export function createDashboardRouter(storage, liveEvents = null) {
     const timeoutMs = Math.min(settings.timeoutMs || 30000, 30000);
     const dispatcher = getProxyDispatcher(provider, storage);
     const saOptions = extractServiceAccountOptions(req);
+
+    // Cloud Code Assist keys (Antigravity / Gemini CLI) discover their plan models via
+    // fetchAvailableModels / retrieveUserQuota instead of REST GET /models.
+    const cloudKeys = (provider.apiKeys || []).filter(
+      (k) => k.enabled !== false && getCloudCodeFlavorForKey(k) && k.oauthCredentials
+    );
+    if (cloudKeys.length > 0 && (provider.preset === "antigravity" || getCloudCodeFlavorForKey(keyEntry))) {
+      const cloudFetch = req.app?.locals?.cloudCodeFetchImpl || req.app?.locals?.googleOAuthFetchImpl;
+      const results = await Promise.all(
+        cloudKeys.map(async (k) => {
+          const cliFlavor = getCloudCodeFlavorForKey(k);
+          try {
+            const { accessToken } = await getGeminiCliAccessToken(k.oauthCredentials, {
+              ...(dispatcher ? { dispatcher } : {}),
+              ...(cloudFetch ? { fetchImpl: cloudFetch } : {})
+            });
+            const usage = await fetchCloudCodeUsage(accessToken, {
+              projectId: k.oauthMeta?.projectId || "",
+              ...(dispatcher ? { dispatcher } : {}),
+              ...(cloudFetch ? { fetchImpl: cloudFetch } : {}),
+              flavor: cliFlavor.id
+            });
+            return { keyId: k.id, flavor: cliFlavor.id, usage };
+          } catch (err) {
+            return { keyId: k.id, flavor: cliFlavor.id, error: err?.message || "fetch failed" };
+          }
+        })
+      );
+
+      const okResults = results.filter((r) => r.usage && (r.usage.catalogOk || r.usage.quotaOk));
+      if (okResults.length > 0) {
+        const checkedAt = new Date().toISOString();
+        const catalogChatIds = getCatalogChatModelIds(provider.preset);
+        let finalModels = Array.isArray(provider.models) ? [...provider.models] : [];
+        const liveIds = [];
+        for (const r of okResults) {
+          const fromCatalog = catalogChatModelIds(r.usage.models);
+          const fromBuckets = (Array.isArray(r.usage.buckets) ? r.usage.buckets : [])
+            .map((b) => b?.modelId)
+            .filter((id) => typeof id === "string" && id && !/^tab_/i.test(id));
+          for (const mid of [...fromCatalog, ...fromBuckets]) {
+            if (!liveIds.includes(mid)) liveIds.push(mid);
+          }
+        }
+
+        await storage.update((data) => {
+          const target = data.providers.find((p) => p.id === provider.id);
+          if (!target) return;
+          for (const r of okResults) {
+            const k = (target.apiKeys || []).find((x) => x.id === r.keyId);
+            if (!k) continue;
+            k.oauthMeta = mergeCloudCodeUsage(k.oauthMeta, r.usage, checkedAt);
+          }
+          if (target.preset === "antigravity" || okResults.some((r) => r.flavor === "antigravity")) {
+            syncProviderModelsWithCatalog(target);
+            if (Array.isArray(target.models) && target.models.length > 0) {
+              finalModels = [...target.models];
+            }
+          } else if (liveIds.length > 0) {
+            finalModels = replace
+              ? [...new Set([...liveIds, ...catalogChatIds])]
+              : [...new Set([...liveIds, ...(target.models || []), ...catalogChatIds])];
+            target.models = finalModels;
+          }
+          target.updatedAt = checkedAt;
+        });
+
+        const liveSet = new Set(liveIds);
+        const catalogOnly = catalogChatIds.filter((id) => !liveSet.has(id));
+        return res.json({
+          ok: true,
+          models: finalModels,
+          live: liveIds,
+          catalogOnly,
+          message: `Synced ${liveIds.length} plan models via Cloud Code Assist`
+        });
+      }
+    }
+
     let resolvedSecret = "";
 
     const controller = new AbortController();
