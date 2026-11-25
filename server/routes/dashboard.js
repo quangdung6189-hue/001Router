@@ -1037,6 +1037,63 @@ async function syncOAuthAccountPlanAndModels(provider, keyEntry, storage, option
 }
 
 /**
+ * Extract a short reply preview and token usage from an OpenAI- or Anthropic-formatted probe response.
+ * @param {string} rawText
+ * @param {boolean} isAnthropic
+ * @returns {{ reply: string, usage: { promptTokens: number, outputTokens: number, totalTokens: number } | null }}
+ */
+function extractProbeReplyAndUsage(rawText, isAnthropic = false) {
+  let parsed = null;
+  try {
+    parsed = rawText ? JSON.parse(rawText) : null;
+  } catch {
+    parsed = null;
+  }
+  if (!parsed || typeof parsed !== "object") {
+    return { reply: "", usage: null };
+  }
+
+  let reply = "";
+  if (isAnthropic || Array.isArray(parsed.content)) {
+    const blocks = Array.isArray(parsed.content) ? parsed.content : [];
+    reply = blocks
+      .filter((b) => b && b.type === "text" && typeof b.text === "string")
+      .map((b) => b.text)
+      .join("")
+      .trim();
+  } else if (Array.isArray(parsed.choices)) {
+    const msg = parsed.choices[0]?.message;
+    if (typeof msg?.content === "string") {
+      reply = msg.content.trim();
+    } else if (Array.isArray(msg?.content)) {
+      reply = msg.content
+        .map((p) => (typeof p === "string" ? p : typeof p?.text === "string" ? p.text : ""))
+        .join("")
+        .trim();
+    } else if (typeof parsed.choices[0]?.text === "string") {
+      reply = parsed.choices[0].text.trim();
+    }
+  } else if (typeof parsed.output_text === "string") {
+    reply = parsed.output_text.trim();
+  }
+
+  const u = parsed.usage && typeof parsed.usage === "object" ? parsed.usage : null;
+  let usage = null;
+  if (u) {
+    const promptTokens = Number(u.prompt_tokens ?? u.input_tokens ?? u.promptTokenCount ?? 0) || 0;
+    const outputTokens =
+      Number(u.completion_tokens ?? u.output_tokens ?? u.candidatesTokenCount ?? 0) || 0;
+    const totalTokens =
+      Number(u.total_tokens ?? u.totalTokenCount ?? promptTokens + outputTokens) || 0;
+    if (promptTokens > 0 || outputTokens > 0 || totalTokens > 0) {
+      usage = { promptTokens, outputTokens, totalTokens };
+    }
+  }
+
+  return { reply: reply.slice(0, 120), usage };
+}
+
+/**
  * Test connectivity to a single upstream provider using its active key.
  * @param {any} provider
  * @param {import("../storage.js").Storage} storage
@@ -1228,13 +1285,18 @@ async function runProviderConnectionTest(
       }
       const resText = await chatRes.text().catch(() => "");
       clearTimeout(timer);
+      const { reply, usage } = chatRes.ok
+        ? extractProbeReplyAndUsage(resText, true)
+        : { reply: "", usage: null };
       return {
         ok: chatRes.ok,
         status: chatRes.status,
         latencyMs: Date.now() - started,
         model: usedModel,
+        ...(reply ? { reply } : {}),
+        ...(usage ? { usage } : {}),
         message: chatRes.ok
-          ? `Connected using model '${usedModel}'`
+          ? `Connected using model '${usedModel}'${reply ? ` ("${reply.slice(0, 60)}")` : ""}`
           : sanitizeSecrets(resText.slice(0, 200) || `HTTP ${chatRes.status}`, secrets)
       };
     }
@@ -1288,13 +1350,31 @@ async function runProviderConnectionTest(
         ? aggregateCodexResponsesStream(codexText, codexReq.resolvedModel)
         : null;
       const ok = codexRes.ok && !folded?.error;
+      const codexReply = ok
+        ? String(folded?.choices?.[0]?.message?.content || "").trim().slice(0, 120)
+        : "";
+      const codexUsageRaw = ok && folded?.usage ? folded.usage : null;
+      const codexUsage = codexUsageRaw
+        ? {
+            promptTokens: Number(codexUsageRaw.prompt_tokens) || 0,
+            outputTokens: Number(codexUsageRaw.completion_tokens) || 0,
+            totalTokens:
+              Number(codexUsageRaw.total_tokens) ||
+              (Number(codexUsageRaw.prompt_tokens) || 0) +
+                (Number(codexUsageRaw.completion_tokens) || 0)
+          }
+        : null;
       return {
         ok,
         status: codexRes.status,
         latencyMs: Date.now() - started,
         model: codexReq.resolvedModel,
+        ...(codexReply ? { reply: codexReply } : {}),
+        ...(codexUsage && codexUsage.totalTokens > 0 ? { usage: codexUsage } : {}),
         message: ok
-          ? `Connected using model '${codexReq.resolvedModel}'`
+          ? `Connected using model '${codexReq.resolvedModel}'${
+              codexReply ? ` ("${codexReply.slice(0, 60)}")` : ""
+            }`
           : sanitizeSecrets(
               folded?.error?.message || codexText.slice(0, 200) || `HTTP ${codexRes.status}`,
               secrets
@@ -1356,13 +1436,20 @@ async function runProviderConnectionTest(
       });
       const kimiText = await kimiRes.text().catch(() => "");
       clearTimeout(timer);
+      const { reply: kimiReply, usage: kimiUsage } = kimiRes.ok
+        ? extractProbeReplyAndUsage(kimiText, provider.formatType === "anthropic")
+        : { reply: "", usage: null };
       return {
         ok: kimiRes.ok,
         status: kimiRes.status,
         latencyMs: Date.now() - started,
         model: requestedModel,
+        ...(kimiReply ? { reply: kimiReply } : {}),
+        ...(kimiUsage ? { usage: kimiUsage } : {}),
         message: kimiRes.ok
-          ? `Connected using model '${requestedModel}'`
+          ? `Connected using model '${requestedModel}'${
+              kimiReply ? ` ("${kimiReply.slice(0, 60)}")` : ""
+            }`
           : sanitizeSecrets(kimiText.slice(0, 200) || `HTTP ${kimiRes.status}`, secrets)
       };
     }
@@ -1436,10 +1523,14 @@ async function runProviderConnectionTest(
       provider.formatType,
       isAnthropic ? "messages" : "chat/completions"
     );
+    const usesMaxCompletionTokens =
+      !isAnthropic &&
+      (provider.preset === "openai" || /openai\.com/i.test(String(provider.baseUrl || ""))) &&
+      /^(o1|o3|o4|gpt-5|gpt-6)/i.test(testModel);
     const testPayload = {
       model: testModel,
-      max_tokens: 1,
-      messages: [{ role: "user", content: "hi" }]
+      ...(usesMaxCompletionTokens ? { max_completion_tokens: 16 } : { max_tokens: 16 }),
+      messages: [{ role: "user", content: "Reply with the single word OK." }]
     };
 
     let chatRes = await fetch(testUrl, {
@@ -1467,12 +1558,21 @@ async function runProviderConnectionTest(
     const errOrOkText = await chatRes.text().catch(() => "");
     clearTimeout(timer);
 
+    const { reply: chatReply, usage: chatUsage } = chatRes.ok
+      ? extractProbeReplyAndUsage(errOrOkText, isAnthropic)
+      : { reply: "", usage: null };
+
     return {
       ok: chatRes.ok,
       status: chatRes.status,
       latencyMs: Date.now() - started,
+      model: testModel,
+      ...(chatReply ? { reply: chatReply } : {}),
+      ...(chatUsage ? { usage: chatUsage } : {}),
       message: chatRes.ok
-        ? `Connected using model '${testModel}'`
+        ? `Connected using model '${testModel}'${
+            chatReply ? ` ("${chatReply.slice(0, 60)}")` : ""
+          }`
         : sanitizeSecrets(
             errOrOkText.slice(0, 200) || `HTTP ${chatRes.status}`,
             secrets

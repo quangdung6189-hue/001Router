@@ -1,17 +1,7 @@
-import { useEffect, useId, useMemo, useRef, useState } from 'react';
-import {
-  ArrowDownUp,
-  Cpu,
-  Pause,
-  Play,
-  RotateCcw,
-  Sparkles,
-  Waypoints,
-  Zap,
-  ZoomIn,
-  ZoomOut,
-} from 'lucide-react';
-import { formatCompactNumber } from '../lib/api';
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
+import { Cpu, Loader2, Waypoints, Zap } from 'lucide-react';
+import { formatCompactNumber, providersApi } from '../lib/api';
+import { useToast } from '../context/ToastContext';
 import { ProviderLogo } from './ProviderLogo';
 
 const CANVAS_W = 900;
@@ -19,6 +9,8 @@ const CANVAS_H = 390;
 const HUB_W = 176;
 const HUB_H = 74;
 const COMET_COUNT = 3;
+const MIN_ZOOM = 0.55;
+const MAX_ZOOM = 1.9;
 
 /** Curated brand accents so each provider's conduit & aura feels unmistakable. */
 const PROVIDER_ACCENTS = {
@@ -216,33 +208,70 @@ export function ProviderTopology({
   onHoverProvider,
 }) {
   const uid = useId().replace(/:/g, '');
+  const { showToast } = useToast();
   const prefersReducedMotion = usePrefersReducedMotion();
   const [zoom, setZoom] = useState(1);
-  const [sortMode, setSortMode] = useState('traffic'); // traffic | alpha
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [isPanning, setIsPanning] = useState(false);
   const [hoveredSlug, setHoveredSlug] = useState('');
   const [internalSelectedSlug, setInternalSelectedSlug] = useState('');
   const selectedSlug =
     controlledSelectedSlug !== undefined ? controlledSelectedSlug : internalSelectedSlug;
-  const setSelectedSlug = (next) => {
-    if (controlledSelectedSlug === undefined) {
-      setInternalSelectedSlug(next);
-    }
-    onSelectProvider?.(next);
-  };
-  const [motionPaused, setMotionPaused] = useState(false);
-  // Simulated 2-phase beams keyed by slug: { phase: 'outbound' | 'return', model, latencyMs, tokens, seq }
-  const [simBeams, setSimBeams] = useState({});
-  const simTimersRef = useRef([]);
-  const simCursorRef = useRef(0);
+  const setSelectedSlug = useCallback(
+    (next) => {
+      if (controlledSelectedSlug === undefined) {
+        setInternalSelectedSlug(next);
+      }
+      onSelectProvider?.(next);
+    },
+    [controlledSelectedSlug, onSelectProvider]
+  );
+
+  // Real live-token probe beams keyed by slug:
+  // { phase: 'outbound' | 'return' | 'error', model, status?, latencyMs?, tokens?, reply?, message?, seq }
+  const [probeBeams, setProbeBeams] = useState({});
+  const probeTimersRef = useRef([]);
+  const probeCursorRef = useRef(0);
+  const mountedRef = useRef(true);
+  const stageContainerRef = useRef(null);
+  const dragStateRef = useRef(null);
+  const suppressClickRef = useRef(false);
 
   useEffect(() => {
+    mountedRef.current = true;
     return () => {
-      for (const tid of simTimersRef.current) clearTimeout(tid);
-      simTimersRef.current = [];
+      mountedRef.current = false;
+      for (const tid of probeTimersRef.current) clearTimeout(tid);
+      probeTimersRef.current = [];
     };
   }, []);
 
-  const animationsEnabled = !motionPaused && !prefersReducedMotion;
+  // Mouse-wheel zoom directly on topology stage (no zoom buttons needed)
+  const hasEnabledProviders = (providers || []).some((p) => p.enabled !== false);
+  useEffect(() => {
+    const el = stageContainerRef.current;
+    if (!el) return undefined;
+    const onWheel = (e) => {
+      e.preventDefault();
+      const rawStep = Math.abs(e.deltaY) * 0.0014;
+      const step = Math.min(0.16, Math.max(0.04, rawStep));
+      const direction = e.deltaY < 0 ? 1 : -1;
+      setZoom((prev) => {
+        const next = Math.min(
+          MAX_ZOOM,
+          Math.max(MIN_ZOOM, Number((prev + direction * step).toFixed(3)))
+        );
+        if (next <= 1) {
+          setPan({ x: 0, y: 0 });
+        }
+        return next;
+      });
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, [hasEnabledProviders]);
+
+  const animationsEnabled = !prefersReducedMotion;
 
   const reqMap = useMemo(() => {
     const m = new Map();
@@ -299,27 +328,23 @@ export function ProviderTopology({
     return map;
   }, [recentRequests]);
 
-  // Build stable ordered list of enabled providers so coordinates never jump mid-flight.
+  // Build stable ordered list of enabled providers sorted by traffic so coordinates never jump mid-flight.
   const sortedProviders = useMemo(() => {
     const enabled = (providers || []).filter((p) => p.enabled !== false);
     const copy = [...enabled];
-    if (sortMode === 'alpha') {
-      copy.sort((a, b) => String(a.name || a.slug).localeCompare(String(b.name || b.slug)));
-    } else {
-      copy.sort((a, b) => {
-        const ra = Number(reqMap.get(a.slug)?.requests || 0);
-        const rb = Number(reqMap.get(b.slug)?.requests || 0);
-        if (rb !== ra) return rb - ra;
-        const ma = Array.isArray(a.models) ? a.models.length : 0;
-        const mb = Array.isArray(b.models) ? b.models.length : 0;
-        if (mb !== ma) return mb - ma;
-        return String(a.name || a.slug).localeCompare(String(b.name || b.slug));
-      });
-    }
+    copy.sort((a, b) => {
+      const ra = Number(reqMap.get(a.slug)?.requests || 0);
+      const rb = Number(reqMap.get(b.slug)?.requests || 0);
+      if (rb !== ra) return rb - ra;
+      const ma = Array.isArray(a.models) ? a.models.length : 0;
+      const mb = Array.isArray(b.models) ? b.models.length : 0;
+      if (mb !== ma) return mb - ma;
+      return String(a.name || a.slug).localeCompare(String(b.name || b.slug));
+    });
     return copy.slice(0, 12);
-  }, [providers, reqMap, sortMode]);
+  }, [providers, reqMap]);
 
-  // Combine live in-flight state, recent completion pulse, and simulated demo beams.
+  // Combine live in-flight state, recent completion pulse, and real token probe beams.
   const { hub, nodeW, nodeH, nodes, activeTotal, totalConfiguredModels } = useMemo(() => {
     const layout = computeBilateralLayout(sortedProviders.length);
     let flowingSum = 0;
@@ -336,13 +361,14 @@ export function ProviderTopology({
       const inFlightCount = Number(activeRequests?.[p.slug] || 0);
       const pulseInfo = recentPulses?.[p.slug] || null;
       const pulseCount = Number(recentPulseSlugs?.[p.slug] || 0) || (pulseInfo ? 1 : 0);
-      const sim = simBeams[p.slug] || null;
-      const isInFlight = inFlightCount > 0 || sim?.phase === 'outbound';
-      const isReturning = !isInFlight && (pulseCount > 0 || sim?.phase === 'return');
+      const probe = probeBeams[p.slug] || null;
+      const isInFlight = inFlightCount > 0 || probe?.phase === 'outbound';
+      const isReturning = !isInFlight && (pulseCount > 0 || probe?.phase === 'return');
       const isActive = isInFlight || isReturning;
 
       const lastReq = lastRequestBySlug.get(p.slug) || null;
       const hasPulseError =
+        probe?.phase === 'error' ||
         Boolean(pulseInfo && pulseInfo.ok === false) ||
         (!isInFlight && errorProvider?.provider === p.slug);
 
@@ -369,9 +395,15 @@ export function ProviderTopology({
         const hist = usedModels.find((u) => u.id === m);
         pushModel(m, { live: true, requests: hist?.requests || 0, tokens: hist?.tokens || 0 });
       }
-      if (sim?.model) {
-        const hist = usedModels.find((u) => u.id === sim.model);
-        pushModel(sim.model, { live: true, requests: hist?.requests || 0, tokens: hist?.tokens || 0 });
+      if (probe?.model) {
+        const hist = usedModels.find((u) => u.id === probe.model);
+        pushModel(probe.model, {
+          live: probe.phase === 'outbound',
+          recent: probe.phase !== 'outbound',
+          ok: probe.phase === 'return',
+          requests: hist?.requests || 0,
+          tokens: hist?.tokens || 0,
+        });
       }
       if (pulseInfo?.model) {
         const hist = usedModels.find((u) => u.id === pulseInfo.model);
@@ -392,15 +424,21 @@ export function ProviderTopology({
 
       const activeModelLabel =
         liveModelList[0] ||
-        sim?.model ||
+        probe?.model ||
         pulseInfo?.model ||
         lastReq?.model ||
         rankedModels[0]?.id ||
         '';
 
       const telemetry =
-        sim?.phase === 'return'
-          ? { ok: true, httpStatus: 200, latencyMs: sim.latencyMs, tokens: sim.tokens }
+        probe?.phase === 'return' || probe?.phase === 'error'
+          ? {
+              ok: probe.phase === 'return',
+              httpStatus: probe.status || (probe.phase === 'return' ? 200 : 'ERR'),
+              latencyMs: probe.latencyMs || 0,
+              tokens: probe.tokens || 0,
+              reply: probe.reply || '',
+            }
           : pulseInfo
             ? {
                 ok: pulseInfo.ok,
@@ -420,7 +458,7 @@ export function ProviderTopology({
         isInFlight,
         isReturning,
         isActive,
-        inFlightCount: inFlightCount || (sim?.phase === 'outbound' ? 1 : 0),
+        inFlightCount: inFlightCount || (probe?.phase === 'outbound' ? 1 : 0),
         isErr: hasPulseError,
         requests: Number(stats?.requests || 0),
         tokens: Number(stats?.tokens || 0),
@@ -446,81 +484,188 @@ export function ProviderTopology({
     activeModels,
     recentPulseSlugs,
     recentPulses,
-    simBeams,
+    probeBeams,
     lastRequestBySlug,
     errorProvider,
     modelsByProvider,
   ]);
 
   const effectiveFocusSlug = hoveredSlug || highlightedSlug || selectedSlug;
+  const isBeamProbing = useMemo(
+    () => Object.values(probeBeams).some((b) => b?.phase === 'outbound'),
+    [probeBeams]
+  );
 
-  const fireSimulatedRoute = (targetNode) => {
-    if (!targetNode) return;
-    if (motionPaused) setMotionPaused(false);
+  // Fire a REAL upstream request using the selected provider package's stored token/OAuth credentials.
+  const runLiveBeamProbe = async (targetNode) => {
+    if (!targetNode?.provider?.id) return;
     const slug = targetNode.provider.slug;
-    const sampleModel =
-      targetNode.rankedModels[0]?.id ||
-      targetNode.provider.models?.[0] ||
-      `${slug}-model`;
-    const seq = Date.now() + Math.random();
-    const fakeLatency = 260 + Math.floor(Math.random() * 440);
-    const fakeTokens = 420 + Math.floor(Math.random() * 1800);
+    if (probeBeams[slug]?.phase === 'outbound') return;
 
-    // Phase 1: Outbound streaming request beam (hub -> provider)
-    setSimBeams((prev) => ({
+    const targetModel =
+      targetNode.activeModelLabel ||
+      targetNode.rankedModels[0]?.id ||
+      stripProviderPrefix(targetNode.provider.models?.[0] || '', slug) ||
+      '';
+    const seq = Date.now() + Math.random();
+    const startedAt = performance.now();
+
+    // Phase 1: Outbound streaming request beam while the real API token request is in-flight
+    setProbeBeams((prev) => ({
       ...prev,
-      [slug]: { phase: 'outbound', model: sampleModel, seq },
+      [slug]: { phase: 'outbound', model: targetModel, seq },
     }));
 
-    // Phase 2: Synchronized return completion wave (provider -> hub) + telemetry badge
-    const t1 = setTimeout(() => {
-      setSimBeams((prev) => {
+    const scheduleClear = (delayMs) => {
+      const tid = setTimeout(() => {
+        if (!mountedRef.current) return;
+        setProbeBeams((prev) => {
+          if (prev[slug]?.seq !== seq) return prev;
+          const next = { ...prev };
+          delete next[slug];
+          return next;
+        });
+      }, delayMs);
+      probeTimersRef.current.push(tid);
+    };
+
+    try {
+      const result = await providersApi.test(targetNode.provider.id, targetModel);
+      if (!mountedRef.current) return;
+
+      const latencyMs = Number(result?.latencyMs) || Math.max(1, Math.round(performance.now() - startedAt));
+      const resolvedModel = result?.model || targetModel;
+      const tokens =
+        Number(result?.usage?.totalTokens) ||
+        (Number(result?.usage?.promptTokens) || 0) + (Number(result?.usage?.outputTokens) || 0);
+      const reply = typeof result?.reply === 'string' ? result.reply.trim() : '';
+
+      if (result?.ok) {
+        setProbeBeams((prev) => {
+          if (prev[slug]?.seq !== seq) return prev;
+          return {
+            ...prev,
+            [slug]: {
+              phase: 'return',
+              model: resolvedModel,
+              status: result.status || 200,
+              latencyMs,
+              tokens,
+              reply,
+              seq,
+            },
+          };
+        });
+        showToast(
+          `${targetNode.provider.name}${resolvedModel ? ` · ${resolvedModel}` : ''} trả lời OK (${latencyMs}ms${
+            reply ? ` · "${reply.slice(0, 48)}"` : ''
+          })`,
+          'success'
+        );
+      } else {
+        const errMsg = result?.message || `HTTP ${result?.status || 'ERR'}`;
+        setProbeBeams((prev) => {
+          if (prev[slug]?.seq !== seq) return prev;
+          return {
+            ...prev,
+            [slug]: {
+              phase: 'error',
+              model: resolvedModel,
+              status: result?.status || 'ERR',
+              latencyMs,
+              message: errMsg,
+              seq,
+            },
+          };
+        });
+        showToast(`${targetNode.provider.name}: ${errMsg}`, 'error');
+      }
+      scheduleClear(4500);
+    } catch (err) {
+      if (!mountedRef.current) return;
+      const latencyMs = Math.max(1, Math.round(performance.now() - startedAt));
+      const errMsg = err?.message || 'Test request failed';
+      setProbeBeams((prev) => {
         if (prev[slug]?.seq !== seq) return prev;
         return {
           ...prev,
           [slug]: {
-            phase: 'return',
-            model: sampleModel,
-            latencyMs: fakeLatency,
-            tokens: fakeTokens,
+            phase: 'error',
+            model: targetModel,
+            status: Number(err?.status) || 'ERR',
+            latencyMs,
+            message: errMsg,
             seq,
           },
         };
       });
-    }, 1550);
-
-    const t2 = setTimeout(() => {
-      setSimBeams((prev) => {
-        if (prev[slug]?.seq !== seq) return prev;
-        const next = { ...prev };
-        delete next[slug];
-        return next;
-      });
-    }, 3400);
-
-    simTimersRef.current.push(t1, t2);
+      showToast(`${targetNode.provider.name}: ${errMsg}`, 'error');
+      scheduleClear(4500);
+    }
   };
 
-  const triggerPulse = () => {
+  const triggerBeamTest = () => {
     if (nodes.length === 0) return;
     const pinned = selectedSlug ? nodes.find((n) => n.provider.slug === selectedSlug) : null;
     if (pinned) {
-      fireSimulatedRoute(pinned);
+      runLiveBeamProbe(pinned);
       return;
     }
-    const idx = simCursorRef.current % nodes.length;
-    simCursorRef.current += 1;
-    fireSimulatedRoute(nodes[idx]);
+    const idx = probeCursorRef.current % nodes.length;
+    probeCursorRef.current += 1;
+    const chosen = nodes[idx];
+    if (chosen) {
+      setSelectedSlug(chosen.provider.slug);
+      runLiveBeamProbe(chosen);
+    }
   };
 
-  const triggerSyncWave = () => {
-    if (nodes.length === 0) return;
-    if (motionPaused) setMotionPaused(false);
-    // Stagger a clean synchronized cascade across up to 4 providers
-    nodes.slice(0, 4).forEach((node, idx) => {
-      const tid = setTimeout(() => fireSimulatedRoute(node), idx * 240);
-      simTimersRef.current.push(tid);
-    });
+  const handleStagePointerDown = (e) => {
+    if (e.button !== 0 || zoom <= 1) return;
+    dragStateRef.current = {
+      startX: e.clientX,
+      startY: e.clientY,
+      originX: pan.x,
+      originY: pan.y,
+      moved: false,
+    };
+  };
+
+  const handleStagePointerMove = (e) => {
+    const drag = dragStateRef.current;
+    if (!drag) return;
+    const dx = e.clientX - drag.startX;
+    const dy = e.clientY - drag.startY;
+    if (!drag.moved && Math.hypot(dx, dy) > 4) {
+      drag.moved = true;
+      setIsPanning(true);
+    }
+    if (drag.moved) {
+      const maxOffsetX = Math.max(120, ((zoom - 1) * CANVAS_W) / 2 + 80);
+      const maxOffsetY = Math.max(90, ((zoom - 1) * CANVAS_H) / 2 + 60);
+      setPan({
+        x: Math.max(-maxOffsetX, Math.min(maxOffsetX, drag.originX + dx)),
+        y: Math.max(-maxOffsetY, Math.min(maxOffsetY, drag.originY + dy)),
+      });
+    }
+  };
+
+  const handleStagePointerUp = () => {
+    const drag = dragStateRef.current;
+    if (drag?.moved) {
+      suppressClickRef.current = true;
+      setTimeout(() => {
+        suppressClickRef.current = false;
+      }, 0);
+    }
+    dragStateRef.current = null;
+    setIsPanning(false);
+  };
+
+  const handleStageDoubleClick = (e) => {
+    if (e.target.closest('button')) return;
+    setZoom(1);
+    setPan({ x: 0, y: 0 });
   };
 
   const handleNodeHover = (slug) => {
@@ -529,53 +674,10 @@ export function ProviderTopology({
   };
 
   const handleNodeClick = (slug) => {
+    if (suppressClickRef.current) return;
     const next = selectedSlug === slug ? '' : slug;
     setSelectedSlug(next);
   };
-
-  // Pick which provider's models to highlight in the bottom Model Route Dock.
-  const dockNode = useMemo(() => {
-    if (effectiveFocusSlug) {
-      const found = nodes.find((n) => n.provider.slug === effectiveFocusSlug);
-      if (found) return found;
-    }
-    const liveNode = nodes.find((n) => n.isInFlight) || nodes.find((n) => n.isReturning);
-    if (liveNode) return liveNode;
-    return null;
-  }, [effectiveFocusSlug, nodes]);
-
-  // Global top models strip when no single provider is hovered/active.
-  const globalTopModels = useMemo(() => {
-    const out = [];
-    for (const row of byModel || []) {
-      const slug = row.provider;
-      const node = nodes.find((n) => n.provider.slug === slug);
-      if (!node) continue;
-      out.push({
-        slug,
-        accent: node.accent,
-        providerName: node.provider.name,
-        id: stripProviderPrefix(row.model, slug),
-        requests: Number(row.requests) || 0,
-      });
-      if (out.length >= 6) break;
-    }
-    if (out.length === 0) {
-      for (const n of nodes) {
-        if (n.rankedModels[0]) {
-          out.push({
-            slug: n.provider.slug,
-            accent: n.accent,
-            providerName: n.provider.name,
-            id: n.rankedModels[0].id,
-            requests: n.rankedModels[0].requests || 0,
-          });
-        }
-        if (out.length >= 5) break;
-      }
-    }
-    return out;
-  }, [byModel, nodes]);
 
   const softGlowId = `topo-soft-${uid}`;
   const cometGlowId = `topo-comet-${uid}`;
@@ -583,11 +685,7 @@ export function ProviderTopology({
   const errorGradId = `topo-err-grad-${uid}`;
 
   return (
-    <div
-      className={`r-card topology-shell relative flex h-[468px] flex-col overflow-hidden ${
-        motionPaused ? 'topology-paused' : ''
-      }`}
-    >
+    <div className="r-card topology-shell relative flex h-[468px] flex-col overflow-hidden">
       {/* Header bar */}
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--border-subtle)] bg-[var(--bg-subtle)] px-4 py-2.5">
         <div className="flex min-w-0 items-center gap-2">
@@ -621,86 +719,25 @@ export function ProviderTopology({
 
         <div className="flex items-center gap-1.5">
           {nodes.length > 0 ? (
-            <>
-              <button
-                type="button"
-                onClick={() => setSortMode((m) => (m === 'traffic' ? 'alpha' : 'traffic'))}
-                className="r-btn-secondary inline-flex items-center gap-1 px-2 py-1 text-[11px]"
-                title={
-                  sortMode === 'traffic'
-                    ? 'Sorted by traffic (click for A-Z)'
-                    : 'Sorted A-Z (click for traffic)'
-                }
-              >
-                <ArrowDownUp className="h-3 w-3 text-[var(--text-secondary)]" aria-hidden="true" />
-                <span>{sortMode === 'traffic' ? 'Traffic' : 'A–Z'}</span>
-              </button>
-              <button
-                type="button"
-                onClick={triggerPulse}
-                className="r-btn-secondary inline-flex items-center gap-1 px-2.5 py-1 text-[11px]"
-                title={
-                  selectedSlug
-                    ? `Simulate synced request beam to ${selectedSlug}`
-                    : 'Simulate live request beam'
-                }
-              >
+            <button
+              type="button"
+              onClick={triggerBeamTest}
+              disabled={isBeamProbing && Boolean(selectedSlug && probeBeams[selectedSlug]?.phase === 'outbound')}
+              className="r-btn-secondary inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px]"
+              title={
+                selectedSlug
+                  ? `Test thật gói '${selectedSlug}' bằng token đang kết nối`
+                  : 'Chọn một gói hoặc bấm để test thật bằng token đang kết nối'
+              }
+            >
+              {isBeamProbing ? (
+                <Loader2 className="h-3 w-3 animate-spin text-[#E56A4A]" aria-hidden="true" />
+              ) : (
                 <Zap className="h-3 w-3 text-[#E56A4A]" aria-hidden="true" />
-                Test Beam
-              </button>
-              {nodes.length > 1 ? (
-                <button
-                  type="button"
-                  onClick={triggerSyncWave}
-                  className="r-btn-secondary inline-flex items-center gap-1 px-2 py-1 text-[11px]"
-                  title="Simulate synchronized multi-provider wave"
-                >
-                  <Sparkles className="h-3 w-3 text-sky-400" aria-hidden="true" />
-                  Wave
-                </button>
-              ) : null}
-              <button
-                type="button"
-                onClick={() => setMotionPaused((p) => !p)}
-                aria-label={motionPaused ? 'Resume topology animation' : 'Pause topology animation'}
-                title={motionPaused ? 'Resume animation' : 'Pause animation'}
-                className="r-btn-secondary p-1"
-              >
-                {motionPaused ? (
-                  <Play className="h-3.5 w-3.5" aria-hidden="true" />
-                ) : (
-                  <Pause className="h-3.5 w-3.5" aria-hidden="true" />
-                )}
-              </button>
-            </>
+              )}
+              <span>Beam</span>
+            </button>
           ) : null}
-          <button
-            type="button"
-            onClick={() => setZoom((z) => Math.max(0.76, Number((z - 0.12).toFixed(2))))}
-            aria-label="Zoom out topology"
-            className="r-btn-secondary p-1"
-          >
-            <ZoomOut className="h-3.5 w-3.5" aria-hidden="true" />
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              setZoom(1);
-              setSelectedSlug('');
-            }}
-            aria-label="Reset topology zoom and selection"
-            className="r-btn-secondary p-1"
-          >
-            <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
-          </button>
-          <button
-            type="button"
-            onClick={() => setZoom((z) => Math.min(1.24, Number((z + 0.12).toFixed(2))))}
-            aria-label="Zoom in topology"
-            className="r-btn-secondary p-1"
-          >
-            <ZoomIn className="h-3.5 w-3.5" aria-hidden="true" />
-          </button>
         </div>
       </div>
 
@@ -717,25 +754,34 @@ export function ProviderTopology({
           </p>
         </div>
       ) : (
-        <>
+        <div
+          ref={stageContainerRef}
+          onPointerDown={handleStagePointerDown}
+          onPointerMove={handleStagePointerMove}
+          onPointerUp={handleStagePointerUp}
+          onPointerCancel={handleStagePointerUp}
+          onPointerLeave={handleStagePointerUp}
+          onDoubleClick={handleStageDoubleClick}
+          className={`relative flex flex-1 items-center justify-center overflow-hidden bg-[var(--bg-main)] select-none ${
+            zoom > 1 ? (isPanning ? 'cursor-grabbing' : 'cursor-grab') : ''
+          }`}
+          style={{
+            backgroundImage:
+              'radial-gradient(circle at 50% 48%, color-mix(in srgb, var(--accent) 9%, transparent) 0%, transparent 52%), radial-gradient(circle at 1px 1px, color-mix(in srgb, var(--text-muted) 15%, transparent) 1px, transparent 0)',
+            backgroundSize: '100% 100%, 24px 24px',
+            overscrollBehavior: 'contain',
+          }}
+        >
+          {/* Unified Wheel-Zoomable Stage (double-click background to reset) */}
           <div
-            className="relative flex flex-1 items-center justify-center overflow-hidden bg-[var(--bg-main)]"
+            className="relative h-full w-full max-w-[920px]"
             style={{
-              backgroundImage:
-                'radial-gradient(circle at 50% 48%, color-mix(in srgb, var(--accent) 9%, transparent) 0%, transparent 52%), radial-gradient(circle at 1px 1px, color-mix(in srgb, var(--text-muted) 15%, transparent) 1px, transparent 0)',
-              backgroundSize: '100% 100%, 24px 24px',
+              aspectRatio: `${CANVAS_W} / ${CANVAS_H}`,
+              transform: `translate3d(${pan.x}px, ${pan.y}px, 0) scale(${zoom})`,
+              transformOrigin: 'center center',
+              transition: isPanning ? 'none' : 'transform 120ms ease-out',
             }}
           >
-            {/* Unified Zoomable Stage */}
-            <div
-              className="relative h-full w-full max-w-[920px]"
-              style={{
-                aspectRatio: `${CANVAS_W} / ${CANVAS_H}`,
-                transform: `scale(${zoom})`,
-                transformOrigin: 'center center',
-                transition: 'transform 260ms cubic-bezier(0.22, 1, 0.36, 1)',
-              }}
-            >
               {/* Layer 1 (z-0): Symmetric Fiber-Optic Bezier Conduits & Bidirectional Comets */}
               <svg
                 viewBox={`0 0 ${CANVAS_W} ${CANVAS_H}`}
@@ -1056,6 +1102,11 @@ export function ProviderTopology({
                             {formatCompactNumber(node.telemetry.tokens)}t
                           </span>
                         ) : null}
+                        {node.telemetry.reply ? (
+                          <span className="max-w-[96px] truncate text-[var(--text-primary)]">
+                            “{node.telemetry.reply}”
+                          </span>
+                        ) : null}
                       </div>
                     ) : null}
 
@@ -1254,109 +1305,8 @@ export function ProviderTopology({
                   </div>
                 </div>
               </div>
-            </div>
           </div>
-
-          {/* Bottom Interactive Model Route Dock (shows ranked models for focused/active provider or global top models) */}
-          <div className="topology-model-dock flex min-h-[44px] items-center justify-between gap-3 border-t border-[var(--border-subtle)] bg-[var(--bg-subtle)]/90 px-4 py-2">
-            {dockNode ? (
-              <>
-                <div className="flex min-w-0 flex-1 items-center gap-2 overflow-x-auto">
-                  <span
-                    className="inline-flex shrink-0 items-center gap-1.5 rounded-full border px-2 py-0.5 text-[10.5px] font-semibold text-[var(--text-primary)]"
-                    style={{
-                      borderColor: `${dockNode.accent}55`,
-                      backgroundColor: `${dockNode.accent}16`,
-                    }}
-                  >
-                    <span
-                      className="h-1.5 w-1.5 rounded-full"
-                      style={{ backgroundColor: dockNode.accent }}
-                    />
-                    {formatShortProviderName(dockNode.provider.name)}
-                  </span>
-                  <div className="flex items-center gap-1.5 overflow-x-auto py-0.5">
-                    {dockNode.rankedModels.slice(0, 6).map((m) => (
-                      <span
-                        key={m.id}
-                        className={`inline-flex shrink-0 items-center gap-1 rounded-md border px-2 py-0.5 font-mono text-[10px] ${
-                          m.live
-                            ? 'border-emerald-500/50 bg-emerald-500/15 font-semibold text-emerald-400'
-                            : m.recent
-                              ? 'border-[#E56A4A]/45 bg-[#E56A4A]/12 font-semibold text-[var(--text-primary)]'
-                              : 'border-[var(--border-subtle)] bg-[var(--bg-card)] text-[var(--text-secondary)]'
-                        }`}
-                      >
-                        {m.live ? (
-                          <span
-                            className={`h-1.5 w-1.5 rounded-full bg-emerald-400 ${
-                              animationsEnabled ? 'animate-pulse motion-reduce:animate-none' : ''
-                            }`}
-                          />
-                        ) : null}
-                        <span>{m.id}</span>
-                        {m.requests > 0 ? (
-                          <span className="text-[9px] text-[var(--text-muted)]">
-                            · {formatCompactNumber(m.requests)}
-                          </span>
-                        ) : null}
-                      </span>
-                    ))}
-                    {dockNode.rankedModels.length > 6 ? (
-                      <span className="shrink-0 font-mono text-[10px] text-[var(--text-muted)]">
-                        +{dockNode.rankedModels.length - 6} more
-                      </span>
-                    ) : null}
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => fireSimulatedRoute(dockNode)}
-                  className="r-btn-secondary inline-flex shrink-0 items-center gap-1 px-2 py-0.5 text-[10.5px]"
-                >
-                  <Zap className="h-3 w-3 text-[#E56A4A]" aria-hidden="true" />
-                  Pulse
-                </button>
-              </>
-            ) : (
-              <div className="flex min-w-0 flex-1 items-center justify-between gap-3">
-                <div className="flex min-w-0 items-center gap-1.5 overflow-x-auto py-0.5">
-                  <span className="shrink-0 font-mono text-[10px] font-semibold tracking-wide text-[var(--text-muted)] uppercase">
-                    Active Models
-                  </span>
-                  {globalTopModels.length > 0 ? (
-                    globalTopModels.map((m) => (
-                      <button
-                        key={`${m.slug}/${m.id}`}
-                        type="button"
-                        onClick={() => handleNodeClick(m.slug)}
-                        className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-[var(--border-subtle)] bg-[var(--bg-card)] px-2 py-0.5 font-mono text-[10px] text-[var(--text-secondary)] transition-colors hover:border-[var(--border-strong)] hover:text-[var(--text-primary)]"
-                      >
-                        <span
-                          className="h-1.5 w-1.5 rounded-full"
-                          style={{ backgroundColor: m.accent }}
-                        />
-                        <span>{m.id}</span>
-                        {m.requests > 0 ? (
-                          <span className="text-[9px] text-[var(--text-muted)]">
-                            {formatCompactNumber(m.requests)}
-                          </span>
-                        ) : null}
-                      </button>
-                    ))
-                  ) : (
-                    <span className="text-[11px] text-[var(--text-muted)]">
-                      Click or hover a provider node to inspect its models.
-                    </span>
-                  )}
-                </div>
-                <span className="topology-dock-hint hidden shrink-0 text-[10.5px] text-[var(--text-muted)] md:inline">
-                  Click node to pin
-                </span>
-              </div>
-            )}
-          </div>
-        </>
+        </div>
       )}
     </div>
   );
