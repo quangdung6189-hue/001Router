@@ -1388,6 +1388,21 @@ describe("Antigravity routes + /v1 chat", () => {
         fake.chats[1].request.systemInstruction.parts[0].text,
         "You are antigravity, an interactive CLI tool. See https://antigravity.ai"
       );
+
+      const agents = await chat("gemini-3.8-flash-medium", [
+        {
+          role: "system",
+          content: "You are Cline, an AI coding assistant. Use Roo Code, Kilo Code, and Cursor IDE carefully."
+        },
+        {
+          role: "user",
+          content: "x-anthropic-billing-header: cc_version=2.1; cc_entrypoint=cli;\nhello"
+        }
+      ]);
+      assert.equal(agents.status, 200, await agents.text());
+      const rewrittenSys = fake.chats[2].request.systemInstruction.parts[0].text;
+      assert.doesNotMatch(rewrittenSys, /You are Cline|Roo Code|Kilo Code|Cursor IDE/i);
+      assert.equal(fake.chats[2].request.contents[0].parts[0].text, "hello");
     } finally {
       delete app.locals.cloudCodeFetchImpl;
       resetCloudCodeState();
@@ -1487,6 +1502,109 @@ describe("Antigravity routes + /v1 chat", () => {
         const p = data.providers.find((x) => x.preset === "antigravity");
         p.apiKeys = p.apiKeys.filter((k) => k.id !== "ag-second-key");
       });
+    }
+  });
+
+  it("20. /v1/messages (Anthropic format) translates system + tools and strips Claude Code / CLI agent markers", async () => {
+    const sent = [];
+    app.locals.cloudCodeFetchImpl = async (_url, init = {}) => {
+      sent.push(JSON.parse(init.body));
+      return new Response(
+        sseText([
+          {
+            response: {
+              candidates: [{ content: { role: "model", parts: [{ text: "ok" }] }, finishReason: "STOP" }],
+              usageMetadata: { promptTokenCount: 5, candidatesTokenCount: 1 }
+            }
+          }
+        ]),
+        { status: 200, headers: { "content-type": "text/event-stream" } }
+      );
+    };
+    try {
+      const res = await fetch(`${baseUrl}/v1/messages`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-api-key": routerKey,
+          "anthropic-version": "2023-06-01"
+        },
+        body: JSON.stringify({
+          model: "antigravity/claude-sonnet-5-5",
+          max_tokens: 64,
+          system: [
+            { type: "text", text: "x-anthropic-billing-header: cc_version=2.1; cc_entrypoint=cli;" },
+            { type: "text", text: "You are Claude Code, Anthropic's official CLI for Claude. Follow user rules." }
+          ],
+          tools: [
+            {
+              name: "read_file",
+              description: "Read a file",
+              input_schema: { type: "object", properties: { path: { type: "string" } }, required: ["path"] }
+            }
+          ],
+          messages: [{ role: "user", content: "hi" }]
+        })
+      });
+      assert.equal(res.status, 200);
+      assert.equal(sent.length, 1);
+      const sysText = sent[0].request.systemInstruction?.parts?.[0]?.text || "";
+      assert.ok(sysText.includes("Follow user rules."), "preserves user system prompt");
+      assert.doesNotMatch(sysText, /x-anthropic-billing-header|You are Claude Code/i);
+      assert.equal(sent[0].request.tools?.[0]?.functionDeclarations?.[0]?.name, "read_file");
+    } finally {
+      delete app.locals.cloudCodeFetchImpl;
+    }
+  });
+
+  it("21. detail-free 429 caused by systemInstruction auto-retries without systemInstruction and returns 200", async () => {
+    await setPlan([...PLAN, "gemini-4-neon-low"]);
+    const sent = [];
+    app.locals.cloudCodeFetchImpl = async (url, init = {}) => {
+      if (String(url).includes("retrieveUserQuotaSummary")) {
+        return json(200, {
+          groups: [{ displayName: "Gemini", buckets: [{ window: "weekly", remainingFraction: 1 }] }]
+        });
+      }
+      if (String(url).includes("fetchAvailableModels")) {
+        return json(200, {
+          models: { "gemini-4-neon-low": { quotaInfo: { remainingFraction: 1 } } },
+          defaultAgentModelId: "gemini-4-neon-low"
+        });
+      }
+      const body = JSON.parse(init.body);
+      sent.push(body);
+      if (body.request?.systemInstruction) {
+        return json(429, { error: { code: 429, message: "Resource has been exhausted (e.g. check quota)." } });
+      }
+      return new Response(
+        sseText([
+          {
+            response: {
+              candidates: [{ content: { role: "model", parts: [{ text: "ok" }] }, finishReason: "STOP" }],
+              usageMetadata: { promptTokenCount: 4, candidatesTokenCount: 1 }
+            }
+          }
+        ]),
+        { status: 200, headers: { "content-type": "text/event-stream" } }
+      );
+    };
+    try {
+      const res = await chat("gemini-4-neon-low", [
+        { role: "system", content: "You are a custom assistant prompt." },
+        { role: "user", content: "hello" }
+      ]);
+      assert.equal(res.status, 200, await res.text());
+      assert.equal(sent.length, 2);
+      assert.ok(sent[0].request.systemInstruction);
+      assert.equal(sent[1].request.systemInstruction, undefined);
+      assert.ok(
+        sent[1].request.contents[0].parts.some((p) => String(p.text || "").includes("custom assistant prompt")),
+        "folds system prompt into user turn on retry"
+      );
+    } finally {
+      delete app.locals.cloudCodeFetchImpl;
+      resetCloudCodeState();
     }
   });
 });

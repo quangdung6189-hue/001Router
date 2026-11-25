@@ -175,6 +175,14 @@ function getPublicMaskedKey(k) {
     const email = k.oauthMeta?.email;
     return email ? `oauth:${email}` : "google_oauth";
   }
+  if (k?.authMethod === "antigravity") {
+    const email = k.oauthMeta?.email;
+    return email ? `ag:${email}` : "antigravity";
+  }
+  if (k?.authMethod === "gemini_cli") {
+    const email = k.oauthMeta?.email;
+    return email ? `gcli:${email}` : "gemini_cli";
+  }
   if (k?.authMethod === "oauth2") {
     const identity = k.oauthMeta?.email || k.oauthMeta?.username || k.oauthMeta?.name;
     return identity ? `oauth:${identity}` : "oauth2";
@@ -5275,12 +5283,24 @@ export function createDashboardRouter(storage, liveEvents = null) {
             item.authMethod === "service_account" ||
             prevKey?.authMethod === "service_account" ||
             Boolean(rawSaJson);
-          const isGoogleOAuth =
-            item.authMethod === "google_oauth" ||
-            prevKey?.authMethod === "google_oauth" ||
+          const OAUTH_AUTH_METHODS = new Set([
+            "google_oauth",
+            "gemini_cli",
+            "antigravity",
+            "oauth2",
+            "device_code"
+          ]);
+          const resolvedOAuthMethod = OAUTH_AUTH_METHODS.has(item.authMethod)
+            ? item.authMethod
+            : OAUTH_AUTH_METHODS.has(prevKey?.authMethod)
+              ? prevKey.authMethod
+              : "google_oauth";
+          const isOAuthKey =
+            OAUTH_AUTH_METHODS.has(item.authMethod) ||
+            OAUTH_AUTH_METHODS.has(prevKey?.authMethod) ||
             Boolean(rawOAuthCreds);
 
-          if (isGoogleOAuth) {
+          if (isOAuthKey) {
             const finalOAuthCreds =
               rawOAuthCreds && rawOAuthCreds !== REDACTED_MARKER
                 ? rawOAuthCreds
@@ -5293,7 +5313,7 @@ export function createDashboardRouter(storage, liveEvents = null) {
                     ? item.label.trim()
                     : prevKey?.label || "",
                 key: "",
-                authMethod: "google_oauth",
+                authMethod: resolvedOAuthMethod,
                 oauthCredentials: finalOAuthCreds,
                 ...(item.oauthMeta || prevKey?.oauthMeta
                   ? {

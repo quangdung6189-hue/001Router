@@ -314,12 +314,21 @@ const ANTIGRAVITY_THOUGHT_SIGNATURE =
  */
 const ANTIGRAVITY_PROMPT_REWRITES = [
   { from: "You are a Claude agent, built on Anthropic's Claude Agent SDK.", to: "" },
+  { from: /\bClaude Agent SDK\b/gi, to: "Agent SDK" },
   {
     from: /You are Hermes(?: Agent)?(?:,\s*(?:an intelligent AI assistant|an AI assistant|an AI agent))?(?:,?\s*(?:built|created)\s+by\s+Nous Research)?\./gi,
     to: "You are an AI assistant."
   },
   // Claude Code prepends this line; OpenAI-format proxies of Claude Code pass it through.
   { from: /^x-anthropic-billing-header:[^\n]*(?:\r?\n)*/gim, to: "" },
+  {
+    from: /You are (?:Cline|Roo(?: Code)?|Kilo(?: Code)?|Cursor|Windsurf|Cascade|Codex|Aider|Continue)(?:[,\s]+(?:an? )?(?:AI )?(?:coding |code )?(?:assistant|agent))?\.?/gi,
+    to: "You are Antigravity, an AI coding assistant."
+  },
+  {
+    from: /\b(?:OhMyOpenCode|OpenClaw|Roo Code|Kilo Code|Codex CLI|Cursor IDE|Windsurf IDE)\b/gi,
+    to: "Antigravity"
+  },
   {
     from: /opencode/gi,
     to: (m) => (m === "OpenCode" ? "Antigravity" : m === "OPENCODE" ? "ANTIGRAVITY" : "antigravity")
@@ -770,9 +779,28 @@ export function buildCloudCodeRequest(model, body, projectId, options = {}) {
     ...(isAntigravity ? { signature: ANTIGRAVITY_THOUGHT_SIGNATURE } : {})
   });
   if (isAntigravity && gemini.systemInstruction) {
-    const text = rewriteAntigravitySystemText(gemini.systemInstruction.parts[0].text).trim();
+    const text = rewriteAntigravitySystemText(gemini.systemInstruction.parts[0].text)
+      .replace(/You are Claude Code(?:,\s*Anthropic's official CLI for Claude)?\.?\s*/gi, "")
+      .replace(/\bAnthropic's official CLI(?: for Claude)?\b/gi, "an AI coding assistant")
+      .replace(/\bClaude Code\b/gi, "Antigravity")
+      .replace(/\bclaude-code\b/gi, "antigravity")
+      .replace(/\bCline\b/g, "Antigravity")
+      .trim();
     if (text) gemini.systemInstruction = { role: "user", parts: [{ text }] };
     else delete gemini.systemInstruction;
+  }
+  if (isAntigravity && Array.isArray(gemini.contents)) {
+    for (const turn of gemini.contents) {
+      if (turn?.role !== "user" || !Array.isArray(turn.parts)) continue;
+      turn.parts = turn.parts
+        .map((part) => {
+          if (typeof part?.text !== "string") return part;
+          const cleaned = part.text.replace(/^x-anthropic-billing-header:[^\n]*(?:\r?\n)*/gim, "");
+          return cleaned === part.text ? part : { ...part, text: cleaned };
+        })
+        .filter((part) => !(typeof part?.text === "string" && Object.keys(part).length === 1 && !part.text.trim()));
+    }
+    gemini.contents = gemini.contents.filter((turn) => Array.isArray(turn?.parts) && turn.parts.length > 0);
   }
 
   const generationConfig = { ...(gemini.generationConfig || {}) };

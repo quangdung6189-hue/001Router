@@ -8,6 +8,7 @@ import {
   loadGeminiCliProject,
   mergeCloudCodeUsage,
   parseAntigravityModelCatalog,
+  parseCloudCodeRateLimit,
   resolveCatalogModel,
   syncProviderModelsWithCatalog
 } from "./geminiCliOAuth.js";
@@ -1356,6 +1357,8 @@ export class RouterService {
               let effectiveUrl = upstreamUrl;
               /** Project + upstream model actually sent, for explaining a Cloud Code 429. */
               let cloudCodeCtx = null;
+              /** Parsed Cloud Code envelope kept for systemInstruction-stripped 429 retry. */
+              let cloudCodeEnvelope = null;
               /** A non-streaming client served from the streaming Cloud Code RPC. */
               let cloudCodeFoldStream = false;
               let effectiveBody = JSON.stringify(upstreamPayload);
@@ -1427,12 +1430,16 @@ export class RouterService {
                 // Antigravity plans differ per account and over time. Google answers a model that
                 // is not on the plan with a misleading "429 check quota", so only send ids the
                 // account's own catalog (fetchAvailableModels) offers, and refuse others here.
+                const cloudCodeBody =
+                  normalizedClientFormat === "anthropic"
+                    ? claudeToOpenAIRequest(savedBody, target.upstreamModel)
+                    : savedBody;
                 let catalogModel = "";
                 if (cloudCodeFlavor.id === "antigravity") {
                   let catalog = Array.isArray(keyEntry?.oauthMeta?.availableModels)
                     ? keyEntry.oauthMeta.availableModels
                     : [];
-                  catalogModel = resolveCatalogModel(target.upstreamModel, catalog, savedBody);
+                  catalogModel = resolveCatalogModel(target.upstreamModel, catalog, cloudCodeBody);
                   const catalogAgeMs =
                     Date.now() - (Date.parse(keyEntry?.oauthMeta?.catalogAt || "") || 0);
                   if (catalog.length && !catalogModel && catalogAgeMs > CLOUD_CODE_CATALOG_RECHECK_MS) {
@@ -1445,7 +1452,7 @@ export class RouterService {
                     );
                     if (fresh.length) {
                       catalog = fresh;
-                      catalogModel = resolveCatalogModel(target.upstreamModel, catalog, savedBody);
+                      catalogModel = resolveCatalogModel(target.upstreamModel, catalog, cloudCodeBody);
                     }
                   }
                   if (catalog.length && !catalogModel) {
@@ -1487,10 +1494,11 @@ export class RouterService {
                 effectiveUrl = upstreamStream ? cloudCodeFlavor.streamUrl : cloudCodeFlavor.generateUrl;
                 const envelope = buildCloudCodeRequest(
                   catalogModel || target.upstreamModel,
-                  savedBody,
+                  cloudCodeBody,
                   cloudProject,
                   { flavor: cloudCodeFlavor, exactModel: Boolean(catalogModel) }
                 );
+                cloudCodeEnvelope = envelope;
                 cloudCodeCtx = {
                   projectId: cloudProject,
                   model: envelope.model,
@@ -1516,6 +1524,72 @@ export class RouterService {
                 signal: controller.signal,
                 ...(dispatcher ? { dispatcher } : {})
               });
+
+              // Antigravity flags certain systemInstruction texts with a detail-free HTTP 429
+              // even with 100% quota left. Retry once with systemInstruction folded into the
+              // first user turn, and if still 429, once more with systemInstruction dropped.
+              if (
+                isGeminiCliKey &&
+                cloudCodeFlavor.id === "antigravity" &&
+                upstreamRes.status === 429 &&
+                cloudCodeCtx?.hasSystemPrompt &&
+                cloudCodeEnvelope?.request?.systemInstruction &&
+                !cloudCodeCtx.systemText.includes("FlaggedApp") &&
+                !clientAborted
+              ) {
+                const first429Text = await upstreamRes.text().catch(() => "");
+                const parsed429 = parseCloudCodeRateLimit(first429Text);
+                const isCapacity429 = /capacity|high traffic|overloaded/i.test(
+                  `${parsed429.reason} ${parsed429.message}`
+                );
+                if (!parsed429.resetAtMs && !isCapacity429) {
+                  const fullSysText = (
+                    cloudCodeEnvelope.request.systemInstruction.parts || []
+                  )
+                    .map((p) => (typeof p?.text === "string" ? p.text : ""))
+                    .filter(Boolean)
+                    .join("\n\n");
+
+                  const retryVariants = [];
+                  if (fullSysText && Array.isArray(cloudCodeEnvelope.request.contents)) {
+                    const folded = structuredClone(cloudCodeEnvelope);
+                    delete folded.request.systemInstruction;
+                    const firstUser = folded.request.contents.find((t) => t?.role === "user");
+                    if (firstUser && Array.isArray(firstUser.parts)) {
+                      firstUser.parts = [{ text: `${fullSysText}\n\n` }, ...firstUser.parts];
+                      retryVariants.push(folded);
+                    }
+                  }
+                  const stripped = structuredClone(cloudCodeEnvelope);
+                  delete stripped.request.systemInstruction;
+                  retryVariants.push(stripped);
+
+                  for (const retryEnv of retryVariants) {
+                    if (clientAborted) break;
+                    upstreamRes = await (cloudCodeFetch || upstreamFetch)(effectiveUrl, {
+                      method: "POST",
+                      headers: effectiveHeaders,
+                      body: JSON.stringify(retryEnv),
+                      signal: controller.signal,
+                      ...(dispatcher ? { dispatcher } : {})
+                    });
+                    if (upstreamRes.ok) {
+                      cloudCodeCtx.hasSystemPrompt = false;
+                      cloudCodeCtx.systemText = "";
+                      break;
+                    }
+                    if (upstreamRes.status !== 429) break;
+                    if (retryEnv !== retryVariants[retryVariants.length - 1]) {
+                      await upstreamRes.text().catch(() => "");
+                    }
+                  }
+                } else {
+                  upstreamRes = new Response(first429Text, {
+                    status: upstreamRes.status,
+                    headers: upstreamRes.headers
+                  });
+                }
+              }
 
               // On Anthropic-format custom relays (e.g. Claude Code / OneAPI / xai247 proxies),
               // some gateways require Authorization: Bearer while others require x-api-key.

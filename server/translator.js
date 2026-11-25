@@ -329,6 +329,26 @@ export function claudeToOpenAIRequest(anthropicReq, upstreamModel) {
     }
   }
 
+  if (typeof anthropicReq.reasoning_effort === "string" && anthropicReq.reasoning_effort.trim()) {
+    out.reasoning_effort = anthropicReq.reasoning_effort.trim();
+  } else if (
+    typeof anthropicReq.output_config?.effort === "string" &&
+    anthropicReq.output_config.effort.trim()
+  ) {
+    out.reasoning_effort = anthropicReq.output_config.effort.trim();
+  } else if (
+    typeof anthropicReq.reasoning?.effort === "string" &&
+    anthropicReq.reasoning.effort.trim()
+  ) {
+    out.reasoning_effort = anthropicReq.reasoning.effort.trim();
+  } else if (
+    anthropicReq.thinking?.type === "enabled" &&
+    typeof anthropicReq.thinking.budget_tokens === "number"
+  ) {
+    const b = anthropicReq.thinking.budget_tokens;
+    out.reasoning_effort = b > 16384 ? "high" : b <= 4096 ? "low" : "medium";
+  }
+
   return out;
 }
 
