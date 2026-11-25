@@ -243,6 +243,17 @@ export function QuotaPage() {
           {items.map((item) => {
             const remMs = Math.max(0, (item.maxCooldownRemainingMs || 0) - elapsedMs);
             const remSec = Math.ceil(remMs / 1000);
+            const cloudCodeList =
+              Array.isArray(item.cloudCodeAccounts) && item.cloudCodeAccounts.length
+                ? item.cloudCodeAccounts
+                : item.cloudCodeQuota
+                  ? [item.cloudCodeQuota]
+                  : [];
+            const hasCloudCode = cloudCodeList.length > 0;
+            const hasDailyTokenLimit = Number(item.budget?.dailyTokenLimit) > 0;
+            const hasDailyRequestLimit = Number(item.budget?.dailyRequestLimit) > 0;
+            const hasMonthlyTokenLimit = Number(item.budget?.monthlyTokenLimit) > 0;
+            const hasCustomBudget = hasDailyTokenLimit || hasDailyRequestLimit || hasMonthlyTokenLimit;
 
             return (
               <article key={item.providerId} className="r-card p-5 space-y-4">
@@ -288,23 +299,20 @@ export function QuotaPage() {
                     </div>
                   </div>
 
-                  <button
-                    type="button"
-                    onClick={() => openBudgetModal(item)}
-                    className="r-btn-secondary inline-flex shrink-0 items-center gap-1.5 px-2.5 py-1.5 text-xs"
-                  >
-                    <SlidersHorizontal className="h-3.5 w-3.5 text-[#E56A4A]" aria-hidden="true" />
-                    {t('quota.setBudget')}
-                  </button>
+                  {!hasCloudCode || hasCustomBudget ? (
+                    <button
+                      type="button"
+                      onClick={() => openBudgetModal(item)}
+                      className="r-btn-secondary inline-flex shrink-0 items-center gap-1.5 px-2.5 py-1.5 text-xs"
+                    >
+                      <SlidersHorizontal className="h-3.5 w-3.5 text-[#E56A4A]" aria-hidden="true" />
+                      {t('quota.setBudget')}
+                    </button>
+                  ) : null}
                 </div>
 
                 {/* One card per Google account (key): each has its own plan and quota windows. */}
-                {(Array.isArray(item.cloudCodeAccounts) && item.cloudCodeAccounts.length
-                  ? item.cloudCodeAccounts
-                  : item.cloudCodeQuota
-                    ? [item.cloudCodeQuota]
-                    : []
-                ).map((acc, idx, all) => {
+                {cloudCodeList.map((acc, idx, all) => {
                   const cooling = acc.cooldownUntil && acc.cooldownUntil > Date.now();
                   return (
                     <div
@@ -354,27 +362,35 @@ export function QuotaPage() {
                   );
                 })}
 
-                <div className="space-y-3 border-t border-[var(--border-subtle)] pt-3">
-                  <ProgressRow
-                    label={t('quota.dailyTokens')}
-                    used={item.today?.tokens || 0}
-                    limit={item.budget?.dailyTokenLimit}
-                    unlimitedLabel={t('quota.unlimited')}
-                  />
-                  <ProgressRow
-                    label={t('quota.dailyRequests')}
-                    used={item.today?.requests || 0}
-                    limit={item.budget?.dailyRequestLimit}
-                    formatFn={formatNumber}
-                    unlimitedLabel={t('quota.unlimited')}
-                  />
-                  <ProgressRow
-                    label={t('quota.monthlyTokens')}
-                    used={item.month?.tokens || 0}
-                    limit={item.budget?.monthlyTokenLimit}
-                    unlimitedLabel={t('quota.unlimited')}
-                  />
-                </div>
+                {hasCustomBudget ? (
+                  <div className="space-y-3 border-t border-[var(--border-subtle)] pt-3">
+                    {hasDailyTokenLimit ? (
+                      <ProgressRow
+                        label={t('quota.dailyTokens')}
+                        used={item.today?.tokens || 0}
+                        limit={item.budget?.dailyTokenLimit}
+                        unlimitedLabel={t('quota.unlimited')}
+                      />
+                    ) : null}
+                    {hasDailyRequestLimit ? (
+                      <ProgressRow
+                        label={t('quota.dailyRequests')}
+                        used={item.today?.requests || 0}
+                        limit={item.budget?.dailyRequestLimit}
+                        formatFn={formatNumber}
+                        unlimitedLabel={t('quota.unlimited')}
+                      />
+                    ) : null}
+                    {hasMonthlyTokenLimit ? (
+                      <ProgressRow
+                        label={t('quota.monthlyTokens')}
+                        used={item.month?.tokens || 0}
+                        limit={item.budget?.monthlyTokenLimit}
+                        unlimitedLabel={t('quota.unlimited')}
+                      />
+                    ) : null}
+                  </div>
+                ) : null}
               </article>
             );
           })}

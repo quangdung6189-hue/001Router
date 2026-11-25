@@ -108,6 +108,49 @@ function ModelRow({ m, slug, showPct, copied, onCopy }) {
   );
 }
 
+const DERIVED_FAMILIES = ['gemini', 'gemini_argon', 'claude_gpt'];
+
+function inferModelFamily(m) {
+  if (m?.family && DERIVED_FAMILIES.includes(m.family)) return m.family;
+  const id = String(m?.id || m?.modelId || '');
+  if (/claude|gpt|o1|o3|o4/i.test(id)) return 'claude_gpt';
+  if (/argon/i.test(id)) return 'gemini_argon';
+  if (/gemini/i.test(id)) return 'gemini';
+  return '';
+}
+
+/** Derive per-family quota meters from per-model fractions when summary windows are absent. */
+function deriveMetersFromModels(models) {
+  const byFamily = new Map();
+  for (const m of Array.isArray(models) ? models : []) {
+    if (!m || m.kind === 'other' || m.kind === 'image') continue;
+    const fraction = Number(m.remainingFraction);
+    if (!Number.isFinite(fraction)) continue;
+    const family = inferModelFamily(m);
+    if (!family) continue;
+    const clamped = Math.max(0, Math.min(1, fraction));
+    const resetTime = typeof m.resetTime === 'string' ? m.resetTime : '';
+    const existing = byFamily.get(family);
+    if (!existing) {
+      byFamily.set(family, {
+        id: `${family}_5h`,
+        family,
+        window: '5h',
+        remainingFraction: clamped,
+        resetTime,
+      });
+    } else {
+      if (clamped < existing.remainingFraction) {
+        existing.remainingFraction = clamped;
+        if (resetTime) existing.resetTime = resetTime;
+      } else if (!existing.resetTime && resetTime) {
+        existing.resetTime = resetTime;
+      }
+    }
+  }
+  return DERIVED_FAMILIES.map((f) => byFamily.get(f)).filter(Boolean);
+}
+
 /**
  * Compact plan + quota view of one Cloud Code account (Antigravity or Gemini CLI):
  * the plan, the weekly / 5-hour windows, and the models on the plan (collapsed).
@@ -145,11 +188,20 @@ export function CloudCodeQuota({
       ? models
       : (Array.isArray(buckets) ? buckets : [])
           .filter((b) => b?.modelId && !/^tab_/i.test(b.modelId))
-          .map((b) => ({ id: b.modelId, label: b.modelId, family: '', kind: 'chat', remainingFraction: b.remainingFraction }));
+          .map((b) => ({
+            id: b.modelId,
+            label: b.modelId,
+            family: inferModelFamily(b),
+            kind: 'chat',
+            remainingFraction: b.remainingFraction,
+            resetTime: b.resetTime || '',
+          }));
   const chat = list.filter((m) => m.kind === 'chat');
   const images = list.filter((m) => m.kind === 'image');
   const others = list.filter((m) => m.kind === 'other');
   const showPct = !perModelHidden;
+  const effectiveWindows =
+    Array.isArray(windows) && windows.length ? windows : deriveMetersFromModels(chat);
   const groups = FAMILY_ORDER.map((f) => ({
     family: f,
     label: FAMILY_LABELS[f] || 'Khác',
@@ -179,9 +231,9 @@ export function CloudCodeQuota({
         {extra}
       </div>
 
-      {windows.length ? (
+      {effectiveWindows.length ? (
         <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
-          {windows.map((w) => (
+          {effectiveWindows.map((w) => (
             <WindowMeter key={w.id} w={w} />
           ))}
         </div>

@@ -1032,9 +1032,13 @@ export function parseAntigravityQuotaSummary(data) {
       const windowType = String(bucket.window || "").toLowerCase();
       const text = `${bucket.bucketId || ""} ${bucket.displayName || ""}`.toLowerCase();
       const window =
-        windowType === "weekly" || text.includes("weekly")
+        windowType === "weekly" || windowType === "week" || /\bweek(ly)?\b/.test(text)
           ? "weekly"
-          : windowType === "5h" || windowType === "daily" || /five hour|5h|daily/.test(text)
+          : windowType === "5h" ||
+              windowType === "daily" ||
+              windowType === "session" ||
+              windowType === "short" ||
+              /five[\s_-]*hour|5[\s_-]*h|daily|session|short|hour/.test(text)
             ? "5h"
             : "";
       if (!window) continue;
@@ -1156,6 +1160,10 @@ export function catalogChatModelIds(models) {
  * @returns {any}
  */
 export function mergeCloudCodeUsage(meta, usage, checkedAt) {
+  const hasBuckets = Array.isArray(usage.buckets) && usage.buckets.length > 0;
+  const hasWindows = Array.isArray(usage.windows) && usage.windows.length > 0;
+  const hasExistingBuckets = Array.isArray(meta?.quotaBuckets) && meta.quotaBuckets.length > 0;
+  const hasExistingWindows = Array.isArray(meta?.quotaWindows) && meta.quotaWindows.length > 0;
   return {
     ...(meta || {}),
     ...(usage.projectId ? { projectId: usage.projectId } : {}),
@@ -1163,8 +1171,8 @@ export function mergeCloudCodeUsage(meta, usage, checkedAt) {
     ...(usage.tierLabel ? { tierLabel: usage.tierLabel } : {}),
     ...(usage.quotaOk
       ? {
-          quotaBuckets: usage.buckets,
-          quotaWindows: usage.windows,
+          ...(hasBuckets || !hasExistingBuckets ? { quotaBuckets: usage.buckets } : {}),
+          ...(hasWindows || !hasExistingWindows ? { quotaWindows: usage.windows } : {}),
           perModelHidden: usage.perModelHidden
         }
       : {}),

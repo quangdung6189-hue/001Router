@@ -4894,10 +4894,25 @@ export function createDashboardRouter(storage, liveEvents = null) {
               tier: usage.tier || account.tier,
               tierLabel: usage.tierLabel || account.tierLabel,
               projectId: usage.projectId || account.projectId,
-              buckets: usage.buckets,
-              windows: usage.windows,
+              buckets:
+                Array.isArray(usage.buckets) && usage.buckets.length > 0
+                  ? usage.buckets
+                  : account.buckets?.length
+                    ? account.buckets
+                    : usage.buckets || [],
+              windows:
+                Array.isArray(usage.windows) && usage.windows.length > 0
+                  ? usage.windows
+                  : account.windows?.length
+                    ? account.windows
+                    : usage.windows || [],
               perModelHidden: usage.perModelHidden,
-              ...(usage.catalogOk ? { models: usage.models, defaultModelId: usage.defaultModelId } : {}),
+              ...(usage.catalogOk && Array.isArray(usage.models) && usage.models.length > 0
+                ? {
+                    models: usage.models,
+                    defaultModelId: usage.defaultModelId || account.defaultModelId
+                  }
+                : {}),
               checkedAt: new Date().toISOString(),
               live: true
             });
