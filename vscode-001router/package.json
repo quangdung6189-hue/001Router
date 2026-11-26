@@ -1,0 +1,136 @@
+{
+  "name": "001router-code",
+  "displayName": "001Router",
+  "description": "AI Coding Assistant powered by 001Router — Multi-Provider Model Selector (Provider -> Model) with Dynamic Power-Scaling Effort Slider & Password-Protected Router Sync for VS Code & Antigravity IDE.",
+  "version": "1.0.0",
+  "publisher": "001router",
+  "license": "MIT",
+  "icon": "media/icon.png",
+  "homepage": "https://github.com/dangquangdung2004/001router",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dangquangdung2004/001router.git"
+  },
+  "bugs": {
+    "url": "https://github.com/dangquangdung2004/001router/issues"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "AI",
+    "Chat",
+    "Programming Languages",
+    "Other"
+  ],
+  "keywords": [
+    "001router",
+    "ai",
+    "coding-assistant",
+    "claude",
+    "openai",
+    "gemini",
+    "antigravity",
+    "deepseek",
+    "multi-provider",
+    "openrouter"
+  ],
+  "activationEvents": [
+    "onView:001router.chatView",
+    "onCommand:001router.openPanel",
+    "onCommand:001router.connect",
+    "onCommand:001router.focus",
+    "onCommand:001router.newChat"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "001router-sidebar",
+          "title": "001Router",
+          "icon": "media/icon-activity.svg"
+        }
+      ]
+    },
+    "views": {
+      "001router-sidebar": [
+        {
+          "type": "webview",
+          "id": "001router.chatView",
+          "name": "001Router"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "001router.openPanel",
+        "title": "Open in Editor Tab",
+        "category": "001Router",
+        "icon": {
+          "light": "media/icon.svg",
+          "dark": "media/icon.svg"
+        }
+      },
+      {
+        "command": "001router.focus",
+        "title": "Focus or Unfocus Input",
+        "category": "001Router"
+      },
+      {
+        "command": "001router.connect",
+        "title": "Connect with Web Password",
+        "category": "001Router",
+        "icon": "$(key)"
+      },
+      {
+        "command": "001router.newChat",
+        "title": "New Chat",
+        "category": "001Router",
+        "icon": "$(add)"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "001router.openPanel",
+          "group": "navigation@99"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "001router.openPanel",
+          "when": "view == 001router.chatView",
+          "group": "navigation"
+        },
+        {
+          "command": "001router.connect",
+          "when": "view == 001router.chatView",
+          "group": "navigation"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "001router.focus",
+        "key": "ctrl+escape",
+        "mac": "cmd+escape"
+      }
+    ],
+    "configuration": {
+      "title": "001Router",
+      "properties": {
+        "001router.defaultServerUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:20128",
+          "description": "Default 001Router web server URL (e.g. http://127.0.0.1:20128 or your deployed 001Router domain)."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "package:vsix": "node ./scripts/pack-vsix.js",
+    "publish:ovsx": "npx ovsx publish ./001router-code-1.0.0.vsix",
+    "publish:vsce": "npx @vscode/vsce publish"
+  }
+}

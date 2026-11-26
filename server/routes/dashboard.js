@@ -33,6 +33,7 @@ import {
   compressText
 } from "../tokenSaver.js";
 import { getMergedPricingMap, normalizePricingRate } from "../pricing.js";
+import { buildExtensionCatalog } from "../extensionCatalog.js";
 import { getCatalogChatModelIds } from "../catalog/index.js";
 import {
   claudeToOpenAIRequest,
@@ -1723,6 +1724,80 @@ export function createDashboardRouter(storage, liveEvents = null) {
     return res.status(401).json({
       authenticated: false,
       error: "Unauthorized"
+    });
+  });
+
+  // Password-verified connect handshake for 001Router IDE extensions (VS Code / Antigravity IDE)
+  router.post("/extension/connect", async (req, res) => {
+    const clientIp = extractClientIp(req);
+    const rateCheck = loginLimiter.check(clientIp);
+    if (!rateCheck.allowed) {
+      res.setHeader("Retry-After", String(rateCheck.retryAfterSec));
+      return res.status(429).json({
+        error: "Quá nhiều lần nhập sai mật khẩu. Vui lòng thử lại sau.",
+        retryAfterSec: rateCheck.retryAfterSec
+      });
+    }
+
+    const body = req.body || {};
+    const password = typeof body.password === "string" ? body.password : "";
+    const clientNameRaw = typeof body.clientName === "string" ? body.clientName.trim() : "";
+    const clientName = clientNameRaw ? clientNameRaw.slice(0, 64) : "001Router VS Code Extension";
+    const storedHash = storage.getPasswordHash();
+
+    // Always execute bcrypt.compare for constant-time resistance
+    const compareOutcome = await bcrypt.compare(password || "\0", storedHash);
+    const valid = Boolean(password) && compareOutcome;
+
+    if (!valid) {
+      const failure = loginLimiter.recordFailure(clientIp);
+      return res.status(401).json({
+        error: "Mật khẩu web 001Router không chính xác",
+        ...(failure.retryAfterSec > 0
+          ? { locked: true, retryAfterSec: failure.retryAfterSec }
+          : {})
+      });
+    }
+
+    loginLimiter.recordSuccess(clientIp);
+
+    const keyVal = `sk-001r-${nanoid(24)}`;
+    const { keyHash, prefix, last4 } = deriveRouterKeyFields(keyVal);
+    const nowIso = new Date().toISOString();
+
+    const storedKey = await storage.update((data) => {
+      if (!Array.isArray(data.keys)) data.keys = [];
+      const existing = data.keys.find((k) => k && k.name === clientName);
+      if (existing) {
+        existing.keyHash = keyHash;
+        existing.prefix = prefix;
+        existing.last4 = last4;
+        existing.keyPreview = maskKey(keyVal);
+        existing.enabled = true;
+        delete existing.key;
+        return existing;
+      }
+      const created = {
+        id: nanoid(),
+        name: clientName,
+        keyHash,
+        prefix,
+        last4,
+        keyPreview: maskKey(keyVal),
+        enabled: true,
+        requestCount: 0,
+        lastUsedAt: null,
+        createdAt: nowIso
+      };
+      data.keys.push(created);
+      return created;
+    });
+
+    return res.json({
+      ok: true,
+      routerKey: keyVal,
+      keyName: storedKey.name,
+      catalog: buildExtensionCatalog(storage, storedKey)
     });
   });
 

@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" fill="none">
+  <defs>
+    <linearGradient id="r001-bg" x1="12" y1="8" x2="116" y2="120" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#F17856"/>
+      <stop offset="55%" stop-color="#E56A4A"/>
+      <stop offset="100%" stop-color="#C94A2B"/>
+    </linearGradient>
+    <linearGradient id="r001-inner" x1="20" y1="20" x2="108" y2="108" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#221D1B"/>
+      <stop offset="100%" stop-color="#141416"/>
+    </linearGradient>
+  </defs>
+  <rect x="6" y="6" width="116" height="116" rx="28" fill="url(#r001-bg)"/>
+  <rect x="13" y="13" width="102" height="102" rx="22" fill="url(#r001-inner)" stroke="#FFFFFF" stroke-opacity="0.12" stroke-width="1.5"/>
+  <!-- Routing branches -->
+  <path d="M40 64H56C63 64 66 42 78 40H89" stroke="#F8A28B" stroke-width="6.5" stroke-linecap="round"/>
+  <path d="M40 64H89" stroke="#FFFFFF" stroke-width="7.5" stroke-linecap="round"/>
+  <path d="M40 64H56C63 64 66 86 78 88H89" stroke="#F8A28B" stroke-width="6.5" stroke-linecap="round"/>
+  <!-- Source node -->
+  <circle cx="36" cy="64" r="10.5" fill="#E56A4A" stroke="#FFFFFF" stroke-width="3.5"/>
+  <!-- Target nodes -->
+  <circle cx="91" cy="40" r="8" fill="#10B981" stroke="#FFFFFF" stroke-width="3"/>
+  <circle cx="91" cy="64" r="8.5" fill="#F59E0B" stroke="#FFFFFF" stroke-width="3"/>
+  <circle cx="91" cy="88" r="8" fill="#EC4899" stroke="#FFFFFF" stroke-width="3"/>
+</svg>

@@ -3,6 +3,7 @@ import { createRouterAuthMiddleware, isRouterKeyModelAllowed } from "../auth.js"
 import { PRESETS, getPreset } from "../presets.js";
 import { estimateAnthropicInputTokens } from "../translator.js";
 import { getMergedPricingMap } from "../pricing.js";
+import { buildExtensionCatalog } from "../extensionCatalog.js";
 
 /**
  * Create the Express router mounted at `/v1` for unified OpenAI & Anthropic clients.
@@ -156,6 +157,14 @@ export function createV1Router(storage, routerService) {
       models,
       aliases: visibleAliases,
       combos: visibleCombos
+    });
+  });
+
+  // Structured provider -> model -> effort catalog for IDE extensions (VS Code / Antigravity IDE)
+  router.get("/extension/catalog", (req, res) => {
+    return res.json({
+      ok: true,
+      catalog: buildExtensionCatalog(storage, req.routerKey || null)
     });
   });
 
