@@ -14,11 +14,11 @@ Official IDE extension for **001Router** — connect your IDE directly to your p
 1. Open **Antigravity IDE** or **VS Code**
 2. Open the **Extensions** sidebar (`Ctrl+Shift+X`)
 3. Click **`...` (Views and More Actions)** -> **Install from VSIX...**
-4. Select `001router-code-1.0.0.vsix`
+4. Select `001router-code-1.1.0.vsix`
 
 Or via CLI:
 ```bash
-code --install-extension 001router-code-1.0.0.vsix
+code --install-extension 001router-code-1.1.0.vsix
 ```
 
 ## Publishing to the Community (Open VSX & VS Code Marketplace)
@@ -28,7 +28,7 @@ code --install-extension 001router-code-1.0.0.vsix
 2. Run:
 ```bash
 npm run package:vsix
-npx ovsx publish 001router-code-1.0.0.vsix -p <YOUR_OPEN_VSX_TOKEN>
+npx ovsx publish 001router-code-1.1.0.vsix -p <YOUR_OPEN_VSX_TOKEN>
 ```
 
 ### 2. Visual Studio Code Marketplace

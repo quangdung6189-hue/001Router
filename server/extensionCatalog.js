@@ -246,6 +246,127 @@ function formatModelDisplayName(modelId) {
   return raw;
 }
 
+const PROVIDER_LOGO_FILES = Object.freeze({
+  openai: "openai.png",
+  anthropic: "anthropic.png",
+  claude: "claude.png",
+  antigravity: "antigravity.png",
+  gemini: "gemini.png",
+  "gemini-cli": "gemini-cli.png",
+  google: "gemini.png",
+  deepseek: "deepseek.png",
+  xai: "xai.png",
+  grok: "xai.png",
+  qwen: "qwen.png",
+  alibaba: "qwen.png",
+  kimi: "kimi.png",
+  "kimi-coding": "kimi-coding.png",
+  glm: "glm.png",
+  "glm-cn": "glm.png",
+  groq: "groq.png",
+  openrouter: "openrouter.png",
+  mistral: "mistral.png",
+  cohere: "cohere.png",
+  nvidia: "nvidia.png",
+  cerebras: "cerebras.png",
+  sambanova: "sambanova.png",
+  huggingface: "huggingface.png",
+  perplexity: "perplexity.png",
+  together: "together.png",
+  fireworks: "fireworks.png",
+  minimax: "minimax.png",
+  "minimax-cn": "minimax.png",
+  muse: "muse.png",
+  "meta-muse": "muse.png",
+  ollama: "ollama.png",
+  "ollama-local": "ollama.png",
+  azure: "azure.png",
+  bedrock: "bedrock.png",
+  vertex: "vertex.png",
+  gitlab: "gitlab.png",
+  vercel: "vercel-ai-gateway.png",
+  "vercel-ai-gateway": "vercel-ai-gateway.png",
+  siliconflow: "siliconflow.png",
+  codex: "codex.png",
+  venice: "venice.png",
+  nous: "nous.png",
+  xiaomi: "xiaomi-mimo.png",
+  "xiaomi-mimo": "xiaomi-mimo.png",
+  agentrouter: "agentrouter.png",
+  cloudflare: "cloudflare-ai.png",
+  "cloudflare-ai": "cloudflare-ai.png",
+  chutes: "chutes.png",
+  featherless: "featherless.png",
+  novita: "novita.png",
+  nebius: "nebius.png",
+  hyperbolic: "hyperbolic.png",
+  byteplus: "byteplus.png",
+  baidu: "baidu.png",
+  tencent: "tencent.png",
+  reka: "reka.png",
+  lmstudio: "local-device.png",
+  vllm: "local-device.png",
+  llamacpp: "local-device.png",
+  "local-device": "local-device.png"
+});
+
+export function resolveProviderLogoFile(provider) {
+  const keys = [
+    String(provider?.preset || "").toLowerCase().trim(),
+    String(provider?.slug || "").toLowerCase().trim(),
+    String(provider?.name || "").toLowerCase().trim()
+  ].filter(Boolean);
+
+  for (const k of keys) {
+    if (Object.hasOwn(PROVIDER_LOGO_FILES, k)) return PROVIDER_LOGO_FILES[k];
+  }
+  const combined = keys.join(" ");
+  if (combined.includes("antigravity")) return "antigravity.png";
+  if (combined.includes("anthropic") || combined.includes("claude")) return "anthropic.png";
+  if (combined.includes("openai") || combined.includes("codex")) return "openai.png";
+  if (combined.includes("gemini") || combined.includes("google")) return "gemini.png";
+  if (combined.includes("xai") || combined.includes("grok")) return "xai.png";
+  if (combined.includes("deepseek")) return "deepseek.png";
+  if (combined.includes("qwen") || combined.includes("alibaba")) return "qwen.png";
+  if (combined.includes("kimi") || combined.includes("moonshot")) return "kimi.png";
+  if (combined.includes("glm") || combined.includes("zhipu")) return "glm.png";
+  if (combined.includes("groq")) return "groq.png";
+  if (combined.includes("openrouter")) return "openrouter.png";
+  if (combined.includes("mistral")) return "mistral.png";
+  if (combined.includes("minimax")) return "minimax.png";
+  if (combined.includes("ollama")) return "ollama.png";
+  if (combined.includes("agentrouter")) return "agentrouter.png";
+  return "";
+}
+
+export function resolveModelLogoFile(modelId, provider) {
+  const lower = String(modelId || "").toLowerCase().trim();
+  if (lower.includes("claude") || lower.includes("sonnet") || lower.includes("opus") || lower.includes("haiku") || lower.includes("fable")) {
+    return "claude.png";
+  }
+  if (lower.includes("gemini") || lower.includes("gemma") || lower.includes("imagen")) {
+    return "gemini.png";
+  }
+  if (lower.includes("codex")) return "codex.png";
+  if (lower.includes("gpt-") || lower.includes("chatgpt") || /^o[134]($|-)/.test(lower) || lower.includes("openai/")) {
+    return "openai.png";
+  }
+  if (lower.includes("grok") || lower.includes("x-ai/")) return "xai.png";
+  if (lower.includes("deepseek")) return "deepseek.png";
+  if (lower.includes("qwen") || lower.includes("qwq")) return "qwen.png";
+  if (lower.includes("kimi") || lower.includes("moonshot")) return "kimi.png";
+  if (lower.includes("glm") || lower.includes("zhipu")) return "glm.png";
+  if (lower.includes("llama") || lower.includes("meta-llama") || lower.includes("meta/")) return "muse.png";
+  if (lower.includes("mistral") || lower.includes("mixtral") || lower.includes("codestral") || lower.includes("pixtral")) {
+    return "mistral.png";
+  }
+  if (lower.includes("minimax") || lower.includes("abab")) return "minimax.png";
+  if (lower.includes("command-") || lower.includes("cohere")) return "cohere.png";
+  if (lower.includes("sonar") || lower.includes("perplexity")) return "perplexity.png";
+  if (lower.includes("mimo")) return "xiaomi-mimo.png";
+  return resolveProviderLogoFile(provider);
+}
+
 function buildModelDescription(modelId, catalogEntry, provider) {
   if (catalogEntry?.description && typeof catalogEntry.description === "string") {
     return catalogEntry.description;
@@ -307,6 +428,7 @@ export function buildExtensionCatalog(storage, routerKey = null) {
         fullId,
         label: formatModelDisplayName(modelId),
         description: buildModelDescription(modelId, cat, provider),
+        logoFile: resolveModelLogoFile(modelId, provider),
         kind: cat?.kind || "chat",
         vision: Boolean(cat?.vision),
         reasoning: Boolean(cat?.reasoning || effort.maxPower >= 4),
@@ -325,6 +447,7 @@ export function buildExtensionCatalog(storage, routerKey = null) {
       formatType: provider.formatType || "openai",
       color: presetDef?.color || "#E56A4A",
       monogram: presetDef?.monogram || String(provider.name || provider.slug || "01").slice(0, 2).toUpperCase(),
+      logoFile: resolveProviderLogoFile(provider),
       connectedCount: isKeyOptional ? Math.max(1, enabledKeys.length) : activeKeys.length,
       totalKeys: enabledKeys.length,
       keyOptional: isKeyOptional,

@@ -2,7 +2,7 @@
   "name": "001router-code",
   "displayName": "001Router",
   "description": "AI Coding Assistant powered by 001Router — Multi-Provider Model Selector (Provider -> Model) with Dynamic Power-Scaling Effort Slider & Password-Protected Router Sync for VS Code & Antigravity IDE.",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "publisher": "001router",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -130,7 +130,7 @@
   },
   "scripts": {
     "package:vsix": "node ./scripts/pack-vsix.js",
-    "publish:ovsx": "npx ovsx publish ./001router-code-1.0.0.vsix",
+    "publish:ovsx": "npx ovsx publish ./001router-code-1.1.0.vsix",
     "publish:vsce": "npx @vscode/vsce publish"
   }
 }

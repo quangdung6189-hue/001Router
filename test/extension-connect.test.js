@@ -107,7 +107,9 @@ describe("001Router IDE Extension API & VSIX Packaging", () => {
     assert.equal(providers.length, 3);
 
     const ant = providers.find((p) => p.slug === "anthropic");
+    assert.equal(ant.logoFile, "anthropic.png");
     const opus = ant.models.find((m) => m.id === "claude-opus-5-5");
+    assert.equal(opus.logoFile, "claude.png");
     const haiku = ant.models.find((m) => m.id === "claude-haiku-5-5");
     assert.equal(opus.effort.maxEffort, "max");
     assert.deepEqual(
@@ -121,13 +123,17 @@ describe("001Router IDE Extension API & VSIX Packaging", () => {
     );
 
     const oai = providers.find((p) => p.slug === "openai");
+    assert.equal(oai.logoFile, "openai.png");
     const gpt52 = oai.models.find((m) => m.id === "gpt-5.2");
+    assert.equal(gpt52.logoFile, "openai.png");
     const mini = oai.models.find((m) => m.id === "gpt-4o-mini");
     assert.equal(gpt52.effort.maxEffort, "xhigh");
     assert.equal(mini.effort.maxEffort, "medium");
 
     const ag = providers.find((p) => p.slug === "antigravity");
+    assert.equal(ag.logoFile, "antigravity.png");
     const neon = ag.models.find((m) => m.id === "gemini-4-neon");
+    assert.equal(neon.logoFile, "gemini.png");
     const lite = ag.models.find((m) => m.id === "gemini-4-flash-lite");
     assert.equal(neon.effort.maxEffort, "xhigh");
     assert.equal(lite.effort.maxEffort, "medium");
@@ -159,5 +165,10 @@ describe("001Router IDE Extension API & VSIX Packaging", () => {
     assert.ok(asLatin1.includes("extension/extension.js"));
     assert.ok(asLatin1.includes("extension/media/icon.png"));
     assert.ok(asLatin1.includes("extension/media/webview.js"));
+    assert.ok(asLatin1.includes("extension/media/providers/claude.png"));
+    assert.ok(asLatin1.includes("extension/media/providers/openai.png"));
+    assert.ok(asLatin1.includes("extension/media/providers/gemini.png"));
+    assert.ok(asLatin1.includes("extension/media/providers/antigravity.png"));
+    assert.ok(asLatin1.includes("extension/media/providers/xai.png"));
   });
 });

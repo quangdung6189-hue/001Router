@@ -228,10 +228,82 @@ function escapeXml(str) {
     .replace(/'/g, "&apos;");
 }
 
+const WEB_PROVIDERS_DIR = path.join(ROOT_DIR, "web", "public", "providers");
+const EXT_PROVIDERS_DIR = path.join(EXT_DIR, "media", "providers");
+
+const BUNDLED_PROVIDER_LOGOS = [
+  "agentrouter.png",
+  "anthropic.png",
+  "antigravity.png",
+  "azure.png",
+  "baidu.png",
+  "bedrock.png",
+  "byteplus.png",
+  "cerebras.png",
+  "chutes.png",
+  "claude.png",
+  "cloudflare-ai.png",
+  "codex.png",
+  "cohere.png",
+  "deepseek.png",
+  "featherless.png",
+  "fireworks.png",
+  "gemini.png",
+  "gemini-cli.png",
+  "github.png",
+  "gitlab.png",
+  "glm.png",
+  "groq.png",
+  "huggingface.png",
+  "hyperbolic.png",
+  "kimi.png",
+  "kimi-coding.png",
+  "local-device.png",
+  "minimax.png",
+  "mistral.png",
+  "muse.png",
+  "nebius.png",
+  "nous.png",
+  "novita.png",
+  "nvidia.png",
+  "ollama.png",
+  "openai.png",
+  "openrouter.png",
+  "perplexity.png",
+  "qwen.png",
+  "reka.png",
+  "sambanova.png",
+  "siliconflow.png",
+  "tencent.png",
+  "together.png",
+  "venice.png",
+  "vercel-ai-gateway.png",
+  "vertex.png",
+  "xai.png",
+  "xiaomi-mimo.png"
+];
+
+function syncProviderLogos() {
+  fs.mkdirSync(EXT_PROVIDERS_DIR, { recursive: true });
+  const copied = [];
+  for (const filename of BUNDLED_PROVIDER_LOGOS) {
+    const src = path.join(WEB_PROVIDERS_DIR, filename);
+    const dst = path.join(EXT_PROVIDERS_DIR, filename);
+    if (fs.existsSync(src)) {
+      fs.copyFileSync(src, dst);
+      copied.push(`media/providers/${filename}`);
+    } else if (fs.existsSync(dst)) {
+      copied.push(`media/providers/${filename}`);
+    }
+  }
+  return copied;
+}
+
 function packVsix() {
   const pkg = JSON.parse(fs.readFileSync(path.join(EXT_DIR, "package.json"), "utf8"));
   const iconPng = renderBrandPng(128);
   fs.writeFileSync(path.join(EXT_DIR, "media", "icon.png"), iconPng);
+  const bundledLogos = syncProviderLogos();
 
   const contentTypesXml = `<?xml version="1.0" encoding="utf-8"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
@@ -286,7 +358,8 @@ function packVsix() {
     "media/icon-activity.svg",
     "media/icon.png",
     "media/webview.css",
-    "media/webview.js"
+    "media/webview.js",
+    ...bundledLogos
   ];
 
   const entries = [

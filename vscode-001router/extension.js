@@ -824,6 +824,9 @@ class Router001Controller {
     const logoUri = webview.asWebviewUri(
       vscode.Uri.joinPath(this.context.extensionUri, "media", "icon.svg")
     );
+    const providersUri = webview.asWebviewUri(
+      vscode.Uri.joinPath(this.context.extensionUri, "media", "providers")
+    );
 
     return `<!DOCTYPE html>
 <html lang="vi">
@@ -834,7 +837,7 @@ class Router001Controller {
   <title>001Router</title>
   <link rel="stylesheet" href="${cssUri}" />
 </head>
-<body data-surface="${surface}" data-logo-uri="${logoUri}">
+<body data-surface="${surface}" data-logo-uri="${logoUri}" data-providers-uri="${providersUri}">
   <div id="app"></div>
   <script nonce="${nonce}" src="${jsUri}"></script>
 </body>
