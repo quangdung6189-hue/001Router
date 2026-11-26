@@ -164,7 +164,8 @@ export const ANTIGRAVITY_MODEL_ALIASES = Object.freeze({
  *   discoveryHeaders: (token: string) => Record<string, string>,
  *   loadCodeAssistBody: () => any,
  *   chatHeaders: (token: string, options?: { model?: string }) => Record<string, string>,
- *   resolveModel: (model: string) => string
+ *   resolveModel: (model: string) => string,
+ *   hasModelAlias?: (model: string) => boolean
  * }} CloudCodeFlavor
  */
 
@@ -191,7 +192,8 @@ const CLOUD_CODE_FLAVORS = {
     discoveryHeaders: (token) => buildGeminiCliDiscoveryHeaders(token),
     loadCodeAssistBody: () => ({ metadata: geminiCliClientMetadata(), mode: 1 }),
     chatHeaders: (token, options) => buildGeminiCliHeaders(token, options),
-    resolveModel: (model) => model
+    resolveModel: (model) => model,
+    hasModelAlias: () => false
   },
   antigravity: {
     id: "antigravity",
@@ -223,7 +225,8 @@ const CLOUD_CODE_FLAVORS = {
     discoveryHeaders: (token) => buildAntigravityHeaders(token),
     loadCodeAssistBody: () => ({ metadata: geminiCliClientMetadata() }),
     chatHeaders: (token) => buildAntigravityHeaders(token),
-    resolveModel: (model) => ANTIGRAVITY_MODEL_ALIASES[model] || model
+    resolveModel: (model) => ANTIGRAVITY_MODEL_ALIASES[model] || model,
+    hasModelAlias: (model) => Object.hasOwn(ANTIGRAVITY_MODEL_ALIASES, model)
   }
 };
 
@@ -1285,6 +1288,7 @@ export function resolveCatalogModel(requested, models, body) {
     const stemMatchForEffort = id.match(/^(.*?)-(low|medium|high|minimal|xhigh|max)$/i);
     const effortStem = stemMatchForEffort ? stemMatchForEffort[1] : id;
     if (ids.has(`${effortStem}-${reqEffort}`)) return `${effortStem}-${reqEffort}`;
+    if (reqEffort === "max" && ids.has(`${effortStem}-xhigh`)) return `${effortStem}-xhigh`;
     if ((reqEffort === "xhigh" || reqEffort === "max") && ids.has(`${effortStem}-high`)) {
       return `${effortStem}-high`;
     }

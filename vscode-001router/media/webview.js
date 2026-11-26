@@ -4,8 +4,6 @@
   const vscode = acquireVsCodeApi();
   const root = document.getElementById("app");
   const surface = document.body.dataset.surface || "sidebar";
-  const logoUri = document.body.dataset.logoUri || "";
-  const aiFaceUri = document.body.dataset.aiFaceUri || "";
   const providersBaseUri = (document.body.dataset.providersUri || "").replace(/\/+$/, "");
 
   const REDUCED_MOTION_MQ = window.matchMedia
@@ -25,53 +23,64 @@
     "bat"
   ]);
 
+  // Precision geometric architectural SVG icon set (24x24 grid, 1.65px stroke, decorative aria-hidden)
   const ICONS = {
+    brandPrism:
+      '<svg class="r001-svg" aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 21 7 21 17 12 22 3 17 3 7 12 2"/><polyline points="3.5 7.5 12 12.2 20.5 7.5"/><line x1="12" y1="22" x2="12" y2="12.2"/></svg>',
     popout:
-      '<svg class="r001-svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>',
+      '<svg class="r001-svg" aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6"/><path d="M9 21H3v-6"/><path d="M21 3l-7 7"/><path d="M3 21l7-7"/></svg>',
     bookmark:
-      '<svg class="r001-svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h12a1 1 0 0 1 1 1v17l-7-4-7 4V4a1 1 0 0 1 1-1z"/></svg>',
+      '<svg class="r001-svg" aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h12a1 1 0 0 1 1 1v17l-7-4-7 4V4a1 1 0 0 1 1-1z"/></svg>',
     bookmarkFilled:
-      '<svg class="r001-svg" width="15" height="15" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h12a1 1 0 0 1 1 1v17l-7-4-7 4V4a1 1 0 0 1 1-1z"/></svg>',
+      '<svg class="r001-svg" aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h12a1 1 0 0 1 1 1v17l-7-4-7 4V4a1 1 0 0 1 1-1z"/></svg>',
     history:
-      '<svg class="r001-svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15.5 14"/></svg>',
+      '<svg class="r001-svg" aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><polyline points="12 7.5 12 12 15.2 13.8"/></svg>',
     newChat:
-      '<svg class="r001-svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.5 8.5 0 0 1-8.5 8.5c-1.3 0-2.6-.3-3.7-.8L3 21l1.8-5.3A8.5 8.5 0 1 1 21 11.5z"/><line x1="12" y1="8" x2="12" y2="15"/><line x1="8.5" y1="11.5" x2="15.5" y2="11.5"/></svg>',
+      '<svg class="r001-svg" aria-hidden="true" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="4"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/></svg>',
     plus:
-      '<svg class="r001-svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>',
+      '<svg class="r001-svg" aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>',
     slash:
-      '<svg class="r001-svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="15" y1="4" x2="9" y2="20"/></svg>',
+      '<svg class="r001-svg" aria-hidden="true" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="15.5" y1="4" x2="8.5" y2="20"/></svg>',
     bolt:
-      '<svg class="r001-svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>',
+      '<svg class="r001-svg" aria-hidden="true" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 4 14 12 14 11 22 20 10 12 10 13 2"/></svg>',
+    sliders:
+      '<svg class="r001-svg" aria-hidden="true" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><line x1="4" y1="7" x2="20" y2="7"/><circle cx="9" cy="7" r="2.2" fill="currentColor"/><line x1="4" y1="17" x2="20" y2="17"/><circle cx="15" cy="17" r="2.2" fill="currentColor"/></svg>',
     arrowUp:
-      '<svg class="r001-svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="6 11 12 5 18 11"/></svg>',
+      '<svg class="r001-svg" aria-hidden="true" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="6 11 12 5 18 11"/></svg>',
     stop:
-      '<svg class="r001-svg" width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><rect x="5" y="5" width="14" height="14" rx="2.5"/></svg>',
+      '<svg class="r001-svg" aria-hidden="true" width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><rect x="5" y="5" width="14" height="14" rx="2.5"/></svg>',
     back:
-      '<svg class="r001-svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>',
+      '<svg class="r001-svg" aria-hidden="true" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="11 18 5 12 11 6"/></svg>',
     refresh:
-      '<svg class="r001-svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>',
+      '<svg class="r001-svg" aria-hidden="true" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>',
     check:
-      '<svg class="r001-svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>',
+      '<svg class="r001-svg" aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>',
     chevronRight:
-      '<svg class="r001-svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>',
+      '<svg class="r001-svg" aria-hidden="true" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>',
     file:
-      '<svg class="r001-svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>',
+      '<svg class="r001-svg" aria-hidden="true" width="12.5" height="12.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>',
     scissors:
-      '<svg class="r001-svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><line x1="20" y1="4" x2="8.12" y2="15.88"/><line x1="14.47" y1="14.48" x2="20" y2="20"/><line x1="8.12" y1="8.12" x2="12" y2="12"/></svg>',
+      '<svg class="r001-svg" aria-hidden="true" width="12.5" height="12.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="2.8"/><circle cx="6" cy="18" r="2.8"/><line x1="20" y1="4" x2="8.12" y2="15.88"/><line x1="14.47" y1="14.48" x2="20" y2="20"/><line x1="8.12" y1="8.12" x2="12" y2="12"/></svg>',
     folder:
-      '<svg class="r001-svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>',
+      '<svg class="r001-svg" aria-hidden="true" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>',
+    folderTree:
+      '<svg class="r001-svg" aria-hidden="true" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="6" height="5" rx="1.2"/><rect x="14" y="10" width="7" height="4.5" rx="1.2"/><rect x="14" y="17" width="7" height="4.5" rx="1.2"/><path d="M6 8v11h8"/><line x1="6" y1="12.2" x2="14" y2="12.2"/></svg>',
+    search:
+      '<svg class="r001-svg" aria-hidden="true" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><line x1="20" y1="20" x2="16.2" y2="16.2"/></svg>',
     eye:
-      '<svg class="r001-svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>',
+      '<svg class="r001-svg" aria-hidden="true" width="12.5" height="12.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-7.5 11-7.5S23 12 23 12s-4 7.5-11 7.5S1 12 1 12z"/><circle cx="12" cy="12" r="2.8"/></svg>',
     eyeOff:
-      '<svg class="r001-svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/></svg>',
+      '<svg class="r001-svg" aria-hidden="true" width="12.5" height="12.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 19.5c-7 0-11-7.5-11-7.5a18.45 18.45 0 0 1 5.06-5.5"/><path d="M9.9 4.7A9.12 9.12 0 0 1 12 4.5c7 0 11 7.5 11 7.5a18.5 18.5 0 0 1-2.16 3.19"/><line x1="2" y1="2" x2="22" y2="22"/></svg>',
     copy:
-      '<svg class="r001-svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>',
+      '<svg class="r001-svg" aria-hidden="true" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>',
     apply:
-      '<svg class="r001-svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 10 4 15 9 20"/><path d="M20 4v7a4 4 0 0 1-4 4H4"/></svg>',
+      '<svg class="r001-svg" aria-hidden="true" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 10 4 15 9 20"/><path d="M20 4v7a4 4 0 0 1-4 4H4"/></svg>',
     terminal:
-      '<svg class="r001-svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>',
+      '<svg class="r001-svg" aria-hidden="true" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>',
     brain:
-      '<svg class="r001-svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M12 5v13"/></svg>'
+      '<svg class="r001-svg" aria-hidden="true" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="2.6"/><circle cx="5.5" cy="7.5" r="2"/><circle cx="18.5" cy="7.5" r="2"/><circle cx="5.5" cy="16.5" r="2"/><circle cx="18.5" cy="16.5" r="2"/><line x1="7.2" y1="8.7" x2="9.8" y2="10.6"/><line x1="16.8" y1="8.7" x2="14.2" y2="10.6"/><line x1="7.2" y1="15.3" x2="9.8" y2="13.4"/><line x1="16.8" y1="15.3" x2="14.2" y2="13.4"/></svg>',
+    blueprint:
+      '<svg class="r001-svg" aria-hidden="true" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2.5"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg>'
   };
 
   const LIGHT_PLATE_FILES = new Set([
@@ -107,49 +116,60 @@
   const EFFORT_THEME = {
     low: {
       color: "#10B981",
-      accent: "#06B6D4",
-      glow: "rgba(16, 185, 129, 0.44)",
-      badge: "ECO · FAST",
+      accent: "#2DD4BF",
+      glow: "rgba(16, 185, 129, 0.48)",
+      badge: "AETHER · LOW",
+      realm: "Làn sương Ngọc Lục — phản hồi tức thì & tiết kiệm",
       rgbA: [16, 185, 129],
-      rgbB: [6, 182, 212]
+      rgbB: [45, 212, 191],
+      rgbC: [110, 231, 183]
     },
     medium: {
-      color: "#3B82F6",
+      color: "#38BDF8",
       accent: "#6366F1",
-      glow: "rgba(59, 130, 246, 0.5)",
-      badge: "BALANCED",
-      rgbA: [59, 130, 246],
-      rgbB: [99, 102, 241]
+      glow: "rgba(56, 189, 248, 0.54)",
+      badge: "ASTRAL · MED",
+      realm: "Tinh vân Lam Ngọc — cân bằng tốc độ & phân tích",
+      rgbA: [56, 189, 248],
+      rgbB: [99, 102, 241],
+      rgbC: [129, 140, 248]
     },
     high: {
-      color: "#E56A4A",
+      color: "#F97316",
       accent: "#F59E0B",
-      glow: "rgba(229, 106, 74, 0.6)",
-      badge: "HIGH POWER",
-      rgbA: [245, 158, 11],
-      rgbB: [229, 106, 74]
+      glow: "rgba(249, 115, 22, 0.64)",
+      badge: "SOLAR · HIGH",
+      realm: "Siêu tân tinh Nhật Hoa — suy luận đa tầng sâu sắc",
+      rgbA: [249, 115, 22],
+      rgbB: [251, 191, 36],
+      rgbC: [251, 113, 133]
     },
     xhigh: {
       color: "#EC4899",
       accent: "#A855F7",
-      glow: "rgba(192, 132, 252, 0.78)",
+      glow: "rgba(236, 72, 153, 0.8)",
       badge: "SINGULARITY · XHIGH",
+      realm: "Chân trời Sự kiện — huyền ảo cực hạn & tư duy sâu nhất",
       rgbA: [236, 72, 153],
-      rgbB: [168, 85, 247]
+      rgbB: [168, 85, 247],
+      rgbC: [253, 224, 71]
     },
     max: {
-      color: "#C084FC",
-      accent: "#EC4899",
-      glow: "rgba(168, 85, 247, 0.82)",
+      color: "#D946EF",
+      accent: "#A855F7",
+      glow: "rgba(217, 70, 239, 0.84)",
       badge: "SINGULARITY · MAX",
-      rgbA: [168, 85, 247],
-      rgbB: [236, 72, 153]
+      realm: "Hố Đen Vô Cực — giải phóng toàn bộ năng lực suy luận",
+      rgbA: [217, 70, 239],
+      rgbB: [168, 85, 247],
+      rgbC: [253, 224, 71]
     }
   };
 
   const SLASH_COMMANDS = [
     { cmd: "/provider", desc: "Mở bộ chọn Provider -> Model đồng bộ" },
     { cmd: "/effort", desc: "Tinh chỉnh sức mạnh Effort (Low / Med / High / XHigh / Max)" },
+    { cmd: "/workspace", desc: "Xem toàn bộ cây thư mục dự án đang mở" },
     { cmd: "/sync", desc: "Đồng bộ lại Antigravity, CLI & VS Code ngay lập tức" },
     { cmd: "/run ", desc: "Chạy lệnh Terminal trực tiếp ngay trong khung chat" },
     { cmd: "/new", desc: "Bắt đầu cuộc trò chuyện mới" },
@@ -163,8 +183,17 @@
     selection: null,
     mode: "auto",
     autoActiveFile: true,
+    autoWorkspace: true,
     envSync: { ideName: "VS Code", ideKind: "vscode", autoSyncedFrom: null, cliTools: [] },
-    editorContext: { hasWorkspaceFolder: false, workspaceName: "", workingDir: "", activeFile: null, openTabs: [] },
+    editorContext: {
+      hasWorkspaceFolder: false,
+      hasProjectFolder: false,
+      workspaceName: "",
+      workingDir: "",
+      activeFile: null,
+      openTabs: [],
+      workspaceSummary: null
+    },
     sessions: [],
     activeSessionId: null,
     draft: "",
@@ -183,22 +212,29 @@
     inspectingProviderSlug: null,
     providerSearch: "",
     modelSearch: "",
+    workspaceSearch: "",
     copiedBlockId: null,
-    fxPaused: false
+    fxPaused: false,
+    isTypingDraft: false
   };
 
   const fxState = {
     ratio: 0.33,
     singularity: 0,
     targetSingularity: 0,
-    rgbA: [59, 130, 246],
+    lastTierId: "",
+    rgbA: [56, 189, 248],
     rgbB: [99, 102, 241],
+    rgbC: [129, 140, 248],
     rafId: null,
     particles: [],
+    bursts: [],
     time: 0
   };
 
   let liveTimerInterval = null;
+  let typingIdleTimer = null;
+  let botSvgCounter = 0;
   const codeBlockCache = new Map();
 
   function escapeHtml(str) {
@@ -295,29 +331,130 @@
     }
     return (
       `<span class="r001-logo-plate ${sizeClass}">` +
-      `<span class="r001-logo-monogram" style="background:${escapeHtml(color || "#d97757")}">${escapeHtml(monogram || "01")}</span>` +
+      `<span class="r001-logo-monogram" style="background:${escapeHtml(color || "#e57452")}">${escapeHtml(monogram || "01")}</span>` +
       `</span>`
     );
   }
 
   /**
-   * Render the 3D Cybernetic AI Face Core (replaces redundant model name in chat headers & hero).
+   * Render Axiom — Grok-inspired expressive animated SVG companion bot with live facial expressions,
+   * blinking, gaze tracking, voice-waveform mouth, scanning optics, and singularity star-eyes.
    */
-  function render3DAiFaceCore(sizeVariant, phase) {
-    const cleanPhase = phase || "idle";
-    return (
-      `<div class="r001-ai-core ${escapeHtml(sizeVariant)}" data-phase="${escapeHtml(cleanPhase)}" data-fx-paused="${state.fxPaused ? "1" : "0"}">` +
-      `<span class="r001-ai-halo" aria-hidden="true"></span>` +
-      `<span class="r001-ai-ring ring-a" aria-hidden="true"></span>` +
-      `<span class="r001-ai-ring ring-b" aria-hidden="true"></span>` +
-      `<div class="r001-ai-bust-frame">` +
-      (aiFaceUri
-        ? `<img class="r001-ai-bust-img" src="${escapeHtml(aiFaceUri)}" alt="001Router 3D AI Core" />`
-        : `<img class="r001-ai-bust-img" src="${escapeHtml(logoUri)}" alt="001Router AI Core" />`) +
-      `<span class="r001-ai-visor-scan" aria-hidden="true"></span>` +
-      `</div>` +
-      `</div>`
-    );
+  function renderAxiomBot(sizeVariant, mood, isSingularity) {
+    const cleanMood = mood || "idle";
+    const uid = `ax${++botSvgCounter}`;
+    return `
+      <div class="axiom-bot ${escapeHtml(sizeVariant)}" data-mood="${escapeHtml(cleanMood)}" data-singularity="${isSingularity ? "1" : "0"}" data-fx-paused="${state.fxPaused ? "1" : "0"}" role="img" aria-label="Axiom AI">
+        <span class="axiom-bot-aura" aria-hidden="true"></span>
+        <span class="axiom-bot-ring" aria-hidden="true"></span>
+        <svg class="axiom-bot-svg" viewBox="0 0 100 100" aria-hidden="true">
+          <defs>
+            <linearGradient id="${uid}-shell" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0%" stop-color="#353d4f" />
+              <stop offset="48%" stop-color="#1e2430" />
+              <stop offset="100%" stop-color="#10131b" />
+            </linearGradient>
+            <linearGradient id="${uid}-rim" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="rgba(255,255,255,0.42)" />
+              <stop offset="100%" stop-color="rgba(255,255,255,0.06)" />
+            </linearGradient>
+            <linearGradient id="${uid}-visor" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="#0b101b" />
+              <stop offset="100%" stop-color="#05070c" />
+            </linearGradient>
+            <linearGradient id="${uid}-eye" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="#ffffff" />
+              <stop offset="35%" stop-color="var(--bot-accent)" />
+              <stop offset="100%" stop-color="var(--bot-accent-2)" />
+            </linearGradient>
+            <linearGradient id="${uid}-scan" x1="0" y1="0" x2="1" y2="0">
+              <stop offset="0%" stop-color="transparent" />
+              <stop offset="50%" stop-color="var(--bot-accent)" stop-opacity="0.7" />
+              <stop offset="100%" stop-color="transparent" />
+            </linearGradient>
+            <clipPath id="${uid}-visor-clip">
+              <rect x="20" y="34" width="60" height="40" rx="14" />
+            </clipPath>
+          </defs>
+
+          <g class="axiom-head-group">
+            <!-- Telemetry Antenna -->
+            <line x1="50" y1="12" x2="50" y2="23" stroke="#535f78" stroke-width="2.6" stroke-linecap="round" />
+            <circle class="axiom-antenna-tip" cx="50" cy="10.5" r="4.2" />
+            <circle cx="48.8" cy="9.2" r="1.3" fill="#ffffff" opacity="0.85" />
+
+            <!-- Side Ear Acoustic Pods -->
+            <rect x="8.5" y="43" width="6.5" height="20" rx="3.2" fill="#232a38" stroke="rgba(255,255,255,0.16)" stroke-width="1" />
+            <rect x="85" y="43" width="6.5" height="20" rx="3.2" fill="#232a38" stroke="rgba(255,255,255,0.16)" stroke-width="1" />
+            <line x1="11.8" y1="48" x2="11.8" y2="58" stroke="var(--bot-accent)" stroke-width="1.6" stroke-linecap="round" opacity="0.75" />
+            <line x1="88.2" y1="48" x2="88.2" y2="58" stroke="var(--bot-accent)" stroke-width="1.6" stroke-linecap="round" opacity="0.75" />
+
+            <!-- Sculpted Titanium Chassis -->
+            <rect x="14" y="23" width="72" height="62" rx="22" fill="url(#${uid}-shell)" stroke="url(#${uid}-rim)" stroke-width="1.6" />
+            <path d="M 27 25.5 Q 50 23 73 25.5" fill="none" stroke="rgba(255,255,255,0.22)" stroke-width="1.5" stroke-linecap="round" />
+
+            <!-- Smoked Curved OLED Face Visor -->
+            <rect x="20" y="34" width="60" height="40" rx="14" fill="url(#${uid}-visor)" stroke="rgba(255,255,255,0.12)" stroke-width="1.2" />
+            <path d="M 26 37.5 Q 50 35 74 37.5" fill="none" stroke="rgba(255,255,255,0.12)" stroke-width="1.2" stroke-linecap="round" />
+
+            <!-- Expressive Face Rig inside Visor -->
+            <g clip-path="url(#${uid}-visor-clip)">
+              <rect class="axiom-scan-beam" x="42" y="34" width="16" height="40" fill="url(#${uid}-scan)" />
+
+              <g class="axiom-face-rig">
+                <!-- Soft Cheek Luminescence -->
+                <ellipse class="axiom-cheek" cx="29" cy="60" rx="4.2" ry="2.2" fill="var(--bot-accent)" />
+                <ellipse class="axiom-cheek" cx="71" cy="60" rx="4.2" ry="2.2" fill="var(--bot-accent)" />
+
+                <!-- Expressive Brows -->
+                <line class="axiom-brow axiom-brow-l" x1="30" y1="42" x2="42" y2="42" stroke="var(--bot-accent)" stroke-width="2.2" stroke-linecap="round" />
+                <line class="axiom-brow axiom-brow-r" x1="58" y1="42" x2="70" y2="42" stroke="var(--bot-accent)" stroke-width="2.2" stroke-linecap="round" />
+
+                <!-- Standard Living Eyes -->
+                <g class="axiom-eye-group">
+                  <rect x="31" y="45" width="10.5" height="12.5" rx="5.2" fill="url(#${uid}-eye)" />
+                  <circle cx="34.2" cy="48.5" r="1.9" fill="#ffffff" opacity="0.95" />
+                  <rect x="58.5" y="45" width="10.5" height="12.5" rx="5.2" fill="url(#${uid}-eye)" />
+                  <circle cx="61.7" cy="48.5" r="1.9" fill="#ffffff" opacity="0.95" />
+                </g>
+
+                <!-- Happy Crescent Eyes -->
+                <g class="axiom-happy-eyes" fill="none" stroke="url(#${uid}-eye)" stroke-width="3" stroke-linecap="round">
+                  <path d="M 30.5 53 Q 36 46 41.5 53" />
+                  <path d="M 58.5 53 Q 64 46 69.5 53" />
+                </g>
+
+                <!-- Singularity Starlight Irises -->
+                <g class="axiom-star-eyes" fill="#fef08a">
+                  <path d="M 36.2 46.5 L 37.4 50.1 L 41 51.2 L 37.4 52.3 L 36.2 55.9 L 35 52.3 L 31.4 51.2 L 35 50.1 Z" />
+                  <path d="M 63.8 46.5 L 65 50.1 L 68.6 51.2 L 65 52.3 L 63.8 55.9 L 62.6 52.3 L 59 51.2 L 62.6 50.1 Z" />
+                </g>
+
+                <!-- Terminal Mode >_ Optics -->
+                <g class="axiom-term-glyph" fill="none" stroke="#34d399" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
+                  <polyline points="31 47 38 51.5 31 56" />
+                  <line x1="57" y1="56" x2="68" y2="56" />
+                </g>
+
+                <!-- Dynamic Kinetic Mouths -->
+                <path class="axiom-mouth-smile" d="M 43 63.5 Q 50 68.5 57 63.5" fill="none" stroke="var(--bot-accent)" stroke-width="2.3" stroke-linecap="round" />
+                <line class="axiom-mouth-think" x1="43.5" y1="65" x2="56.5" y2="65" stroke="var(--bot-accent)" stroke-width="2.3" stroke-linecap="round" stroke-dasharray="3 3" />
+                <path class="axiom-mouth-error" d="M 43.5 67 Q 50 62.5 56.5 67" fill="none" stroke="#f87171" stroke-width="2.3" stroke-linecap="round" />
+
+                <!-- Voice-Waveform Mouth while Streaming -->
+                <g class="axiom-mouth-eq" fill="var(--bot-accent)">
+                  <rect class="axiom-eq-bar axiom-eq-1" x="40" y="61" width="2.8" height="7.5" rx="1.4" />
+                  <rect class="axiom-eq-bar axiom-eq-2" x="44.5" y="59.5" width="2.8" height="9" rx="1.4" />
+                  <rect class="axiom-eq-bar axiom-eq-3" x="49" y="58.5" width="2.8" height="10" rx="1.4" />
+                  <rect class="axiom-eq-bar axiom-eq-4" x="53.5" y="59.5" width="2.8" height="9" rx="1.4" />
+                  <rect class="axiom-eq-bar axiom-eq-5" x="58" y="61" width="2.8" height="7.5" rx="1.4" />
+                </g>
+              </g>
+            </g>
+          </g>
+        </svg>
+      </div>
+    `;
   }
 
   function getActiveSession() {
@@ -345,7 +482,7 @@
           Object.values(m.variantMap).some((v) => (v.id || v.modelId) === selection.modelId)
       );
       if (byVariant) return byVariant;
-      const stem = String(selection.modelId).replace(/-(minimal|low|medium|high|xhigh|max)$/i, "");
+      const stem = String(selection.modelId).replace(/-(minimal|low|medium|high|xhigh)$/i, "");
       const byStem = prov.models.find((m) => m.id === stem);
       if (byStem) return byStem;
     }
@@ -360,10 +497,6 @@
     return findModelInProvider(prov, state.selection);
   }
 
-  /**
-   * Build 100% synchronized selection object so Base Model Display Name, Effort Tier,
-   * and Actual Upstream Suffixed Variant (low/medium/high/xhigh/max) NEVER diverge.
-   */
   function buildSyncedSelection(prov, modelObj, desiredEffort) {
     const levels = modelObj?.effort?.effortLevels || [];
     const hasDesired = levels.some((l) => l.id === desiredEffort);
@@ -402,9 +535,9 @@
     }
     return {
       effortLevels: [
-        { id: "low", label: "Low", shortLabel: "Low", power: 1, maxScale: 3, percent: 33, color: "#10B981", accent: "#06B6D4", glow: "rgba(16, 185, 129, 0.44)", description: "Fast & lightweight response" },
-        { id: "medium", label: "Medium", shortLabel: "Med", power: 2, maxScale: 3, percent: 67, color: "#3B82F6", accent: "#6366F1", glow: "rgba(59, 130, 246, 0.5)", description: "Balanced speed & reasoning depth" },
-        { id: "high", label: "High", shortLabel: "High", power: 3, maxScale: 3, percent: 100, color: "#E56A4A", accent: "#F59E0B", glow: "rgba(229, 106, 74, 0.6)", description: "Deep multi-step reasoning" }
+        { id: "low", label: "Low", shortLabel: "Low", power: 1, maxScale: 3, percent: 33, color: "#10B981", accent: "#2DD4BF", glow: "rgba(16, 185, 129, 0.48)", description: "Fast & lightweight response" },
+        { id: "medium", label: "Medium", shortLabel: "Med", power: 2, maxScale: 3, percent: 67, color: "#38BDF8", accent: "#6366F1", glow: "rgba(56, 189, 248, 0.54)", description: "Balanced speed & reasoning depth" },
+        { id: "high", label: "High", shortLabel: "High", power: 3, maxScale: 3, percent: 100, color: "#F97316", accent: "#F59E0B", glow: "rgba(249, 115, 22, 0.64)", description: "Deep multi-step reasoning" }
       ],
       defaultEffort: "medium",
       maxEffort: "high",
@@ -459,12 +592,13 @@
 
     const rgbA = lerpRgb(t0.rgbA, t1.rgbA, localT);
     const rgbB = lerpRgb(t0.rgbB, t1.rgbB, localT);
+    const rgbC = lerpRgb(t0.rgbC || t0.rgbA, t1.rgbC || t1.rgbA, localT);
     const nearestIdx = Math.round(exactPos);
     const nearestStop = stops[nearestIdx] || stops[0];
 
     const topIsSingularity = isSingularityStop(stops[stops.length - 1], { effortLevels: stops });
-    const isMaxZone = topIsSingularity && clamped >= 0.8;
-    const singularityIntensity = isMaxZone ? Math.min(1, (clamped - 0.8) / 0.16) : 0;
+    const isMaxZone = topIsSingularity && clamped >= 0.78;
+    const singularityIntensity = isMaxZone ? Math.min(1, (clamped - 0.78) / 0.17) : 0;
 
     return {
       clamped,
@@ -472,8 +606,9 @@
       nearestStop,
       rgbA,
       rgbB,
+      rgbC,
       singularityIntensity,
-      isSingularity: topIsSingularity && (singularityIntensity >= 0.65 || nearestStop.id === "xhigh" || nearestStop.id === "max")
+      isSingularity: topIsSingularity && (singularityIntensity >= 0.6 || nearestStop.id === "xhigh" || nearestStop.id === "max")
     };
   }
 
@@ -482,7 +617,7 @@
     const isSing = customVis ? customVis.isSingularity : isSingularityStop(stop, profile);
     const color = customVis ? rgbCss(customVis.rgbA) : stop.color || theme.color;
     const accent = customVis ? rgbCss(customVis.rgbB) : stop.accent || theme.accent;
-    const glow = customVis ? rgbCss(customVis.rgbA, isSing ? 0.78 : 0.55) : stop.glow || theme.glow;
+    const glow = customVis ? rgbCss(customVis.rgbA, isSing ? 0.82 : 0.58) : stop.glow || theme.glow;
 
     document.documentElement.style.setProperty("--effort-color", color);
     document.documentElement.style.setProperty("--effort-accent", accent);
@@ -491,26 +626,58 @@
 
     fxState.rgbA = customVis ? customVis.rgbA : theme.rgbA;
     fxState.rgbB = customVis ? customVis.rgbB : theme.rgbB;
+    fxState.rgbC = customVis ? customVis.rgbC : theme.rgbC;
     fxState.targetSingularity = customVis ? customVis.singularityIntensity : isSing ? 1 : 0;
   }
 
   // =========================================================================
-  // 60fps Fluid Black Hole Singularity & Chromatic Plasma Canvas Renderer
+  // Ethereal 4-Realm Effort Canvas + Explosive Radial Shockwave Bursts (60fps)
+  // Realm 1: Emerald Aether · Realm 2: Astral Sapphire · Realm 3: Solar Flare
+  // Realm 4: Celestial Black Hole Singularity with Double Einstein Lensing
   // =========================================================================
   function initParticles() {
     if (fxState.particles.length) return;
-    for (let i = 0; i < 48; i++) {
+    for (let i = 0; i < 64; i++) {
       fxState.particles.push({
         angle: Math.random() * Math.PI * 2,
-        radius: 14 + Math.random() * 68,
-        speed: 0.012 + Math.random() * 0.024,
-        inward: 0.08 + Math.random() * 0.22,
-        size: 0.9 + Math.random() * 1.9,
+        radius: 14 + Math.random() * 82,
+        speed: 0.011 + Math.random() * 0.025,
+        inward: 0.08 + Math.random() * 0.24,
+        size: 0.85 + Math.random() * 2.1,
         hueSlot: i % 3,
         driftX: Math.random(),
-        driftY: Math.random()
+        driftY: Math.random(),
+        phase: Math.random() * Math.PI * 2
       });
     }
+  }
+
+  function triggerEffortBurst(ratio, rgbA, rgbB, rgbC, isSing) {
+    if (REDUCED_MOTION_MQ.matches || state.fxPaused) return;
+    const sparks = [];
+    const count = isSing ? 22 : 16;
+    for (let i = 0; i < count; i++) {
+      const ang = (Math.PI * 2 * i) / count + (Math.random() - 0.5) * 0.28;
+      const spd = (isSing ? 1.8 : 1.35) + Math.random() * 2.1;
+      sparks.push({
+        ang,
+        dist: 4,
+        spd,
+        size: 1.1 + Math.random() * 1.8,
+        col: i % 3 === 0 ? rgbA : i % 3 === 1 ? rgbB : rgbC
+      });
+    }
+    fxState.bursts.push({
+      xNorm: 0.56 + Math.max(0, Math.min(1, ratio)) * 0.34,
+      yNorm: 0.36,
+      life: 0,
+      maxLife: 1,
+      rgbA,
+      rgbB,
+      isSing,
+      sparks
+    });
+    if (fxState.bursts.length > 4) fxState.bursts.shift();
   }
 
   function stopCanvasLoop() {
@@ -544,44 +711,98 @@
 
     fxState.singularity = staticOnly
       ? fxState.targetSingularity
-      : lerp(fxState.singularity, fxState.targetSingularity, 0.09);
+      : lerp(fxState.singularity, fxState.targetSingularity, 0.085);
 
     const s = fxState.singularity;
+    const r = fxState.ratio;
     const t = fxState.time;
 
-    const waveAlpha = lerp(0.12, 0.04, s);
-    const grad = ctx.createLinearGradient(0, 0, W, H);
-    const shift = (Math.sin(t * 0.9) + 1) * 0.5;
-    grad.addColorStop(0, rgbCss(fxState.rgbA, waveAlpha * (0.4 + shift * 0.6)));
-    grad.addColorStop(0.55, rgbCss(fxState.rgbB, waveAlpha * 1.15));
-    grad.addColorStop(1, rgbCss(fxState.rgbA, waveAlpha * (1.2 - shift * 0.5)));
-    ctx.fillStyle = grad;
-    ctx.fillRect(0, 0, W, H);
+    // 1) Ethereal Flowing Aurora Ribbons across ALL tiers (Emerald -> Sapphire -> Solar -> Abyss)
+    const ribbonCount = 3;
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    for (let k = 0; k < ribbonCount; k++) {
+      const yBase = H * (0.28 + k * 0.24);
+      const amp = (8 + r * 10) * (1 - s * 0.45);
+      const col = k === 0 ? fxState.rgbA : k === 1 ? fxState.rgbB : fxState.rgbC;
+      const grad = ctx.createLinearGradient(0, yBase - 18, W, yBase + 18);
+      grad.addColorStop(0, rgbCss(col, 0.02));
+      grad.addColorStop(0.45, rgbCss(col, (0.14 + r * 0.1) * (1 - s * 0.42)));
+      grad.addColorStop(0.82, rgbCss(fxState.rgbB, (0.19 + r * 0.12) * (1 - s * 0.35)));
+      grad.addColorStop(1, rgbCss(col, 0.03));
 
-    if (s < 0.85) {
-      ctx.globalCompositeOperation = "lighter";
-      const moteFade = (1 - s) * (0.28 + fxState.ratio * 0.36);
-      for (let i = 0; i < 18; i++) {
-        const p = fxState.particles[i];
-        const px = ((p.driftX * W + t * (14 + fxState.ratio * 42) * (0.6 + p.size * 0.3)) % (W + 20)) - 10;
-        const py = p.driftY * H + Math.sin(t * 1.4 + i) * 3.5;
-        ctx.fillStyle = rgbCss(i % 2 === 0 ? fxState.rgbA : fxState.rgbB, moteFade * 0.65);
-        ctx.beginPath();
-        ctx.arc(px, py, p.size * 0.95, 0, Math.PI * 2);
-        ctx.fill();
+      ctx.strokeStyle = grad;
+      ctx.lineWidth = 10 - k * 2.2;
+      ctx.lineCap = "round";
+      ctx.beginPath();
+      for (let x = 0; x <= W; x += 14) {
+        const wave =
+          Math.sin(x * 0.017 + t * (1.0 + k * 0.35 + r * 0.8) + k * 2.1) * amp +
+          Math.cos(x * 0.031 - t * 0.7 + k) * (amp * 0.38);
+        if (x === 0) ctx.moveTo(x, yBase + wave);
+        else ctx.lineTo(x, yBase + wave);
       }
-      ctx.globalCompositeOperation = "source-over";
+      ctx.stroke();
     }
 
-    if (s > 0.02) {
-      const cx = W - 64;
-      const cy = H * 0.44;
-      const horizonR = 11.5 + s * 4.5;
+    // 2) Luminous Mystical Motes & Constellation / Solar Embers (Low -> High)
+    if (s < 0.9) {
+      const moteFade = (1 - s * 0.85) * (0.36 + r * 0.52);
+      const moteCount = Math.round(18 + r * 20);
+      const pts = [];
+      for (let i = 0; i < moteCount; i++) {
+        const p = fxState.particles[i];
+        const speedMul = 12 + r * 48;
+        const px = ((p.driftX * W + t * speedMul * (0.45 + p.size * 0.25)) % (W + 24)) - 12;
+        const py =
+          ((p.driftY * H - (r > 0.58 ? t * 14 * p.size : 0)) % (H + 16) + H + 16) % (H + 16) - 8 +
+          Math.sin(t * 1.5 + p.phase) * 3.5;
+        pts.push([px, py]);
 
-      const wellGrad = ctx.createRadialGradient(cx, cy, horizonR * 0.6, cx, cy, 130 * s + 20);
-      wellGrad.addColorStop(0, `rgba(2, 1, 7, ${0.95 * s})`);
-      wellGrad.addColorStop(0.28, `rgba(24, 8, 48, ${0.62 * s})`);
-      wellGrad.addColorStop(0.58, `rgba(88, 28, 135, ${0.24 * s})`);
+        const col = p.hueSlot === 0 ? fxState.rgbA : p.hueSlot === 1 ? fxState.rgbB : fxState.rgbC;
+        const rad = p.size * (0.95 + r * 0.45);
+        const halo = ctx.createRadialGradient(px, py, 0, px, py, rad * 3.8);
+        halo.addColorStop(0, rgbCss(col, moteFade * 0.92));
+        halo.addColorStop(0.45, rgbCss(col, moteFade * 0.32));
+        halo.addColorStop(1, "rgba(0,0,0,0)");
+        ctx.fillStyle = halo;
+        ctx.beginPath();
+        ctx.arc(px, py, rad * 3.8, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      // Astral constellation threads in Medium/High zone
+      if (r >= 0.25 && r < 0.85) {
+        ctx.strokeStyle = rgbCss(fxState.rgbC, 0.14 * (1 - s));
+        ctx.lineWidth = 0.7;
+        for (let i = 0; i < Math.min(pts.length, 16); i++) {
+          for (let j = i + 1; j < Math.min(pts.length, 16); j++) {
+            const dx = pts[i][0] - pts[j][0];
+            const dy = pts[i][1] - pts[j][1];
+            const distSq = dx * dx + dy * dy;
+            if (distSq < 2200) {
+              ctx.beginPath();
+              ctx.moveTo(pts[i][0], pts[i][1]);
+              ctx.lineTo(pts[j][0], pts[j][1]);
+              ctx.stroke();
+            }
+          }
+        }
+      }
+    }
+    ctx.restore();
+
+    // 3) Celestial Black Hole Singularity with Double Einstein Gravitational Lensing (XHigh / Max)
+    if (s > 0.02) {
+      const cx = W - 70;
+      const cy = H * 0.43;
+      const horizonR = 11.5 + s * 5.2;
+
+      // Gravitational abyss distortion well
+      const wellGrad = ctx.createRadialGradient(cx, cy, horizonR * 0.55, cx, cy, 145 * s + 22);
+      wellGrad.addColorStop(0, `rgba(2, 1, 8, ${0.97 * s})`);
+      wellGrad.addColorStop(0.26, `rgba(26, 7, 56, ${0.72 * s})`);
+      wellGrad.addColorStop(0.56, `rgba(98, 22, 148, ${0.28 * s})`);
       wellGrad.addColorStop(1, "rgba(0, 0, 0, 0)");
       ctx.fillStyle = wellGrad;
       ctx.fillRect(0, 0, W, H);
@@ -589,74 +810,109 @@
       ctx.save();
       ctx.globalCompositeOperation = "lighter";
 
+      // Relativistic polar energy jets (ethereal vertical shimmer)
+      const jetGrad = ctx.createLinearGradient(cx, cy - 58 * s, cx, cy + 58 * s);
+      jetGrad.addColorStop(0, "rgba(56, 189, 248, 0)");
+      jetGrad.addColorStop(0.35, `rgba(168, 85, 247, ${0.26 * s})`);
+      jetGrad.addColorStop(0.5, `rgba(253, 224, 71, ${0.42 * s})`);
+      jetGrad.addColorStop(0.65, `rgba(236, 72, 153, ${0.26 * s})`);
+      jetGrad.addColorStop(1, "rgba(56, 189, 248, 0)");
+      ctx.fillStyle = jetGrad;
+      ctx.beginPath();
+      ctx.ellipse(cx, cy, 3.2 * s, 56 * s, -0.18, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Double-warped Einstein lensing vertical arches (upper & lower bent light)
+      for (const dir of [-1, 1]) {
+        const archGrad = ctx.createLinearGradient(cx - 26, cy, cx + 26, cy);
+        archGrad.addColorStop(0, `rgba(56, 189, 248, ${0.18 * s})`);
+        archGrad.addColorStop(0.5, `rgba(253, 224, 71, ${0.72 * s})`);
+        archGrad.addColorStop(1, `rgba(236, 72, 153, ${0.25 * s})`);
+        ctx.strokeStyle = archGrad;
+        ctx.lineWidth = 1.9 * s;
+        ctx.beginPath();
+        ctx.ellipse(
+          cx,
+          cy + dir * horizonR * 0.24,
+          horizonR * 1.48,
+          horizonR * 1.32,
+          -0.18,
+          dir < 0 ? Math.PI : 0,
+          dir < 0 ? Math.PI * 2 : Math.PI
+        );
+        ctx.stroke();
+      }
+
+      // Three layered tilted accretion plasma rings
       for (let ring = 0; ring < 3; ring++) {
         ctx.save();
         ctx.translate(cx, cy);
-        const tilt = -0.22 + ring * 0.14 + Math.sin(t * 0.7 + ring) * 0.04;
+        const tilt = -0.22 + ring * 0.13 + Math.sin(t * 0.72 + ring) * 0.04;
         ctx.rotate(tilt);
-        const rx = (28 + ring * 18) * (0.65 + s * 0.45);
-        const ry = (8.5 + ring * 5.2) * (0.65 + s * 0.45);
+        const rx = (30 + ring * 20) * (0.68 + s * 0.44);
+        const ry = (8.8 + ring * 5.6) * (0.68 + s * 0.44);
 
         const ringGrad = ctx.createLinearGradient(-rx, 0, rx, 0);
         if (ring === 0) {
-          ringGrad.addColorStop(0, `rgba(139, 92, 246, ${0.15 * s})`);
-          ringGrad.addColorStop(0.35, `rgba(236, 72, 153, ${0.72 * s})`);
-          ringGrad.addColorStop(0.68, `rgba(251, 191, 36, ${0.88 * s})`);
-          ringGrad.addColorStop(1, `rgba(168, 85, 247, ${0.22 * s})`);
+          ringGrad.addColorStop(0, `rgba(139, 92, 246, ${0.2 * s})`);
+          ringGrad.addColorStop(0.32, `rgba(236, 72, 153, ${0.82 * s})`);
+          ringGrad.addColorStop(0.66, `rgba(253, 224, 71, ${0.95 * s})`);
+          ringGrad.addColorStop(1, `rgba(168, 85, 247, ${0.28 * s})`);
         } else if (ring === 1) {
-          ringGrad.addColorStop(0, `rgba(56, 189, 248, ${0.22 * s})`);
-          ringGrad.addColorStop(0.5, `rgba(168, 85, 247, ${0.55 * s})`);
-          ringGrad.addColorStop(1, `rgba(236, 72, 153, ${0.38 * s})`);
+          ringGrad.addColorStop(0, `rgba(56, 189, 248, ${0.32 * s})`);
+          ringGrad.addColorStop(0.5, `rgba(217, 70, 239, ${0.65 * s})`);
+          ringGrad.addColorStop(1, `rgba(236, 72, 153, ${0.44 * s})`);
         } else {
-          ringGrad.addColorStop(0, `rgba(168, 85, 247, ${0.08 * s})`);
-          ringGrad.addColorStop(0.5, `rgba(236, 72, 153, ${0.28 * s})`);
-          ringGrad.addColorStop(1, `rgba(245, 158, 11, ${0.16 * s})`);
+          ringGrad.addColorStop(0, `rgba(168, 85, 247, ${0.1 * s})`);
+          ringGrad.addColorStop(0.5, `rgba(236, 72, 153, ${0.34 * s})`);
+          ringGrad.addColorStop(1, `rgba(251, 191, 36, ${0.22 * s})`);
         }
 
         ctx.strokeStyle = ringGrad;
-        ctx.lineWidth = (2.6 - ring * 0.6) * s;
+        ctx.lineWidth = (2.8 - ring * 0.6) * s;
         ctx.beginPath();
         ctx.ellipse(0, 0, rx, ry, 0, 0, Math.PI * 2);
         ctx.stroke();
         ctx.restore();
       }
 
+      // 64 Keplerian spiraling star-trails accelerating into the photon sphere
       const palette = [
-        [251, 191, 36],
+        [253, 224, 71],
         [236, 72, 153],
         [168, 85, 247]
       ];
       for (let i = 0; i < fxState.particles.length; i++) {
         const p = fxState.particles[i];
         if (!staticOnly) {
-          const boost = 24 / Math.max(12, p.radius);
-          p.angle += p.speed * boost * (0.7 + s * 0.9);
-          p.radius -= p.inward * (0.55 + s * 0.85);
-          if (p.radius < horizonR * 0.88) {
-            p.radius = 52 + Math.random() * 44;
+          const boost = 28 / Math.max(12, p.radius);
+          p.angle += p.speed * boost * (0.72 + s * 0.95);
+          p.radius -= p.inward * (0.58 + s * 0.88);
+          if (p.radius < horizonR * 0.86) {
+            p.radius = 56 + Math.random() * 52;
             p.angle = Math.random() * Math.PI * 2;
           }
         }
 
-        const squashY = 0.42;
+        const squashY = 0.4;
         const rot = -0.2;
         const rawX = Math.cos(p.angle) * p.radius;
         const rawY = Math.sin(p.angle) * p.radius * squashY;
         const x = cx + rawX * Math.cos(rot) - rawY * Math.sin(rot);
         const y = cy + rawX * Math.sin(rot) + rawY * Math.cos(rot);
 
-        const prevAngle = p.angle - 0.22;
-        const pRawX = Math.cos(prevAngle) * (p.radius + 1.8);
-        const pRawY = Math.sin(prevAngle) * (p.radius + 1.8) * squashY;
+        const prevAngle = p.angle - 0.25;
+        const pRawX = Math.cos(prevAngle) * (p.radius + 2.2);
+        const pRawY = Math.sin(prevAngle) * (p.radius + 2.2) * squashY;
         const px = cx + pRawX * Math.cos(rot) - pRawY * Math.sin(rot);
         const py = cy + pRawX * Math.sin(rot) + pRawY * Math.cos(rot);
 
-        const proximity = Math.max(0, Math.min(1, 1 - (p.radius - horizonR) / 70));
+        const proximity = Math.max(0, Math.min(1, 1 - (p.radius - horizonR) / 76));
         const col = palette[p.hueSlot];
-        const alpha = (0.2 + proximity * 0.72) * s;
+        const alpha = (0.22 + proximity * 0.76) * s;
 
         ctx.strokeStyle = rgbCss(col, alpha);
-        ctx.lineWidth = Math.max(0.7, p.size * (0.75 + proximity * 0.55));
+        ctx.lineWidth = Math.max(0.75, p.size * (0.75 + proximity * 0.6));
         ctx.lineCap = "round";
         ctx.beginPath();
         ctx.moveTo(px, py);
@@ -664,26 +920,76 @@
         ctx.stroke();
       }
 
-      const photonGrad = ctx.createRadialGradient(cx, cy, horizonR * 0.82, cx, cy, horizonR * 1.95);
+      // Luminous Photon Sphere Halo
+      const photonGrad = ctx.createRadialGradient(cx, cy, horizonR * 0.82, cx, cy, horizonR * 2.15);
       photonGrad.addColorStop(0, "rgba(0, 0, 0, 0)");
-      photonGrad.addColorStop(0.28, `rgba(254, 240, 138, ${0.85 * s})`);
-      photonGrad.addColorStop(0.5, `rgba(236, 72, 153, ${0.62 * s})`);
-      photonGrad.addColorStop(0.76, `rgba(139, 92, 246, ${0.32 * s})`);
+      photonGrad.addColorStop(0.24, `rgba(254, 240, 138, ${0.92 * s})`);
+      photonGrad.addColorStop(0.48, `rgba(236, 72, 153, ${0.66 * s})`);
+      photonGrad.addColorStop(0.76, `rgba(139, 92, 246, ${0.34 * s})`);
       photonGrad.addColorStop(1, "rgba(0, 0, 0, 0)");
       ctx.fillStyle = photonGrad;
       ctx.beginPath();
-      ctx.arc(cx, cy, horizonR * 1.95, 0, Math.PI * 2);
+      ctx.arc(cx, cy, horizonR * 2.15, 0, Math.PI * 2);
       ctx.fill();
       ctx.restore();
 
+      // Event Horizon Core
       const coreGrad = ctx.createRadialGradient(cx, cy, 0, cx, cy, horizonR);
-      coreGrad.addColorStop(0, `rgba(0, 0, 0, ${0.98 * s})`);
-      coreGrad.addColorStop(0.78, `rgba(4, 2, 10, ${0.95 * s})`);
-      coreGrad.addColorStop(1, "rgba(4, 2, 10, 0)");
+      coreGrad.addColorStop(0, `rgba(0, 0, 0, ${0.99 * s})`);
+      coreGrad.addColorStop(0.78, `rgba(4, 1, 10, ${0.96 * s})`);
+      coreGrad.addColorStop(1, "rgba(4, 1, 10, 0)");
       ctx.fillStyle = coreGrad;
       ctx.beginPath();
       ctx.arc(cx, cy, horizonR, 0, Math.PI * 2);
       ctx.fill();
+    }
+
+    // 4) Explosive Ethereal Shockwave Rings & Luminous Spark Wisps on Tier Change
+    if (fxState.bursts.length > 0 && !staticOnly) {
+      ctx.save();
+      ctx.globalCompositeOperation = "lighter";
+      for (let bIdx = fxState.bursts.length - 1; bIdx >= 0; bIdx--) {
+        const b = fxState.bursts[bIdx];
+        b.life += 0.032;
+        if (b.life >= b.maxLife) {
+          fxState.bursts.splice(bIdx, 1);
+          continue;
+        }
+        const easeOut = 1 - Math.pow(1 - b.life, 3);
+        const fade = Math.max(0, 1 - b.life);
+        const bx = b.isSing ? W - 70 : b.xNorm * W;
+        const by = b.isSing ? H * 0.43 : b.yNorm * H;
+        const maxRad = b.isSing ? 92 : 68;
+        const ringR = 8 + easeOut * maxRad;
+
+        ctx.strokeStyle = rgbCss(b.rgbA, fade * 0.72);
+        ctx.lineWidth = Math.max(0.8, 3.2 * fade);
+        ctx.beginPath();
+        ctx.arc(bx, by, ringR, 0, Math.PI * 2);
+        ctx.stroke();
+
+        ctx.strokeStyle = rgbCss(b.rgbB, fade * 0.45);
+        ctx.lineWidth = Math.max(0.6, 1.8 * fade);
+        ctx.beginPath();
+        ctx.arc(bx, by, ringR * 0.68, 0, Math.PI * 2);
+        ctx.stroke();
+
+        for (const sp of b.sparks) {
+          sp.dist += sp.spd * (1.25 - easeOut * 0.75);
+          const sx = bx + Math.cos(sp.ang) * sp.dist;
+          const sy = by + Math.sin(sp.ang) * sp.dist * 0.65;
+          const tailX = bx + Math.cos(sp.ang) * Math.max(0, sp.dist - 9 * fade);
+          const tailY = by + Math.sin(sp.ang) * Math.max(0, sp.dist - 9 * fade) * 0.65;
+          ctx.strokeStyle = rgbCss(sp.col, fade * 0.9);
+          ctx.lineWidth = Math.max(0.8, sp.size * fade);
+          ctx.lineCap = "round";
+          ctx.beginPath();
+          ctx.moveTo(tailX, tailY);
+          ctx.lineTo(sx, sy);
+          ctx.stroke();
+        }
+      }
+      ctx.restore();
     }
 
     ctx.restore();
@@ -729,11 +1035,16 @@
     vscode.postMessage({ type: "saveSelection", selection: state.selection });
   }
 
-  function syncSliderDom(ratio, snapWithSpring) {
+  function syncSliderDom(ratio, snapWithSpring, allowBurst = true) {
     const profile = getActiveEffortProfile();
     const stops = profile.effortLevels;
     const vis = computeVisualFromRatio(ratio, stops);
     fxState.ratio = vis.clamped;
+
+    if (allowBurst && fxState.lastTierId && fxState.lastTierId !== vis.nearestStop.id) {
+      triggerEffortBurst(vis.clamped, vis.rgbA, vis.rgbB, vis.rgbC, vis.isSingularity);
+    }
+    fxState.lastTierId = vis.nearestStop.id;
 
     applyRootEffortVars(vis.nearestStop, profile, vis);
 
@@ -758,10 +1069,13 @@
     }
     if (composerEl) composerEl.dataset.singularity = singAttr;
     if (modelPill) modelPill.dataset.singularity = singAttr;
+    document.querySelectorAll(".axiom-bot").forEach((b) => {
+      b.dataset.singularity = singAttr;
+    });
 
     if (shell) {
       shell.classList.toggle("spring-snap", Boolean(snapWithSpring));
-      const shellW = shell.clientWidth || 136;
+      const shellW = shell.clientWidth || 142;
       const pad = 14;
       const thumbX = pad + vis.clamped * Math.max(10, shellW - pad * 2);
       const fillScale = Math.max(0.16, Math.min(1, (thumbX + 10) / shellW));
@@ -774,13 +1088,11 @@
     if (levelName) levelName.textContent = vis.nearestStop.label;
     if (powerTag) {
       powerTag.textContent = vis.isSingularity
-        ? `SINGULARITY · ${vis.nearestStop.label.toUpperCase()}`
+        ? theme.badge
         : `${theme.badge} · ${vis.nearestStop.percent}%`;
     }
     if (descEl) {
-      descEl.textContent = vis.isSingularity
-        ? "Event Horizon — tối đa năng lực suy luận"
-        : vis.nearestStop.description;
+      descEl.textContent = theme.realm || vis.nearestStop.description;
     }
     if (pillEffort) pillEffort.textContent = vis.nearestStop.label;
     if (routeEl) {
@@ -791,7 +1103,7 @@
     }
 
     if (rangeInput) {
-      rangeInput.setAttribute("aria-valuetext", `${vis.nearestStop.label} (${vis.nearestStop.description})`);
+      rangeInput.setAttribute("aria-valuetext", `${vis.nearestStop.label} (${theme.realm || vis.nearestStop.description})`);
     }
 
     document.querySelectorAll(".r001-effort-dot").forEach((d, idx) => {
@@ -809,7 +1121,7 @@
   }
 
   // =========================================================================
-  // Markdown Renderer (with Copy / Apply / Live Terminal Run on shell blocks)
+  // Markdown Renderer (Copy / Apply / Live Terminal Run on shell blocks)
   // =========================================================================
   function formatInlineText(raw) {
     return escapeHtml(raw)
@@ -945,46 +1257,55 @@
     return isStreamingThis ? `${html}<span class="r001-stream-caret"></span>` : html || "<p>...</p>";
   }
 
-  function renderAssistantPhaseHeader(msg, isLastStreaming, hasRunningTerminal) {
-    const effId = String(msg.effort || "medium").toLowerCase();
+  /**
+   * Assistant Header: Expressive Axiom Companion Bot + Clean Name + Live Status (NO Effort badge!)
+   */
+  function renderAssistantPhaseHeader(msg, isLastStreaming, hasRunningTerminal, isSing) {
+    const hasError = Boolean(msg.error && !msg.text);
     const rawPhase = hasRunningTerminal
       ? "terminal"
       : isLastStreaming
         ? msg.phase || (msg.text ? "streaming" : msg.reasoning ? "thinking" : "analyzing")
-        : "done";
+        : hasError
+          ? "error"
+          : "done";
 
-    let titleText = "001Router Neural AI";
+    const botMood = rawPhase === "done" ? "happy" : rawPhase;
+
+    let titleText = "Axiom";
     let subText = "";
     const elapsedMs = isLastStreaming && msg.startedAt
       ? Date.now() - msg.startedAt
       : msg.durationMs || 0;
 
     if (rawPhase === "terminal") {
-      titleText = "AI Core · Đang chạy Terminal";
+      titleText = "Axiom · Đang chạy Terminal";
       subText = "Thực thi lệnh dự án trực tiếp...";
     } else if (rawPhase === "analyzing") {
-      titleText = "AI Core · Đang phân tích dự án";
-      subText = msg.phaseDetail || "Đang đọc ngữ cảnh file & kiến trúc...";
+      titleText = "Axiom · Đang quét mã nguồn";
+      subText = msg.phaseDetail || "Đang phân tích cấu trúc dự án...";
     } else if (rawPhase === "thinking") {
-      titleText = "AI Core · Đang suy nghĩ sâu";
-      subText = "Phân tích chuỗi suy luận đa bước...";
+      titleText = "Axiom · Đang suy luận sâu";
+      subText = "Tổng hợp kiến trúc & chuỗi suy luận...";
     } else if (rawPhase === "streaming") {
-      titleText = "AI Core · Đang tổng hợp giải pháp";
-      subText = "Đang truyền phản hồi trực tiếp...";
+      titleText = "Axiom · Đang phản hồi";
+      subText = "Đang trình bày giải pháp...";
+    } else if (rawPhase === "error") {
+      titleText = "Axiom";
+      subText = "Gặp sự cố khi xử lý yêu cầu";
     } else if (elapsedMs > 0) {
       subText = `Hoàn tất trong ${formatDuration(elapsedMs)}`;
     }
 
     return (
       `<div class="r001-msg-header" data-msg-header="${escapeHtml(msg.id)}">` +
-        render3DAiFaceCore("msg", rawPhase) +
+        renderAxiomBot("msg", botMood, isSing) +
         `<div class="r001-ai-status-col">` +
           `<div class="r001-ai-status-row">` +
             `<span class="r001-ai-persona-label">${escapeHtml(titleText)}</span>` +
-            `<span class="r001-effort-badge" data-effort="${escapeHtml(effId)}">${escapeHtml(effId.toUpperCase())}</span>` +
           `</div>` +
           `<div class="r001-ai-substatus">` +
-            (rawPhase !== "done"
+            (rawPhase !== "done" && rawPhase !== "error"
               ? `<progress aria-label="Đang xử lý" class="r001-spinner"></progress>`
               : "") +
             `<span class="r001-live-sub-text">${escapeHtml(subText || "Sẵn sàng")}</span>` +
@@ -997,6 +1318,22 @@
     );
   }
 
+  function renderToolTraceCard(msg) {
+    const logs = Array.isArray(msg.toolLogs) ? msg.toolLogs : [];
+    if (logs.length === 0) return "";
+    return `
+      <details class="r001-tool-trace">
+        <summary>
+          <span class="r001-thinking-head-left">${ICONS.folderTree}<span>Đã tra cứu ${logs.length} bước trong thư mục dự án</span></span>
+          <span style="font-size:10px;color:var(--text-muted)">Chi tiết</span>
+        </summary>
+        <div class="r001-tool-trace-list">
+          ${logs.map((l) => `<div class="r001-tool-trace-item">${ICONS.search}<span>${escapeHtml(l.label || l.tool)}</span></div>`).join("")}
+        </div>
+      </details>
+    `;
+  }
+
   function renderThinkingCard(msg, isLastStreaming) {
     const isThinkingNow = isLastStreaming && !msg.text;
     if (!msg.reasoning && !isThinkingNow) return "";
@@ -1004,7 +1341,7 @@
     const lines = String(msg.reasoning || "").trim().split("\n").filter(Boolean);
     const lastLine = lines.length
       ? lines[lines.length - 1]
-      : msg.phaseDetail || "Đang khởi tạo luồng suy luận ngữ cảnh...";
+      : msg.phaseDetail || "Đang phân tích ngữ cảnh thư mục & mã nguồn...";
 
     return (
       `<details class="r001-thinking-card ${isThinkingNow ? "active" : ""}" data-thinking-card="${escapeHtml(msg.id)}" ${isThinkingNow && msg.reasoning ? "open" : ""}>` +
@@ -1013,7 +1350,7 @@
             (isThinkingNow
               ? `<progress aria-label="Đang suy nghĩ" class="r001-spinner"></progress>`
               : ICONS.brain) +
-            `<span class="r001-thinking-title">${isThinkingNow ? "Đang suy nghĩ & phân tích..." : `Chuỗi suy luận (${msg.reasoning.length} ký tự)`}</span>` +
+            `<span class="r001-thinking-title">${isThinkingNow ? "Đang suy luận kiến trúc..." : `Chuỗi suy luận (${msg.reasoning.length} ký tự)`}</span>` +
           `</span>` +
           `<span style="font-size:10.5px;color:var(--text-muted)">${isThinkingNow ? "Live" : "Chi tiết"}</span>` +
         `</summary>` +
@@ -1048,7 +1385,7 @@
         `<div class="r001-terminal-foot">` +
           `<button type="button" class="r001-mini-btn" data-action="open-ide-term" data-cmd="${escapeHtml(run.command)}">${ICONS.terminal}<span>Mở IDE Terminal</span></button>` +
           (isFailed
-            ? `<button type="button" class="r001-mini-btn run-btn" data-action="fix-term-error" data-run="${escapeHtml(run.runId)}">${ICONS.bolt}<span>Nhờ AI sửa lỗi này</span></button>`
+            ? `<button type="button" class="r001-mini-btn run-btn" data-action="fix-term-error" data-run="${escapeHtml(run.runId)}">${ICONS.bolt}<span>Nhờ Axiom sửa lỗi</span></button>`
             : "") +
         `</div>` +
       `</div>`
@@ -1078,7 +1415,7 @@
         <div class="r001-effort-top">
           <div class="r001-effort-label-wrap">
             <label class="r001-effort-title" for="r001-effort-range">Effort (<span class="r001-effort-level-name" id="r001-effort-level-name">${escapeHtml(stop.label)}</span>)</label>
-            <span class="r001-effort-power-tag" id="r001-effort-power-tag">${escapeHtml(isSing ? `SINGULARITY · ${stop.label.toUpperCase()}` : `${theme.badge} · ${stop.percent}%`)}</span>
+            <span class="r001-effort-power-tag" id="r001-effort-power-tag">${escapeHtml(isSing ? theme.badge : `${theme.badge} · ${stop.percent}%`)}</span>
           </div>
           <div class="r001-effort-track-shell" id="r001-effort-shell">
             <div class="r001-effort-clip">
@@ -1100,7 +1437,7 @@
               step="1"
               value="${rangeVal}"
               aria-label="Mức Effort đồng bộ với model"
-              aria-valuetext="${escapeHtml(stop.label)} — ${escapeHtml(stop.description)}"
+              aria-valuetext="${escapeHtml(stop.label)} — ${escapeHtml(theme.realm || stop.description)}"
             />
           </div>
         </div>
@@ -1113,9 +1450,9 @@
             .join("")}
         </div>
         <div class="r001-effort-sub">
-          <span class="r001-effort-sub-left" id="r001-effort-desc">${escapeHtml(isSing ? "Event Horizon — tối đa năng lực suy luận" : stop.description)}</span>
+          <span class="r001-effort-sub-left" id="r001-effort-desc">${escapeHtml(theme.realm || stop.description)}</span>
           <span class="r001-effort-sub-right">
-            <span>Max: <strong>${escapeHtml(profile.maxLabel)}</strong> · <span id="r001-effort-route">${escapeHtml(resolvedRoute)}</span></span>
+            <span>Đỉnh: <strong>${escapeHtml(profile.maxLabel)}</strong> · <span id="r001-effort-route">${escapeHtml(resolvedRoute)}</span></span>
             ${
               !REDUCED_MOTION_MQ.matches
                 ? `<button type="button" class="r001-fx-pause-btn" data-action="toggle-fx" title="Tạm dừng hoặc phát hiệu ứng chuyển động">${state.fxPaused ? "Play FX" : "Pause FX"}</button>`
@@ -1125,6 +1462,14 @@
         </div>
       </div>
     `;
+  }
+
+  function renderCapabilityBadge(effortObj) {
+    const maxId = String(effortObj?.maxEffort || "high").toLowerCase();
+    if (maxId === "max") return `<span class="r001-cap-tag tier-max">MAX</span>`;
+    if (maxId === "xhigh") return `<span class="r001-cap-tag tier-xhigh">XHIGH</span>`;
+    if (maxId === "high") return `<span class="r001-cap-tag tier-high">HIGH</span>`;
+    return `<span class="r001-cap-tag tier-med">MED</span>`;
   }
 
   function renderModelPopover() {
@@ -1142,10 +1487,10 @@
       return `
         <div class="r001-popover" id="r001-popover">
           <div class="r001-popover-head">
-            <span class="r001-popover-title">Chọn nhà cung cấp (Provider)</span>
+            <span class="r001-popover-title">${ICONS.sliders}<span>Chọn nhà cung cấp (Provider)</span></span>
             <button type="button" class="r001-back-btn" data-action="refresh-catalog" title="Đồng bộ lại danh sách Provider & Model">${ICONS.refresh}<span>Sync</span></button>
           </div>
-          <input type="text" class="r001-search" id="r001-provider-search" placeholder="Tìm nhà cung cấp (Antigravity, Anthropic, OpenAI, Gemini CLI...)" value="${escapeHtml(state.providerSearch)}" />
+          <input type="text" class="r001-search" id="r001-provider-search" placeholder="Tìm nhà cung cấp (Antigravity, Anthropic, OpenAI, Gemini...)" value="${escapeHtml(state.providerSearch)}" />
           <div class="r001-popover-list">
             <div class="r001-section-label">Connected Providers (${filteredProviders.length})</div>
             ${
@@ -1182,7 +1527,7 @@
                       return `
                         <button type="button" class="r001-model-item ${isCurrent ? "selected" : ""}" data-action="select-combo" data-combo="${escapeHtml(c.name)}">
                           <div class="r001-model-left">
-                            ${renderLogoPlate("", "CB", "#d97757", "md")}
+                            ${renderLogoPlate("", "CB", "#e57452", "md")}
                             <div style="min-width:0">
                               <div class="r001-model-name">${escapeHtml(c.name)}</div>
                               <div class="r001-model-desc">${escapeHtml(c.description)}</div>
@@ -1219,7 +1564,7 @@
           <div class="r001-popover-title">
             <button type="button" class="r001-back-btn" data-action="back-providers">${ICONS.back}<span>Providers</span></button>
             ${renderLogoPlate(pLogo, provider?.monogram || "AI", provider?.color, "sm")}
-            <span style="color:#f4f4f5;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(provider?.name || "Select a model")}</span>
+            <span style="color:#f4f6fb;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(provider?.name || "Select a model")}</span>
           </div>
           <span style="font-size:11px;color:var(--text-muted);flex-shrink:0">${models.length} models</span>
         </div>
@@ -1230,7 +1575,6 @@
               const isSelected = Boolean(currentUnifiedObj && currentUnifiedObj.id === m.id);
               const mLogo = resolveModelLogoFile(m.id, provider, m.logoFile);
               const levelsText = (m.effort?.effortLevels || []).map((l) => l.shortLabel || l.label).join(" · ");
-              const isTopTier = m.effort?.maxEffort === "max" || m.effort?.maxEffort === "xhigh";
               return `
                 <button type="button" class="r001-model-item ${isSelected ? "selected" : ""}" data-action="select-model" data-slug="${escapeHtml(provider.slug)}" data-model="${escapeHtml(m.id)}">
                   <div class="r001-model-left">
@@ -1238,12 +1582,12 @@
                     <div style="min-width:0;flex:1">
                       <div class="r001-model-title-row">
                         <span class="r001-model-name">${escapeHtml(m.label || m.id)}</span>
-                        <span class="r001-cap-tag ${isTopTier ? "max-tag" : ""}">Max ${escapeHtml(m.effort?.maxLabel || "High")}</span>
+                        ${renderCapabilityBadge(m.effort)}
                       </div>
                       <div class="r001-model-desc">${escapeHtml(levelsText)} — ${escapeHtml(m.description)}</div>
                     </div>
                   </div>
-                  ${isSelected ? `<span style="flex-shrink:0">${ICONS.check}</span>` : ""}
+                  ${isSelected ? `<span style="flex-shrink:0;color:#38bdf8">${ICONS.check}</span>` : ""}
                 </button>`;
             })
             .join("")}
@@ -1254,23 +1598,69 @@
   }
 
   function renderSecondaryPopover() {
+    if (state.activePopover === "workspace") {
+      const ws = state.editorContext?.workspaceSummary;
+      const q = state.workspaceSearch.trim().toLowerCase();
+      const files = (ws?.files || []).filter((f) => !q || f.toLowerCase().includes(q));
+      return `
+        <div class="r001-popover" id="r001-popover" style="max-height:420px">
+          <div class="r001-popover-head">
+            <span class="r001-popover-title">${ICONS.folderTree}<span>Thư mục dự án (${escapeHtml(ws?.projectName || "Chưa mở")})</span></span>
+            <div style="display:flex;gap:5px">
+              <button type="button" class="r001-back-btn" data-action="refresh-workspace" title="Quét lại thư mục dự án">${ICONS.refresh}<span>Quét lại</span></button>
+              <button type="button" class="r001-back-btn" data-action="toggle-auto-workspace">${state.autoWorkspace ? "Đang bật" : "Đang tắt"}</button>
+            </div>
+          </div>
+          ${
+            ws && ws.fileCount > 0
+              ? `
+                <div class="r001-ws-summary-bar">
+                  <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHtml(ws.projectRoot)}">${escapeHtml(ws.projectName)} · ${ws.fileCount}${ws.truncated ? "+" : ""} tệp · ${ws.dirCount} thư mục</span>
+                  <span style="flex-shrink:0">${ws.source === "workspace" ? "Workspace" : "Auto-Root"}</span>
+                </div>
+                <input type="text" class="r001-search" id="r001-ws-search" placeholder="Tìm nhanh tệp trong dự án để đính kèm..." value="${escapeHtml(state.workspaceSearch)}" />
+                <div class="r001-popover-list">
+                  ${
+                    !q && ws.treePreview
+                      ? `<div class="r001-section-label">Cấu trúc thư mục đã đồng bộ với Axiom</div><pre class="r001-tree-pre">${escapeHtml(ws.treePreview)}</pre>`
+                      : ""
+                  }
+                  <div class="r001-section-label">Nhấn tệp để đính kèm trực tiếp (${files.length})</div>
+                  ${files
+                    .slice(0, 60)
+                    .map(
+                      (rel) => `
+                        <button type="button" class="r001-model-item" data-action="attach-project-file" data-rel="${escapeHtml(rel)}">
+                          <div class="r001-model-left">${ICONS.file}<div class="r001-model-name" style="font-family:var(--font-mono);font-size:11.5px;font-weight:500">${escapeHtml(rel)}</div></div>
+                        </button>`
+                    )
+                    .join("")}
+                </div>
+              `
+              : `<div style="padding:18px;text-align:center;color:var(--text-secondary)">Chưa mở thư mục hoặc tệp nào. Hãy mở Folder dự án trong IDE để Axiom đọc toàn bộ mã nguồn.</div>`
+          }
+        </div>
+      `;
+    }
+
     if (state.activePopover === "sync") {
       const tools = state.envSync?.cliTools || [];
       const ctx = state.editorContext || {};
+      const ws = ctx.workspaceSummary;
       return `
-        <div class="r001-popover" id="r001-popover" style="max-height:360px">
+        <div class="r001-popover" id="r001-popover" style="max-height:380px">
           <div class="r001-popover-head">
-            <span class="r001-popover-title">Đồng bộ hệ sinh thái (${escapeHtml(state.envSync?.ideName || "IDE")})</span>
-            <button type="button" class="r001-back-btn" data-action="sync-env">${ICONS.refresh}<span>Đồng bộ ngay</span></button>
+            <span class="r001-popover-title">${ICONS.blueprint}<span>Đồng bộ hệ sinh thái (${escapeHtml(state.envSync?.ideName || "IDE")})</span></span>
+            <button type="button" class="r001-back-btn" data-action="sync-env">${ICONS.refresh}<span>Đồng bộ</span></button>
           </div>
           <div class="r001-popover-list" style="gap:5px;padding:8px 10px">
             <div class="r001-eco-row">
-              <span>Tệp đang mở tự động</span>
-              <span class="r001-eco-badge ${ctx.activeFile ? "synced" : "idle"}">${escapeHtml(ctx.activeFile ? ctx.activeFile.fileName : "Chưa mở tệp")}</span>
+              <span>Dự án đang mở</span>
+              <span class="r001-eco-badge ${ws ? "synced" : "idle"}" title="${escapeHtml(ws?.projectRoot || "")}">${escapeHtml(ws ? `${ws.projectName} (${ws.fileCount} tệp)` : "Chưa có")}</span>
             </div>
             <div class="r001-eco-row">
-              <span>Thư mục làm việc (Auto CWD)</span>
-              <span class="r001-eco-badge detected" title="${escapeHtml(ctx.workingDir || "")}">${escapeHtml(ctx.workspaceName || "Tự động theo tệp")}</span>
+              <span>Tệp đang mở tự động</span>
+              <span class="r001-eco-badge ${ctx.activeFile ? "detected" : "idle"}">${escapeHtml(ctx.activeFile ? ctx.activeFile.fileName : "Chưa mở tệp")}</span>
             </div>
             ${tools
               .map((t) => {
@@ -1292,7 +1682,7 @@
       return `
         <div class="r001-popover" id="r001-popover">
           <div class="r001-popover-head">
-            <span class="r001-popover-title">Lịch sử hội thoại (${state.sessions.length})</span>
+            <span class="r001-popover-title">${ICONS.history}<span>Lịch sử hội thoại (${state.sessions.length})</span></span>
             <button type="button" class="r001-back-btn" data-action="close-popover">Đóng</button>
           </div>
           <div class="r001-popover-list">
@@ -1316,20 +1706,23 @@
     if (state.activePopover === "attach") {
       const openTabs = state.editorContext?.openTabs || [];
       return `
-        <div class="r001-popover" id="r001-popover" style="max-height:310px">
+        <div class="r001-popover" id="r001-popover" style="max-height:330px">
           <div class="r001-popover-head">
-            <span class="r001-popover-title">Ngữ cảnh mã nguồn (Không cần mở Folder)</span>
+            <span class="r001-popover-title">${ICONS.folderTree}<span>Đính kèm ngữ cảnh mã nguồn</span></span>
             <button type="button" class="r001-back-btn" data-action="close-popover">Đóng</button>
           </div>
           <div class="r001-popover-list">
+            <button type="button" class="r001-model-item" data-action="toggle-popover" data-popover="workspace">
+              <div class="r001-model-left">${ICONS.folderTree}<div><div class="r001-model-name">Cây thư mục dự án (Workspace)</div><div class="r001-model-desc">Duyệt và chọn bất kỳ tệp nào trong thư mục đang mở</div></div></div>
+            </button>
             <button type="button" class="r001-model-item" data-action="attach-ctx" data-kind="activeFile">
-              <div class="r001-model-left">${ICONS.file}<div><div class="r001-model-name">Tệp đang mở (Active Editor)</div><div class="r001-model-desc">Đưa tệp đang mở + lỗi Diagnostics vào prompt</div></div></div>
+              <div class="r001-model-left">${ICONS.file}<div><div class="r001-model-name">Tệp đang mở (Active Editor)</div><div class="r001-model-desc">Đưa tệp hiện tại + lỗi Diagnostics vào prompt</div></div></div>
             </button>
             <button type="button" class="r001-model-item" data-action="attach-ctx" data-kind="selection">
               <div class="r001-model-left">${ICONS.scissors}<div><div class="r001-model-name">Đoạn code đang bôi đen (Selection)</div><div class="r001-model-desc">Chỉ đính kèm các dòng đang chọn</div></div></div>
             </button>
             <button type="button" class="r001-model-item" data-action="attach-ctx" data-kind="workspaceFile">
-              <div class="r001-model-left">${ICONS.folder}<div><div class="r001-model-name">Chọn tệp cùng thư mục / dự án...</div><div class="r001-model-desc">Hoạt động ngay cả khi chưa mở Workspace Folder</div></div></div>
+              <div class="r001-model-left">${ICONS.folder}<div><div class="r001-model-name">Mở Quick Pick chọn tệp...</div><div class="r001-model-desc">Tìm nhanh bằng hộp thoại IDE</div></div></div>
             </button>
             ${
               openTabs.length > 0
@@ -1351,15 +1744,15 @@
 
     if (state.activePopover === "slash") {
       return `
-        <div class="r001-popover" id="r001-popover" style="max-height:250px">
+        <div class="r001-popover" id="r001-popover" style="max-height:270px">
           <div class="r001-popover-head">
-            <span class="r001-popover-title">Slash Commands</span>
+            <span class="r001-popover-title">${ICONS.terminal}<span>Slash Commands</span></span>
           </div>
           <div class="r001-popover-list">
             ${SLASH_COMMANDS.map(
               (c) => `
               <button type="button" class="r001-model-item" data-action="run-slash" data-cmd="${escapeHtml(c.cmd)}">
-                <div><div class="r001-model-name">${escapeHtml(c.cmd)}</div><div class="r001-model-desc">${escapeHtml(c.desc)}</div></div>
+                <div><div class="r001-model-name" style="font-family:var(--font-mono)">${escapeHtml(c.cmd)}</div><div class="r001-model-desc">${escapeHtml(c.desc)}</div></div>
               </button>`
             ).join("")}
           </div>
@@ -1369,14 +1762,14 @@
 
     if (state.activePopover === "mode") {
       const modes = [
-        { id: "auto", label: "Auto", desc: "Tự động phân tích file đang mở, viết code & lệnh thực thi" },
-        { id: "ask", label: "Ask", desc: "Hỏi đáp kiến trúc, giải thích code và debug nhanh" },
-        { id: "plan", label: "Plan", desc: "Lập kế hoạch từng bước như Cline Plan Mode trước khi sửa" }
+        { id: "auto", label: "Auto", desc: "Tự động đọc dự án, gọi công cụ tra cứu tệp & viết mã" },
+        { id: "ask", label: "Ask", desc: "Hỏi đáp kiến trúc, giải thích hệ thống và debug nhanh" },
+        { id: "plan", label: "Plan", desc: "Lập bản thiết kế kỹ thuật từng bước trước khi sửa" }
       ];
       return `
-        <div class="r001-popover" id="r001-popover" style="max-height:220px">
+        <div class="r001-popover" id="r001-popover" style="max-height:230px">
           <div class="r001-popover-head">
-            <span class="r001-popover-title">Chế độ làm việc</span>
+            <span class="r001-popover-title">${ICONS.bolt}<span>Chế độ làm việc</span></span>
           </div>
           <div class="r001-popover-list">
             ${modes
@@ -1384,7 +1777,7 @@
                 (m) => `
               <button type="button" class="r001-model-item ${state.mode === m.id ? "selected" : ""}" data-action="set-mode" data-mode="${escapeHtml(m.id)}">
                 <div class="r001-model-left">${ICONS.bolt}<div><div class="r001-model-name">${escapeHtml(m.label)}</div><div class="r001-model-desc">${escapeHtml(m.desc)}</div></div></div>
-                ${state.mode === m.id ? ICONS.check : ""}
+                ${state.mode === m.id ? `<span style="color:#38bdf8">${ICONS.check}</span>` : ""}
               </button>`
               )
               .join("")}
@@ -1397,17 +1790,16 @@
   }
 
   function renderAuthOverlay() {
-    if (!state.authModalOpen && state.connected) return "";
     if (!state.authModalOpen) return "";
     const hasConnected = state.connected;
     return `
       <div class="r001-auth-backdrop" id="r001-auth-backdrop">
         <form class="r001-auth-card" id="r001-auth-form">
           <div class="r001-auth-head">
-            <img src="${escapeHtml(aiFaceUri || logoUri)}" alt="001Router" />
+            ${renderAxiomBot("msg", "idle", false)}
             <div>
               <div class="r001-auth-title">Kết nối & Đồng bộ 001Router</div>
-              <div class="r001-auth-desc">Nhập mật khẩu quản trị 001Router một lần để đồng bộ Antigravity, CLI & VS Code.</div>
+              <div class="r001-auth-desc">Nhập mật khẩu quản trị 001Router một lần để đồng bộ Antigravity, CLI & IDE.</div>
             </div>
           </div>
 
@@ -1420,7 +1812,7 @@
             <label for="r001-auth-pw">Mật khẩu Web 001Router</label>
             <div class="r001-input-wrap">
               <input id="r001-auth-pw" class="r001-input" type="${state.authShowPassword ? "text" : "password"}" placeholder="Nhập mật khẩu đăng nhập web 001Router..." value="${escapeHtml(state.authPasswordInput)}" required style="padding-right:34px" />
-              <button type="button" class="r001-eye-btn" data-action="toggle-pw" title="Hiện/Ẩn mật khẩu">${state.authShowPassword ? ICONS.eyeOff : ICONS.eye}</button>
+              <button type="button" class="r001-eye-btn" data-action="toggle-pw" aria-label="Hiện hoặc ẩn mật khẩu" title="Hiện/Ẩn mật khẩu">${state.authShowPassword ? ICONS.eyeOff : ICONS.eye}</button>
             </div>
           </div>
 
@@ -1446,37 +1838,54 @@
   }
 
   function renderContextStrip() {
+    const ws = state.editorContext?.workspaceSummary;
     const af = state.editorContext?.activeFile;
-    if (!af) {
-      return `
-        <div class="r001-context-strip">
-          <span style="font-size:11px;color:var(--text-muted)">Mở bất kỳ file nào để nhận diện tự động (không cần mở Folder)</span>
-          <div class="r001-context-actions">
-            <button type="button" class="r001-at-btn" data-action="toggle-popover" data-popover="attach">+ File</button>
-          </div>
-        </div>
-      `;
-    }
 
-    const loc = af.selectionLabel ? ` · ${af.selectionLabel}` : ` · ${af.lineCount} dòng`;
-    return `
-      <div class="r001-context-strip">
-        <div style="display:flex;align-items:center;gap:5px;min-width:0;flex:1">
+    const folderPill =
+      ws && ws.fileCount > 0
+        ? `
           <button
             type="button"
-            class="r001-active-file-pill ${state.autoActiveFile ? "" : "muted"}"
-            data-action="toggle-auto-file"
-            title="${state.autoActiveFile ? "Đang tự động gửi kèm file đang mở. Nhấn để tắt tạm thời." : "Đã tắt gửi tự động file đang mở. Nhấn để bật lại."}"
+            class="r001-folder-pill ${state.autoWorkspace ? "" : "muted"}"
+            data-action="toggle-popover"
+            data-popover="workspace"
+            title="${state.autoWorkspace ? `Axiom đang đọc toàn bộ thư mục ${ws.projectName} (${ws.fileCount} tệp). Nhấn để xem cây thư mục.` : "Đã tắt đọc thư mục dự án. Nhấn để bật lại."}"
           >
-            ${state.autoActiveFile ? ICONS.eye : ICONS.eyeOff}
-            <span class="r001-active-file-name">${escapeHtml(af.fileName)}${escapeHtml(loc)}</span>
-            ${af.diagnosticErrors > 0 ? `<span class="r001-diag-tag">${af.diagnosticErrors} err</span>` : ""}
-            ${af.diagnosticErrors === 0 && af.diagnosticWarnings > 0 ? `<span class="r001-diag-tag warn">${af.diagnosticWarnings} warn</span>` : ""}
+            ${ICONS.folderTree}
+            <span class="r001-active-file-name">${escapeHtml(ws.projectName)}</span>
+            <span class="r001-folder-count">${ws.fileCount}${ws.truncated ? "+" : ""}</span>
           </button>
+        `
+        : "";
+
+    const activeFilePill = af
+      ? (() => {
+          const loc = af.selectionLabel ? ` · ${af.selectionLabel}` : ` · ${af.lineCount}L`;
+          return `
+            <button
+              type="button"
+              class="r001-active-file-pill ${state.autoActiveFile ? "" : "muted"}"
+              data-action="toggle-auto-file"
+              title="${state.autoActiveFile ? "Đang ưu tiên kèm tệp đang mở. Nhấn để tắt tạm (vẫn đọc được cả thư mục dự án)." : "Đã tắt ưu tiên tệp lẻ. Nhấn để bật lại."}"
+            >
+              ${state.autoActiveFile ? ICONS.eye : ICONS.eyeOff}
+              <span class="r001-active-file-name">${escapeHtml(af.fileName)}${escapeHtml(loc)}</span>
+              ${af.diagnosticErrors > 0 ? `<span class="r001-diag-tag">${af.diagnosticErrors}E</span>` : ""}
+              ${af.diagnosticErrors === 0 && af.diagnosticWarnings > 0 ? `<span class="r001-diag-tag warn">${af.diagnosticWarnings}W</span>` : ""}
+            </button>
+          `;
+        })()
+      : "";
+
+    return `
+      <div class="r001-context-strip">
+        <div class="r001-context-pills">
+          ${folderPill || activeFilePill
+            ? `${folderPill}${activeFilePill}`
+            : `<span style="font-size:11px;color:var(--text-muted)">Mở thư mục dự án hoặc tệp để Axiom tự động đọc ngữ cảnh</span>`}
         </div>
         <div class="r001-context-actions">
-          <button type="button" class="r001-at-btn" data-action="reveal-active-file" title="Mở tệp này trong Editor">Mở</button>
-          <button type="button" class="r001-at-btn" data-action="toggle-popover" data-popover="attach" title="Đính kèm thêm Tab hoặc File khác">@ Ngữ cảnh</button>
+          <button type="button" class="r001-at-btn" data-action="toggle-popover" data-popover="attach" title="Đính kèm tệp hoặc tab">@ Tệp</button>
         </div>
       </div>
     `;
@@ -1506,7 +1915,7 @@
   }
 
   /**
-   * Incremental 60fps streaming patch so token arrival NEVER destroys 3D AI animations or <details open>.
+   * Incremental 60fps streaming patch so token arrival NEVER resets Axiom's live animations or <details open>.
    */
   function patchStreamingAssistantDom(msg) {
     const container = document.getElementById(`msg-${msg.id}`);
@@ -1526,26 +1935,36 @@
       ? "terminal"
       : msg.phase || (msg.text ? "streaming" : msg.reasoning ? "thinking" : "analyzing");
 
-    const aiCore = container.querySelector(".r001-ai-core");
-    if (aiCore) aiCore.dataset.phase = phase;
+    const botEl = container.querySelector(".axiom-bot");
+    if (botEl) botEl.dataset.mood = phase;
 
     const personaEl = container.querySelector(".r001-ai-persona-label");
     const subEl = container.querySelector(".r001-live-sub-text");
     if (personaEl) {
       personaEl.textContent =
-        phase === "thinking"
-          ? "AI Core · Đang suy nghĩ sâu"
-          : phase === "streaming"
-            ? "AI Core · Đang tổng hợp giải pháp"
-            : "AI Core · Đang phân tích dự án";
+        phase === "terminal"
+          ? "Axiom · Đang chạy Terminal"
+          : phase === "thinking"
+            ? "Axiom · Đang suy luận sâu"
+            : phase === "streaming"
+              ? "Axiom · Đang phản hồi"
+              : "Axiom · Đang quét mã nguồn";
     }
     if (subEl) {
       subEl.textContent =
         phase === "thinking"
-          ? "Phân tích chuỗi suy luận đa bước..."
+          ? "Tổng hợp kiến trúc & chuỗi suy luận..."
           : phase === "streaming"
-            ? "Đang truyền phản hồi trực tiếp..."
-            : msg.phaseDetail || "Đang đọc ngữ cảnh file...";
+            ? "Đang trình bày giải pháp..."
+            : msg.phaseDetail || "Đang phân tích cấu trúc dự án...";
+    }
+
+    const toolSlot = container.querySelector(".r001-tool-slot");
+    if (toolSlot && Array.isArray(msg.toolLogs) && msg.toolLogs.length > 0) {
+      const wasOpen = Boolean(toolSlot.querySelector("details")?.open);
+      toolSlot.innerHTML = renderToolTraceCard(msg);
+      const nextDet = toolSlot.querySelector("details");
+      if (nextDet) nextDet.open = wasOpen;
     }
 
     const thinkWrap = container.querySelector(".r001-thinking-slot");
@@ -1598,34 +2017,38 @@
       (r) => !r.sessionId || r.sessionId === activeSession?.id
     );
     const hasRunningTerminal = sessionTerminals.some((r) => r.status === "running");
+    const ws = state.editorContext?.workspaceSummary;
 
     const textareaEl = document.getElementById("r001-input");
     const selectionStart = textareaEl ? textareaEl.selectionStart : null;
     const selectionEnd = textareaEl ? textareaEl.selectionEnd : null;
     const hadFocus = document.activeElement && document.activeElement.id === "r001-input";
 
+    const heroMood = hasRunningTerminal ? "terminal" : state.isTypingDraft ? "listening" : "idle";
+
     root.innerHTML = `
       <div class="r001-shell">
         <header class="r001-topbar">
           <div class="r001-topbar-left">
-            <span class="r001-session-title">${escapeHtml(activeSession?.title || "Untitled")}</span>
+            <span class="r001-brand-mark" aria-hidden="true">${ICONS.brandPrism}</span>
+            <span class="r001-session-title">${escapeHtml(activeSession?.title || "Axiom Session")}</span>
             <button type="button" class="r001-conn-pill ${state.connected ? "connected" : ""}" data-action="open-auth" title="${escapeHtml(state.serverUrl)}">
               <span class="r001-conn-dot"></span>
-              <span>${state.connected ? "Connected" : "Connect"}</span>
+              <span>${state.connected ? "Online" : "Connect"}</span>
             </button>
-            <button type="button" class="r001-sync-pill" data-action="toggle-popover" data-popover="sync" title="Trạng thái đồng bộ Antigravity, CLI & Editor">
+            <button type="button" class="r001-sync-pill" data-action="toggle-popover" data-popover="sync" title="Trạng thái đồng bộ Antigravity, CLI & Workspace">
               <span>${escapeHtml(state.envSync?.ideKind === "antigravity" ? "AG" : "IDE")} · ${syncedCliCount} Sync</span>
             </button>
           </div>
           <div class="r001-topbar-actions">
             ${
               surface === "sidebar"
-                ? `<button type="button" class="r001-icon-btn" data-action="open-tab" title="Mở rộng sang Editor Tab">${ICONS.popout}</button>`
+                ? `<button type="button" class="r001-icon-btn" data-action="open-tab" aria-label="Mở rộng sang Editor Tab" title="Mở rộng sang Editor Tab">${ICONS.popout}</button>`
                 : ""
             }
-            <button type="button" class="r001-icon-btn ${activeSession?.bookmarked ? "active" : ""}" data-action="toggle-bookmark" title="Đánh dấu hội thoại">${activeSession?.bookmarked ? ICONS.bookmarkFilled : ICONS.bookmark}</button>
-            <button type="button" class="r001-icon-btn" data-action="toggle-popover" data-popover="history" title="Lịch sử hội thoại">${ICONS.history}</button>
-            <button type="button" class="r001-icon-btn" data-action="new-chat" title="Cuộc trò chuyện mới">${ICONS.newChat}</button>
+            <button type="button" class="r001-icon-btn ${activeSession?.bookmarked ? "active" : ""}" data-action="toggle-bookmark" aria-label="Đánh dấu hội thoại" title="Đánh dấu hội thoại">${activeSession?.bookmarked ? ICONS.bookmarkFilled : ICONS.bookmark}</button>
+            <button type="button" class="r001-icon-btn" data-action="toggle-popover" data-popover="history" aria-label="Lịch sử hội thoại" title="Lịch sử hội thoại">${ICONS.history}</button>
+            <button type="button" class="r001-icon-btn" data-action="new-chat" aria-label="Cuộc trò chuyện mới" title="Cuộc trò chuyện mới">${ICONS.newChat}</button>
           </div>
         </header>
 
@@ -1635,13 +2058,19 @@
               ? `
               <div class="r001-hero" id="r001-hero-stage">
                 <div class="r001-hero-brand">
-                  <img class="r001-hero-logo" src="${escapeHtml(logoUri)}" alt="001Router" />
+                  <span style="color:var(--accent-primary-bright)">${ICONS.brandPrism}</span>
                   <span class="r001-hero-title">001Router</span>
+                  <span class="r001-hero-subtag">Architect Core</span>
                 </div>
                 <div class="r001-hero-center">
-                  ${render3DAiFaceCore("hero", hasRunningTerminal ? "terminal" : "idle")}
-                  <div class="r001-hero-subtitle">3D Neural Core đã đồng bộ ${escapeHtml(state.envSync?.ideName || "IDE")}${state.editorContext?.activeFile ? ` · Đang theo dõi ${escapeHtml(state.editorContext.activeFile.fileName)}` : ""}</div>
-                  <div class="r001-hero-meta">
+                  ${renderAxiomBot("hero", heroMood, isSing)}
+                  <div class="r001-hero-name">Axiom</div>
+                  <div class="r001-hero-subtitle">${
+                    ws && ws.fileCount > 0
+                      ? `Đã kết nối thư mục <strong>${escapeHtml(ws.projectName)}</strong> (${ws.fileCount}${ws.truncated ? "+" : ""} tệp) — sẵn sàng phân tích toàn dự án.`
+                      : `Kỹ sư kiến trúc AI đồng bộ ${escapeHtml(state.envSync?.ideName || "IDE")}. Mở thư mục dự án để phân tích toàn hệ thống.`
+                  }</div>
+                  <div class="r001-hero-telemetry">
                     <span>${(state.catalog?.providers || []).length} providers</span>
                     <span>·</span>
                     <span>${totalModels} models</span>
@@ -1649,8 +2078,9 @@
                     <span>Effort: <strong style="color:var(--effort-color)">${escapeHtml(stop.label)}</strong></span>
                   </div>
                   <div class="r001-hero-quick">
-                    <button type="button" class="r001-quick-pill" data-action="quick-prompt" data-prompt="Phân tích kiến trúc và tìm điểm cần tối ưu trong file đang mở">${ICONS.brain}<span>Phân tích file đang mở</span></button>
-                    <button type="button" class="r001-quick-pill" data-action="open-model-picker">${ICONS.bolt}<span>Chỉnh Model & Effort</span></button>
+                    <button type="button" class="r001-quick-pill" data-action="quick-prompt" data-prompt="Đọc toàn bộ dự án đang mở, tóm tắt kiến trúc, luồng hoạt động chính và các file quan trọng">${ICONS.folderTree}<span>Đọc toàn bộ dự án</span></button>
+                    <button type="button" class="r001-quick-pill" data-action="quick-prompt" data-prompt="Phân tích file đang mở, tìm bug tiềm ẩn và đề xuất tối ưu kiến trúc">${ICONS.blueprint}<span>Review file đang mở</span></button>
+                    <button type="button" class="r001-quick-pill" data-action="open-model-picker">${ICONS.sliders}<span>Model & Effort</span></button>
                   </div>
                 </div>
                 <div></div>
@@ -1666,7 +2096,7 @@
                           ${
                             Array.isArray(m.attachments) && m.attachments.length
                               ? `<div class="r001-msg-attachments">${m.attachments
-                                  .map((a) => `<span class="r001-chip">${ICONS.file}<span>${escapeHtml(a.label || a.path)}</span></span>`)
+                                  .map((a) => `<span class="r001-chip ${a.isWorkspace ? "ws-chip" : ""}">${a.isWorkspace ? ICONS.folderTree : ICONS.file}<span>${escapeHtml(a.label || a.path)}</span></span>`)
                                   .join("")}</div>`
                               : ""
                           }
@@ -1676,7 +2106,8 @@
                     const isLastStreaming = isStreaming && idx === messages.length - 1;
                     return `
                       <div class="r001-msg r001-msg-assistant" id="msg-${escapeHtml(m.id)}">
-                        ${renderAssistantPhaseHeader(m, isLastStreaming, isLastStreaming && hasRunningTerminal)}
+                        ${renderAssistantPhaseHeader(m, isLastStreaming, isLastStreaming && hasRunningTerminal, isSing)}
+                        <div class="r001-tool-slot">${renderToolTraceCard(m)}</div>
                         <div class="r001-thinking-slot">${renderThinkingCard(m, isLastStreaming)}</div>
                         <div class="r001-markdown">${renderMarkdown(m.text, m.id, isLastStreaming)}</div>
                         ${m.error ? `<div class="r001-error-banner">${escapeHtml(m.error)}</div>` : ""}
@@ -1698,17 +2129,17 @@
                 ? `<div class="r001-composer-chips">
                     ${state.attachments
                       .map(
-                        (a) => `<span class="r001-chip">${ICONS.file}<span>${escapeHtml(a.label)}</span><button type="button" data-action="remove-attach" data-id="${escapeHtml(a.id)}">×</button></span>`
+                        (a) => `<span class="r001-chip">${ICONS.file}<span>${escapeHtml(a.label)}</span><button type="button" data-action="remove-attach" data-id="${escapeHtml(a.id)}" aria-label="Gỡ tệp đính kèm">×</button></span>`
                       )
                       .join("")}
                   </div>`
                 : ""
             }
-            <textarea id="r001-input" class="r001-textarea" rows="1" placeholder="Nhập yêu cầu code, @ đính kèm tab, hoặc /run <lệnh terminal>...">${escapeHtml(state.draft)}</textarea>
+            <textarea id="r001-input" class="r001-textarea" rows="1" placeholder="Hỏi Axiom về toàn dự án, @ đính kèm tệp, hoặc /run <lệnh terminal>...">${escapeHtml(state.draft)}</textarea>
             <div class="r001-toolbar">
               <div class="r001-toolbar-left">
-                <button type="button" class="r001-tool-btn" data-action="toggle-popover" data-popover="attach" title="Đính kèm file / tab">${ICONS.plus}</button>
-                <button type="button" class="r001-tool-btn framed" data-action="toggle-popover" data-popover="slash" title="Slash Commands">${ICONS.slash}</button>
+                <button type="button" class="r001-tool-btn" data-action="toggle-popover" data-popover="attach" aria-label="Đính kèm tệp hoặc tab" title="Đính kèm file / tab">${ICONS.plus}</button>
+                <button type="button" class="r001-tool-btn framed" data-action="toggle-popover" data-popover="slash" aria-label="Lệnh nhanh Slash Commands" title="Slash Commands">${ICONS.slash}</button>
                 <button type="button" class="r001-model-pill" data-action="open-model-picker" data-singularity="${isSing ? "1" : "0"}" title="${escapeHtml(`${state.selection?.providerName || "Provider"} · ${state.selection?.fullId || cleanBaseModelLabel} (${stop.label})`)}">
                   ${renderLogoPlate(selLogoFile, selProvider?.monogram || "01", selProvider?.color, "sm")}
                   <span class="r001-model-pill-name">${escapeHtml(cleanBaseModelLabel)}</span>
@@ -1725,8 +2156,8 @@
                 </button>
                 ${
                   isStreaming
-                    ? `<button type="button" class="r001-send-btn streaming" data-action="abort-chat" title="Dừng phản hồi">${ICONS.stop}</button>`
-                    : `<button type="button" class="r001-send-btn" id="r001-send-btn" data-action="send-chat" title="Gửi (Enter)">${ICONS.arrowUp}</button>`
+                    ? `<button type="button" class="r001-send-btn streaming" data-action="abort-chat" aria-label="Dừng phản hồi" title="Dừng phản hồi">${ICONS.stop}</button>`
+                    : `<button type="button" class="r001-send-btn" id="r001-send-btn" data-action="send-chat" aria-label="Gửi yêu cầu" title="Gửi (Enter)">${ICONS.arrowUp}</button>`
                 }
               </div>
             </div>
@@ -1744,7 +2175,8 @@
       const stops = profile.effortLevels;
       const idx = Math.max(0, stops.findIndex((s) => s.id === stop.id));
       const initialRatio = stops.length === 1 ? 1 : idx / Math.max(1, stops.length - 1);
-      syncSliderDom(initialRatio, false);
+      fxState.lastTierId = stop.id;
+      syncSliderDom(initialRatio, false, false);
       startEffortCanvasLoop();
     }
 
@@ -1766,6 +2198,7 @@
     const session = getActiveSession();
     const attachments = [...state.attachments];
     state.draft = "";
+    state.isTypingDraft = false;
     state.attachments = [];
     state.activePopover = null;
     if (!/^\/run\s+/i.test(text)) {
@@ -1778,6 +2211,7 @@
       text,
       attachments,
       includeActiveFile: state.autoActiveFile,
+      includeWorkspace: state.autoWorkspace,
       mode: state.mode,
       selection: state.selection
     });
@@ -1799,6 +2233,24 @@
         state.draft = e.target.value;
         e.target.style.height = "auto";
         e.target.style.height = `${Math.min(150, Math.max(28, e.target.scrollHeight))}px`;
+
+        // Live attentive expression on Axiom bot while the developer is typing!
+        state.isTypingDraft = Boolean(state.draft.trim());
+        const heroBot = document.querySelector(".axiom-bot.hero");
+        if (heroBot && heroBot.dataset.mood !== "terminal") {
+          heroBot.dataset.mood = state.isTypingDraft ? "listening" : "idle";
+        }
+        if (typingIdleTimer) clearTimeout(typingIdleTimer);
+        if (state.isTypingDraft) {
+          typingIdleTimer = setTimeout(() => {
+            state.isTypingDraft = false;
+            const liveBot = document.querySelector(".axiom-bot.hero");
+            if (liveBot && liveBot.dataset.mood === "listening") {
+              liveBot.dataset.mood = "idle";
+            }
+          }, 1800);
+        }
+
         if (state.draft === "/") {
           state.activePopover = "slash";
           render();
@@ -1815,17 +2267,27 @@
       });
     }
 
-    // Interactive 3D mouse-tracking parallax on Hero 3D AI Face
+    // Living cursor gaze-tracking & 3D head tilt on Hero Axiom Bot
     const heroStage = document.getElementById("r001-hero-stage");
     if (heroStage && !REDUCED_MOTION_MQ.matches && !state.fxPaused) {
       heroStage.addEventListener("pointermove", (e) => {
-        const core = heroStage.querySelector(".r001-ai-core.hero");
-        if (!core) return;
+        const bot = heroStage.querySelector(".axiom-bot.hero");
+        if (!bot) return;
         const r = heroStage.getBoundingClientRect();
         const nx = ((e.clientX - r.left) / Math.max(1, r.width) - 0.5) * 2;
         const ny = ((e.clientY - r.top) / Math.max(1, r.height) - 0.5) * 2;
-        core.style.setProperty("--tilt-y", `${(nx * 15).toFixed(1)}deg`);
-        core.style.setProperty("--tilt-x", `${(-ny * 12).toFixed(1)}deg`);
+        bot.style.setProperty("--gaze-x", `${(nx * 3.8).toFixed(2)}px`);
+        bot.style.setProperty("--gaze-y", `${(ny * 2.8).toFixed(2)}px`);
+        bot.style.setProperty("--tilt-y", `${(nx * 12).toFixed(1)}deg`);
+        bot.style.setProperty("--tilt-x", `${(-ny * 9).toFixed(1)}deg`);
+      });
+      heroStage.addEventListener("pointerleave", () => {
+        const bot = heroStage.querySelector(".axiom-bot.hero");
+        if (!bot) return;
+        bot.style.setProperty("--gaze-x", "0px");
+        bot.style.setProperty("--gaze-y", "0px");
+        bot.style.setProperty("--tilt-y", "0deg");
+        bot.style.setProperty("--tilt-x", "0deg");
       });
     }
 
@@ -1888,6 +2350,19 @@
       });
     }
 
+    const wsSearch = document.getElementById("r001-ws-search");
+    if (wsSearch) {
+      wsSearch.addEventListener("input", (e) => {
+        state.workspaceSearch = e.target.value;
+        render();
+        const next = document.getElementById("r001-ws-search");
+        if (next) {
+          next.focus();
+          next.setSelectionRange(next.value.length, next.value.length);
+        }
+      });
+    }
+
     const rangeInput = document.getElementById("r001-effort-range");
     if (rangeInput) {
       const commitSnap = () => {
@@ -1901,12 +2376,12 @@
 
         rangeInput.value = String(Math.round(snapRatio * 1000));
         commitEffortChoice(chosen.id);
-        syncSliderDom(snapRatio, true);
+        syncSliderDom(snapRatio, true, true);
       };
 
       rangeInput.addEventListener("input", () => {
         const rawRatio = Number(rangeInput.value) / 1000;
-        syncSliderDom(rawRatio, false);
+        syncSliderDom(rawRatio, false, true);
       });
 
       rangeInput.addEventListener("change", commitSnap);
@@ -1927,7 +2402,7 @@
         if (chosen) {
           rangeInput.value = String(Math.round(nextRatio * 1000));
           commitEffortChoice(chosen.id);
-          syncSliderDom(nextRatio, true);
+          syncSliderDom(nextRatio, true, true);
         }
       });
     }
@@ -1988,6 +2463,10 @@
       case "toggle-popover": {
         const target = btn.dataset.popover;
         state.activePopover = state.activePopover === target ? null : target;
+        if (state.activePopover === "workspace") {
+          state.workspaceSearch = "";
+          vscode.postMessage({ type: "refreshWorkspace" });
+        }
         render();
         break;
       }
@@ -1998,10 +2477,25 @@
       case "sync-env":
         vscode.postMessage({ type: "syncEnv" });
         break;
+      case "refresh-workspace":
+        vscode.postMessage({ type: "refreshWorkspace" });
+        break;
+      case "toggle-auto-workspace":
+        state.autoWorkspace = !state.autoWorkspace;
+        vscode.postMessage({ type: "saveAutoWorkspace", enabled: state.autoWorkspace });
+        render();
+        break;
       case "toggle-auto-file":
         state.autoActiveFile = !state.autoActiveFile;
         vscode.postMessage({ type: "saveAutoActiveFile", enabled: state.autoActiveFile });
         render();
+        break;
+      case "attach-project-file":
+        if (btn.dataset.rel) {
+          state.activePopover = null;
+          render();
+          vscode.postMessage({ type: "pickContext", kind: "projectFile", uri: btn.dataset.rel });
+        }
         break;
       case "reveal-active-file":
         if (state.editorContext?.activeFile?.uri) {
@@ -2063,7 +2557,7 @@
         const ratio = stops.length === 1 ? 1 : idx / Math.max(1, stops.length - 1);
         const rangeInput = document.getElementById("r001-effort-range");
         if (rangeInput) rangeInput.value = String(Math.round(ratio * 1000));
-        syncSliderDom(ratio, true);
+        syncSliderDom(ratio, true, true);
         break;
       }
       case "select-combo": {
@@ -2075,7 +2569,7 @@
             providerSlug: "combo",
             providerName: "Combo",
             providerPreset: "combo",
-            providerColor: "#d97757",
+            providerColor: "#e57452",
             baseModelId: combo.name,
             displayLabel: combo.name,
             modelId: combo.name,
@@ -2130,6 +2624,9 @@
         } else if (cmd === "/effort") {
           state.activePopover = "model";
           state.pickerStep = "models";
+        } else if (cmd === "/workspace") {
+          state.activePopover = "workspace";
+          vscode.postMessage({ type: "refreshWorkspace" });
         } else if (cmd === "/sync") {
           vscode.postMessage({ type: "syncEnv" });
         } else if (cmd === "/run ") {
@@ -2217,6 +2714,9 @@
         if (typeof msg.autoActiveFile === "boolean") {
           state.autoActiveFile = msg.autoActiveFile;
         }
+        if (typeof msg.autoWorkspace === "boolean") {
+          state.autoWorkspace = msg.autoWorkspace;
+        }
         if (msg.envSync) state.envSync = msg.envSync;
         if (msg.editorContext) state.editorContext = msg.editorContext;
         state.sessions = Array.isArray(msg.sessions) ? msg.sessions : [];
@@ -2265,7 +2765,7 @@
           if (rangeInput) rangeInput.value = String(Math.round(r * 1000));
           const pillName = document.querySelector(".r001-model-pill-name");
           if (pillName) pillName.textContent = state.selection?.displayLabel || state.selection?.baseModelId || state.selection?.modelId;
-          syncSliderDom(r, true);
+          syncSliderDom(r, true, true);
         } else {
           render();
         }
@@ -2303,6 +2803,11 @@
           target.text = (target.text || "") + (msg.deltaText || "");
           target.reasoning = (target.reasoning || "") + (msg.deltaReasoning || "");
           if (msg.phase) target.phase = msg.phase;
+          if (msg.phaseDetail) target.phaseDetail = msg.phaseDetail;
+          if (msg.toolLog) {
+            if (!Array.isArray(target.toolLogs)) target.toolLogs = [];
+            target.toolLogs.push(msg.toolLog);
+          }
           patchStreamingAssistantDom(target);
         }
         break;
@@ -2398,6 +2903,5 @@
     }
   });
 
-  render();
   vscode.postMessage({ type: "ready" });
 })();

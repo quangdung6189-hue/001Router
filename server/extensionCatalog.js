@@ -84,6 +84,7 @@ function buildStops(levelIds) {
 }
 
 const EFFORT_SUFFIX_RE = /^(.*?)-(minimal|low|medium|high|xhigh|max)$/i;
+const PRODUCT_MAX_RE = /(?:qwen|codex|minimax|mistral|doubao|glm|kimi|ernie|step|hunyuan|deepseek|grok|nova|sonar|baichuan|yi)[^/]*-max$/i;
 const EFFORT_ORDER = Object.freeze(["low", "medium", "high", "xhigh", "max"]);
 
 function splitEffortSuffix(modelId) {
@@ -91,6 +92,9 @@ function splitEffortSuffix(modelId) {
   const m = EFFORT_SUFFIX_RE.exec(raw);
   if (!m || !m[1]) return { baseId: raw, suffix: null };
   let suffix = m[2].toLowerCase();
+  if (suffix === "max" && PRODUCT_MAX_RE.test(raw)) {
+    return { baseId: raw, suffix: null };
+  }
   if (suffix === "minimal") suffix = "low";
   return { baseId: m[1], suffix };
 }
@@ -113,7 +117,8 @@ export function getModelEffortProfile(provider, modelId, catalogEntry = null) {
   const slug = String(provider?.slug || "").toLowerCase().trim();
   const formatType = String(provider?.formatType || "").toLowerCase().trim();
   const idLower = String(modelId || "").toLowerCase().trim();
-  const suffixEffort = detectSuffixEffort(idLower);
+  const bareId = idLower.includes("/") ? idLower.slice(idLower.lastIndexOf("/") + 1) : idLower;
+  const suffixEffort = detectSuffixEffort(bareId);
 
   let levels = ["low", "medium", "high"];
   let defaultEffort = "medium";
@@ -122,7 +127,8 @@ export function getModelEffortProfile(provider, modelId, catalogEntry = null) {
     preset === "anthropic" ||
     preset === "claude" ||
     formatType === "anthropic" ||
-    idLower.startsWith("claude-");
+    bareId.startsWith("claude-") ||
+    idLower.startsWith("anthropic/");
 
   const isAntigravityOrCli =
     preset === "antigravity" ||
@@ -134,69 +140,85 @@ export function getModelEffortProfile(provider, modelId, catalogEntry = null) {
     preset === "openai" ||
     preset === "codex" ||
     preset === "azure" ||
-    idLower.startsWith("gpt-") ||
-    /^o[134]($|-)/.test(idLower) ||
-    idLower.includes("codex");
+    bareId.startsWith("gpt-") ||
+    /^o[134]($|-)/.test(bareId) ||
+    bareId.includes("codex") ||
+    idLower.startsWith("openai/");
 
   if (isAntigravityOrCli) {
-    if (idLower.includes("flash-lite") || idLower.includes("nano")) {
+    if (bareId.includes("flash-lite") || bareId.includes("nano")) {
       levels = ["low", "medium"];
       defaultEffort = "low";
-    } else if (idLower.includes("carbon")) {
+    } else if (bareId.includes("carbon")) {
       levels = ["low", "medium", "high"];
       defaultEffort = "medium";
     } else if (
-      idLower.startsWith("gemini-3") ||
-      idLower.startsWith("gemini-4") ||
-      idLower.includes("pro") ||
-      idLower.includes("ultra") ||
-      idLower.includes("neon") ||
-      idLower.includes("hydrogen") ||
-      idLower.includes("argon") ||
-      idLower.includes("claude-sonnet") ||
-      idLower.includes("claude-opus") ||
-      idLower.includes("claude-fable") ||
-      idLower.includes("gpt-oss")
+      bareId.startsWith("gemini-3") ||
+      bareId.startsWith("gemini-4") ||
+      bareId.includes("pro") ||
+      bareId.includes("ultra") ||
+      bareId.includes("neon") ||
+      bareId.includes("hydrogen") ||
+      bareId.includes("argon") ||
+      bareId.includes("claude-sonnet") ||
+      bareId.includes("claude-opus") ||
+      bareId.includes("claude-fable") ||
+      bareId.includes("claude-haiku-5")
     ) {
       levels = ["low", "medium", "high", "xhigh"];
       defaultEffort = "medium";
-    } else if (idLower.includes("flash") || idLower.includes("haiku")) {
+    } else if (bareId.includes("gpt-oss") || bareId.includes("flash") || bareId.includes("haiku")) {
       levels = ["low", "medium", "high"];
       defaultEffort = "medium";
     }
   } else if (isAnthropicFamily) {
-    if (idLower.includes("haiku") || idLower.includes("instant")) {
+    const isLegacyHaiku =
+      (bareId.includes("haiku") && !/haiku[-._]?[5-9]/.test(bareId)) ||
+      bareId.includes("instant") ||
+      bareId.startsWith("claude-2") ||
+      bareId.startsWith("claude-3-haiku") ||
+      bareId.startsWith("claude-3-5-haiku");
+
+    if (isLegacyHaiku) {
       levels = ["low", "medium", "high"];
       defaultEffort = "medium";
     } else if (
-      idLower.includes("opus") ||
-      idLower.includes("sonnet") ||
-      idLower.includes("fable") ||
-      idLower.includes("claude-3-7") ||
-      idLower.includes("claude-3.7") ||
-      idLower.includes("claude-4") ||
-      idLower.includes("claude-5") ||
-      catalogEntry?.reasoning
+      bareId.includes("opus") ||
+      bareId.includes("sonnet") ||
+      bareId.includes("fable") ||
+      /haiku[-._]?[5-9]/.test(bareId) ||
+      bareId.includes("claude-3-7") ||
+      bareId.includes("claude-3.7") ||
+      bareId.includes("claude-4") ||
+      bareId.includes("claude-5") ||
+      catalogEntry?.reasoning === true
     ) {
       levels = ["low", "medium", "high", "max"];
       defaultEffort = "medium";
     }
   } else if (isOpenAIFamily) {
-    if (idLower.includes("nano")) {
-      levels = ["low", "medium"];
-      defaultEffort = "low";
-    } else if (
-      /^o[134]($|-)/.test(idLower) ||
-      idLower.startsWith("gpt-5") ||
-      idLower.startsWith("gpt-6") ||
-      idLower.includes("codex") ||
-      idLower.includes("astra") ||
-      idLower.endsWith("-pro") ||
-      idLower.includes("-pro-")
-    ) {
+    const isNextGenReasoning =
+      /^o[134]($|-)/.test(bareId) ||
+      bareId.startsWith("gpt-5") ||
+      bareId.startsWith("gpt-6") ||
+      bareId.includes("codex") ||
+      bareId.includes("astra") ||
+      bareId.includes("sol") ||
+      bareId.includes("luna") ||
+      bareId.includes("terra") ||
+      bareId.endsWith("-pro") ||
+      bareId.includes("-pro-");
+
+    if (bareId.includes("gpt-5") && (bareId.includes("nano") || bareId.includes("mini"))) {
+      levels = ["low", "medium", "high"];
+      defaultEffort = "medium";
+    } else if (/^o[34]-mini/.test(bareId)) {
+      levels = ["low", "medium", "high"];
+      defaultEffort = "medium";
+    } else if (isNextGenReasoning) {
       levels = ["low", "medium", "high", "xhigh"];
       defaultEffort = "medium";
-    } else if (idLower.includes("mini")) {
+    } else if (bareId.includes("nano") || bareId.includes("mini")) {
       levels = ["low", "medium"];
       defaultEffort = "low";
     } else {
@@ -206,18 +228,30 @@ export function getModelEffortProfile(provider, modelId, catalogEntry = null) {
   } else {
     const isDeepReasoningModel =
       catalogEntry?.reasoning === true ||
-      idLower.includes("reasoner") ||
-      idLower.includes("deepseek-r1") ||
-      idLower.includes("deepseek-v4") ||
-      idLower.startsWith("gemini-2.5-pro") ||
-      idLower.startsWith("gemini-3") ||
-      idLower.startsWith("gemini-4") ||
-      idLower.includes("thinking") ||
-      idLower.includes("qwq") ||
-      idLower.startsWith("grok-3") ||
-      idLower.startsWith("grok-4");
+      bareId.includes("reasoner") ||
+      bareId.includes("deepseek-r1") ||
+      bareId.includes("deepseek-v3.1") ||
+      bareId.includes("deepseek-v3.2") ||
+      bareId.includes("deepseek-v4") ||
+      bareId.startsWith("gemini-2.5") ||
+      bareId.startsWith("gemini-3") ||
+      bareId.startsWith("gemini-4") ||
+      bareId.includes("thinking") ||
+      bareId.includes("qwq") ||
+      bareId.startsWith("qwen3") ||
+      bareId.startsWith("qwen4") ||
+      bareId.startsWith("grok-3") ||
+      bareId.startsWith("grok-4") ||
+      bareId.startsWith("glm-4.5") ||
+      bareId.startsWith("glm-4.6") ||
+      bareId.startsWith("glm-4.7") ||
+      bareId.startsWith("glm-5") ||
+      bareId.startsWith("kimi-k2.5") ||
+      bareId.startsWith("kimi-k2.6") ||
+      bareId.startsWith("kimi-k2.7") ||
+      bareId.startsWith("kimi-k3");
 
-    if (idLower.includes("flash-lite") || idLower.includes("nano") || idLower.includes("8b-instant")) {
+    if (bareId.includes("flash-lite") || bareId.includes("8b-instant") || (bareId.includes("nano") && !catalogEntry?.reasoning)) {
       levels = ["low", "medium"];
       defaultEffort = "low";
     } else if (isDeepReasoningModel) {
@@ -460,7 +494,9 @@ export function buildExtensionCatalog(storage, routerKey = null) {
 
     const models = [];
     for (const bucket of familyBuckets.values()) {
-      const hasSuffixVariants = bucket.variants.size >= 1;
+      // Only collapse into a suffix-pinned family when >= 2 real sibling effort variants exist;
+      // single suffixed models (e.g. gpt-oss-120b-medium, gemini-3.1-pro-high) keep full effort profile.
+      const hasSuffixVariants = bucket.variants.size >= 2;
 
       if (hasSuffixVariants) {
         const availableLevels = EFFORT_ORDER.filter((lvl) => bucket.variants.has(lvl));
@@ -507,9 +543,9 @@ export function buildExtensionCatalog(storage, routerKey = null) {
           effort
         });
       } else {
-        const modelId = bucket.firstId;
+        const modelId = bucket.bareId || bucket.firstId;
         const fullId = `${provider.slug}/${modelId}`;
-        const cat = catById.get(modelId) || null;
+        const cat = catById.get(modelId) || catById.get(bucket.baseId) || null;
         const effort = getModelEffortProfile(provider, modelId, cat);
 
         models.push({

@@ -815,6 +815,44 @@ export function openaiToClaudeRequest(openaiReq, upstreamModel) {
     }
   }
 
+  // Forward OpenAI `reasoning_effort` into Anthropic extended thinking budget on thinking-capable Claude models
+  const rawEffort =
+    typeof openaiReq.reasoning_effort === "string"
+      ? openaiReq.reasoning_effort.trim().toLowerCase()
+      : typeof openaiReq.reasoning?.effort === "string"
+        ? openaiReq.reasoning.effort.trim().toLowerCase()
+        : "";
+  const modelLower = String(upstreamModel || "").toLowerCase();
+  const supportsClaudeThinking =
+    modelLower.includes("claude-3-7") ||
+    modelLower.includes("claude-3.7") ||
+    modelLower.includes("claude-4") ||
+    modelLower.includes("claude-5") ||
+    /claude-(?:opus|sonnet|fable)-[4-9]/.test(modelLower) ||
+    modelLower.includes("claude-fable") ||
+    /claude-haiku-(?:4[.-]5|[5-9])/.test(modelLower);
+
+  if (rawEffort && supportsClaudeThinking) {
+    const budgetMap = {
+      minimal: 1024,
+      low: 2048,
+      medium: 8192,
+      high: 16384,
+      xhigh: 32768,
+      max: 32768
+    };
+    const budget = budgetMap[rawEffort];
+    if (budget) {
+      out.thinking = { type: "enabled", budget_tokens: budget };
+      if (out.max_tokens <= budget) {
+        out.max_tokens = budget + 4096;
+      }
+      // Anthropic rejects custom temperature/top_p when extended thinking is enabled
+      delete out.temperature;
+      delete out.top_p;
+    }
+  }
+
   return out;
 }
 

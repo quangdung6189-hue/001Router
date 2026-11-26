@@ -694,16 +694,29 @@ function thinkingOutputFloor(budget) {
 export function resolveUpstreamModel(model, body, flavor, opts = {}) {
   const resolve =
     !opts.exact && typeof flavor?.resolveModel === "function" ? flavor.resolveModel : (m) => m;
+  const hasAlias =
+    !opts.exact && typeof flavor?.hasModelAlias === "function"
+      ? flavor.hasModelAlias
+      : (m) => resolve(m) !== m;
   let requested = String(model || "");
 
   const effort =
     !opts.exact && typeof body?.reasoning_effort === "string"
       ? body.reasoning_effort.trim().toLowerCase()
       : "";
-  const effortTier = effort === "xhigh" || effort === "max" ? "high" : effort === "minimal" ? "low" : effort;
-  if (effortTier && THINKING_LEVEL_TO_BUDGET[effortTier] !== undefined) {
-    const tiered = `${requested}-${effortTier}`;
-    if (resolve(tiered) !== tiered) requested = tiered;
+  if (effort) {
+    const exactTiered = `${requested}-${effort}`;
+    if (hasAlias(exactTiered)) {
+      requested = exactTiered;
+    } else if (effort === "max" && hasAlias(`${requested}-xhigh`)) {
+      requested = `${requested}-xhigh`;
+    } else {
+      const effortTier = effort === "xhigh" || effort === "max" ? "high" : effort === "minimal" ? "low" : effort;
+      if (effortTier && THINKING_LEVEL_TO_BUDGET[effortTier] !== undefined) {
+        const tiered = `${requested}-${effortTier}`;
+        if (hasAlias(tiered)) requested = tiered;
+      }
+    }
   }
 
   const resolved = resolve(requested);
