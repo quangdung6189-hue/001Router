@@ -6,13 +6,13 @@
   "publisher": "001router",
   "license": "MIT",
   "icon": "media/icon.png",
-  "homepage": "https://github.com/dangquangdung2004/001router",
+  "homepage": "https://github.com/quangdung6189-hue/001Router",
   "repository": {
     "type": "git",
-    "url": "https://github.com/dangquangdung2004/001router.git"
+    "url": "https://github.com/quangdung6189-hue/001Router.git"
   },
   "bugs": {
-    "url": "https://github.com/dangquangdung2004/001router/issues"
+    "url": "https://github.com/quangdung6189-hue/001Router/issues"
   },
   "engines": {
     "vscode": "^1.85.0"
