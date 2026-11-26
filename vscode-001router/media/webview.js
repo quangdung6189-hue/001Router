@@ -5,13 +5,26 @@
   const root = document.getElementById("app");
   const surface = document.body.dataset.surface || "sidebar";
   const logoUri = document.body.dataset.logoUri || "";
+  const aiFaceUri = document.body.dataset.aiFaceUri || "";
   const providersBaseUri = (document.body.dataset.providersUri || "").replace(/\/+$/, "");
 
   const REDUCED_MOTION_MQ = window.matchMedia
     ? window.matchMedia("(prefers-reduced-motion: reduce)")
     : { matches: false };
 
-  // Crisp Lucide-style 1.5px stroke SVG icons (matching Claude Code 99%)
+  const SHELL_LANGS = new Set([
+    "bash",
+    "sh",
+    "zsh",
+    "shell",
+    "console",
+    "powershell",
+    "ps1",
+    "pwsh",
+    "cmd",
+    "bat"
+  ]);
+
   const ICONS = {
     popout:
       '<svg class="r001-svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>',
@@ -48,16 +61,19 @@
     folder:
       '<svg class="r001-svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>',
     eye:
-      '<svg class="r001-svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>',
+      '<svg class="r001-svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>',
     eyeOff:
-      '<svg class="r001-svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/></svg>',
+      '<svg class="r001-svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/></svg>',
     copy:
       '<svg class="r001-svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>',
     apply:
-      '<svg class="r001-svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 10 4 15 9 20"/><path d="M20 4v7a4 4 0 0 1-4 4H4"/></svg>'
+      '<svg class="r001-svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 10 4 15 9 20"/><path d="M20 4v7a4 4 0 0 1-4 4H4"/></svg>',
+    terminal:
+      '<svg class="r001-svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>',
+    brain:
+      '<svg class="r001-svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M12 5v13"/></svg>'
   };
 
-  // Transparent monochrome/dark logos that need crisp white plate for maximum contrast
   const LIGHT_PLATE_FILES = new Set([
     "xai.png",
     "openai.png",
@@ -86,19 +102,14 @@
     "agentrouter.png"
   ]);
 
-  const DEEPEN_GRAY_FILES = new Set([
-    "xai.png",
-    "glm.png",
-    "nous.png",
-    "openrouter.png"
-  ]);
+  const DEEPEN_GRAY_FILES = new Set(["xai.png", "glm.png", "nous.png", "openrouter.png"]);
 
   const EFFORT_THEME = {
     low: {
       color: "#10B981",
       accent: "#06B6D4",
       glow: "rgba(16, 185, 129, 0.44)",
-      badge: "ECO · 25%",
+      badge: "ECO · FAST",
       rgbA: [16, 185, 129],
       rgbB: [6, 182, 212]
     },
@@ -106,7 +117,7 @@
       color: "#3B82F6",
       accent: "#6366F1",
       glow: "rgba(59, 130, 246, 0.5)",
-      badge: "BALANCED · 50%",
+      badge: "BALANCED",
       rgbA: [59, 130, 246],
       rgbB: [99, 102, 241]
     },
@@ -114,7 +125,7 @@
       color: "#E56A4A",
       accent: "#F59E0B",
       glow: "rgba(229, 106, 74, 0.6)",
-      badge: "HIGH POWER · 75%",
+      badge: "HIGH POWER",
       rgbA: [245, 158, 11],
       rgbB: [229, 106, 74]
     },
@@ -137,11 +148,12 @@
   };
 
   const SLASH_COMMANDS = [
-    { cmd: "/provider", desc: "Mở bộ chọn Provider -> Model" },
-    { cmd: "/effort", desc: "Chỉnh mức sức mạnh Effort & Hố Đen" },
+    { cmd: "/provider", desc: "Mở bộ chọn Provider -> Model đồng bộ" },
+    { cmd: "/effort", desc: "Tinh chỉnh sức mạnh Effort (Low / Med / High / XHigh / Max)" },
+    { cmd: "/sync", desc: "Đồng bộ lại Antigravity, CLI & VS Code ngay lập tức" },
+    { cmd: "/run ", desc: "Chạy lệnh Terminal trực tiếp ngay trong khung chat" },
     { cmd: "/new", desc: "Bắt đầu cuộc trò chuyện mới" },
-    { cmd: "/connect", desc: "Mở xác nhận mật khẩu web 001Router" },
-    { cmd: "/refresh", desc: "Đồng bộ lại danh sách Provider & Model" }
+    { cmd: "/connect", desc: "Mở xác thực mật khẩu web 001Router" }
   ];
 
   const state = {
@@ -150,10 +162,14 @@
     catalog: { providers: [], combos: [], aliases: {} },
     selection: null,
     mode: "auto",
+    autoActiveFile: true,
+    envSync: { ideName: "VS Code", ideKind: "vscode", autoSyncedFrom: null, cliTools: [] },
+    editorContext: { hasWorkspaceFolder: false, workspaceName: "", workingDir: "", activeFile: null, openTabs: [] },
     sessions: [],
     activeSessionId: null,
     draft: "",
     attachments: [],
+    terminalRuns: [],
     streamingSessionId: null,
     authModalOpen: false,
     authServerInput: "http://127.0.0.1:20128",
@@ -171,7 +187,6 @@
     fxPaused: false
   };
 
-  // Live continuous slider visual state (never triggers innerHTML while dragging)
   const fxState = {
     ratio: 0.33,
     singularity: 0,
@@ -183,6 +198,7 @@
     time: 0
   };
 
+  let liveTimerInterval = null;
   const codeBlockCache = new Map();
 
   function escapeHtml(str) {
@@ -192,6 +208,11 @@
       .replace(/>/g, "&gt;")
       .replace(/"/g, "&quot;")
       .replace(/'/g, "&#39;");
+  }
+
+  function formatDuration(ms) {
+    const sec = Math.max(0.1, (Number(ms) || 0) / 1000);
+    return `${sec.toFixed(1)}s`;
   }
 
   function resolveProviderLogoFile(provider) {
@@ -266,13 +287,37 @@
       const isLight = LIGHT_PLATE_FILES.has(cleanFile);
       const isDeep = DEEPEN_GRAY_FILES.has(cleanFile);
       const src = `${providersBaseUri}/${encodeURIComponent(cleanFile)}`;
-      return `<span class="r001-logo-plate ${sizeClass} ${isLight ? "light-plate" : ""} ${isDeep ? "deepen-gray" : ""}">` +
+      return (
+        `<span class="r001-logo-plate ${sizeClass} ${isLight ? "light-plate" : ""} ${isDeep ? "deepen-gray" : ""}">` +
         `<img src="${escapeHtml(src)}" alt="${escapeHtml(monogram || "AI")}" loading="eager" />` +
-      `</span>`;
+        `</span>`
+      );
     }
-    return `<span class="r001-logo-plate ${sizeClass}">` +
+    return (
+      `<span class="r001-logo-plate ${sizeClass}">` +
       `<span class="r001-logo-monogram" style="background:${escapeHtml(color || "#d97757")}">${escapeHtml(monogram || "01")}</span>` +
-    `</span>`;
+      `</span>`
+    );
+  }
+
+  /**
+   * Render the 3D Cybernetic AI Face Core (replaces redundant model name in chat headers & hero).
+   */
+  function render3DAiFaceCore(sizeVariant, phase) {
+    const cleanPhase = phase || "idle";
+    return (
+      `<div class="r001-ai-core ${escapeHtml(sizeVariant)}" data-phase="${escapeHtml(cleanPhase)}" data-fx-paused="${state.fxPaused ? "1" : "0"}">` +
+      `<span class="r001-ai-halo" aria-hidden="true"></span>` +
+      `<span class="r001-ai-ring ring-a" aria-hidden="true"></span>` +
+      `<span class="r001-ai-ring ring-b" aria-hidden="true"></span>` +
+      `<div class="r001-ai-bust-frame">` +
+      (aiFaceUri
+        ? `<img class="r001-ai-bust-img" src="${escapeHtml(aiFaceUri)}" alt="001Router 3D AI Core" />`
+        : `<img class="r001-ai-bust-img" src="${escapeHtml(logoUri)}" alt="001Router AI Core" />`) +
+      `<span class="r001-ai-visor-scan" aria-hidden="true"></span>` +
+      `</div>` +
+      `</div>`
+    );
   }
 
   function getActiveSession() {
@@ -285,27 +330,81 @@
     return providers.find((p) => p.slug === slug) || providers[0] || null;
   }
 
+  function findModelInProvider(prov, selection) {
+    if (!prov || !Array.isArray(prov.models)) return null;
+    if (selection?.baseModelId) {
+      const byBase = prov.models.find((m) => m.id === selection.baseModelId);
+      if (byBase) return byBase;
+    }
+    if (selection?.modelId) {
+      const direct = prov.models.find((m) => m.id === selection.modelId);
+      if (direct) return direct;
+      const byVariant = prov.models.find(
+        (m) =>
+          m.variantMap &&
+          Object.values(m.variantMap).some((v) => (v.id || v.modelId) === selection.modelId)
+      );
+      if (byVariant) return byVariant;
+      const stem = String(selection.modelId).replace(/-(minimal|low|medium|high|xhigh|max)$/i, "");
+      const byStem = prov.models.find((m) => m.id === stem);
+      if (byStem) return byStem;
+    }
+    return prov.models[0] || null;
+  }
+
   function findSelectedModelObj() {
     if (state.selection?.kind === "combo") {
       return (state.catalog?.combos || []).find((c) => c.name === state.selection.modelId) || null;
     }
     const prov = findSelectedProvider();
-    if (!prov) return null;
-    return (
-      prov.models.find((m) => m.id === state.selection?.modelId) || prov.models[0] || null
-    );
+    return findModelInProvider(prov, state.selection);
+  }
+
+  /**
+   * Build 100% synchronized selection object so Base Model Display Name, Effort Tier,
+   * and Actual Upstream Suffixed Variant (low/medium/high/xhigh/max) NEVER diverge.
+   */
+  function buildSyncedSelection(prov, modelObj, desiredEffort) {
+    const levels = modelObj?.effort?.effortLevels || [];
+    const hasDesired = levels.some((l) => l.id === desiredEffort);
+    const chosenEffort = hasDesired
+      ? desiredEffort
+      : modelObj?.effort?.defaultEffort || levels[0]?.id || "medium";
+    const variant = modelObj?.variantMap?.[chosenEffort] || null;
+    const resolvedModelId = variant ? variant.id || variant.modelId : modelObj.id;
+    const resolvedFullId = variant ? variant.fullId : modelObj.fullId;
+    return {
+      kind: "provider",
+      providerSlug: prov.slug,
+      providerName: prov.name,
+      providerPreset: prov.preset,
+      providerColor: prov.color,
+      baseModelId: modelObj.id,
+      displayLabel: modelObj.label || modelObj.id,
+      modelId: resolvedModelId,
+      fullId: resolvedFullId,
+      effort: chosenEffort
+    };
   }
 
   function getActiveEffortProfile() {
-    const modelObj = findSelectedModelObj();
+    const prov =
+      state.activePopover === "model" && state.pickerStep === "models" && state.inspectingProviderSlug
+        ? (state.catalog?.providers || []).find((p) => p.slug === state.inspectingProviderSlug) || findSelectedProvider()
+        : findSelectedProvider();
+    const modelObj =
+      state.selection?.kind === "combo"
+        ? findSelectedModelObj()
+        : findModelInProvider(prov, state.selection) || findSelectedModelObj();
+
     if (modelObj?.effort?.effortLevels?.length) {
       return modelObj.effort;
     }
     return {
       effortLevels: [
-        { id: "low", label: "Low", shortLabel: "Low", power: 1, maxScale: 4, percent: 25, color: "#10B981", accent: "#06B6D4", glow: "rgba(16, 185, 129, 0.44)", description: "Fast & lightweight response" },
-        { id: "medium", label: "Medium", shortLabel: "Med", power: 2, maxScale: 4, percent: 50, color: "#3B82F6", accent: "#6366F1", glow: "rgba(59, 130, 246, 0.5)", description: "Balanced speed & reasoning depth" },
-        { id: "high", label: "High", shortLabel: "High", power: 3, maxScale: 4, percent: 75, color: "#E56A4A", accent: "#F59E0B", glow: "rgba(229, 106, 74, 0.6)", description: "Deep multi-step reasoning" }
+        { id: "low", label: "Low", shortLabel: "Low", power: 1, maxScale: 3, percent: 33, color: "#10B981", accent: "#06B6D4", glow: "rgba(16, 185, 129, 0.44)", description: "Fast & lightweight response" },
+        { id: "medium", label: "Medium", shortLabel: "Med", power: 2, maxScale: 3, percent: 67, color: "#3B82F6", accent: "#6366F1", glow: "rgba(59, 130, 246, 0.5)", description: "Balanced speed & reasoning depth" },
+        { id: "high", label: "High", shortLabel: "High", power: 3, maxScale: 3, percent: 100, color: "#E56A4A", accent: "#F59E0B", glow: "rgba(229, 106, 74, 0.6)", description: "Deep multi-step reasoning" }
       ],
       defaultEffort: "medium",
       maxEffort: "high",
@@ -324,9 +423,8 @@
   function isSingularityStop(stop, profile) {
     if (!stop) return false;
     if (stop.id === "max" || stop.id === "xhigh") return true;
-    // Also unlock Black Hole Singularity whenever pulled to the absolute ceiling stop on any model
     const stops = profile?.effortLevels || [];
-    return stops.length >= 2 && stops[stops.length - 1].id === stop.id && stop.power === stops.length;
+    return stops.length >= 4 && stops[stops.length - 1].id === stop.id;
   }
 
   function lerp(a, b, t) {
@@ -364,11 +462,9 @@
     const nearestIdx = Math.round(exactPos);
     const nearestStop = stops[nearestIdx] || stops[0];
 
-    // Smooth singularity ramp when dragging into the upper 18% toward Max ceiling
-    const isMaxZone = clamped >= 0.82;
-    const singularityIntensity = isMaxZone
-      ? Math.min(1, (clamped - 0.82) / 0.14)
-      : 0;
+    const topIsSingularity = isSingularityStop(stops[stops.length - 1], { effortLevels: stops });
+    const isMaxZone = topIsSingularity && clamped >= 0.8;
+    const singularityIntensity = isMaxZone ? Math.min(1, (clamped - 0.8) / 0.16) : 0;
 
     return {
       clamped,
@@ -377,7 +473,7 @@
       rgbA,
       rgbB,
       singularityIntensity,
-      isSingularity: singularityIntensity >= 0.65 || isSingularityStop(nearestStop, { effortLevels: stops }) && clamped >= 0.92
+      isSingularity: topIsSingularity && (singularityIntensity >= 0.65 || nearestStop.id === "xhigh" || nearestStop.id === "max")
     };
   }
 
@@ -386,9 +482,7 @@
     const isSing = customVis ? customVis.isSingularity : isSingularityStop(stop, profile);
     const color = customVis ? rgbCss(customVis.rgbA) : stop.color || theme.color;
     const accent = customVis ? rgbCss(customVis.rgbB) : stop.accent || theme.accent;
-    const glow = customVis
-      ? rgbCss(customVis.rgbA, isSing ? 0.78 : 0.55)
-      : stop.glow || theme.glow;
+    const glow = customVis ? rgbCss(customVis.rgbA, isSing ? 0.78 : 0.55) : stop.glow || theme.glow;
 
     document.documentElement.style.setProperty("--effort-color", color);
     document.documentElement.style.setProperty("--effort-accent", accent);
@@ -397,11 +491,7 @@
 
     fxState.rgbA = customVis ? customVis.rgbA : theme.rgbA;
     fxState.rgbB = customVis ? customVis.rgbB : theme.rgbB;
-    fxState.targetSingularity = customVis
-      ? customVis.singularityIntensity
-      : isSing
-        ? 1
-        : 0;
+    fxState.targetSingularity = customVis ? customVis.singularityIntensity : isSing ? 1 : 0;
   }
 
   // =========================================================================
@@ -409,7 +499,7 @@
   // =========================================================================
   function initParticles() {
     if (fxState.particles.length) return;
-    for (let i = 0; i < 46; i++) {
+    for (let i = 0; i < 48; i++) {
       fxState.particles.push({
         angle: Math.random() * Math.PI * 2,
         radius: 14 + Math.random() * 68,
@@ -452,7 +542,6 @@
     const H = rect.height;
     ctx.clearRect(0, 0, W, H);
 
-    // Smoothly approach target singularity intensity so entering/exiting Black Hole feels organic
     fxState.singularity = staticOnly
       ? fxState.targetSingularity
       : lerp(fxState.singularity, fxState.targetSingularity, 0.09);
@@ -460,8 +549,7 @@
     const s = fxState.singularity;
     const t = fxState.time;
 
-    // 1) Fluid chromatic plasma wave across the effort bar (all levels)
-    const waveAlpha = lerp(0.11, 0.04, s);
+    const waveAlpha = lerp(0.12, 0.04, s);
     const grad = ctx.createLinearGradient(0, 0, W, H);
     const shift = (Math.sin(t * 0.9) + 1) * 0.5;
     grad.addColorStop(0, rgbCss(fxState.rgbA, waveAlpha * (0.4 + shift * 0.6)));
@@ -470,29 +558,26 @@
     ctx.fillStyle = grad;
     ctx.fillRect(0, 0, W, H);
 
-    // Subtle rising flow motes when not yet in full singularity
     if (s < 0.85) {
       ctx.globalCompositeOperation = "lighter";
-      const moteFade = (1 - s) * 0.45;
-      for (let i = 0; i < 16; i++) {
+      const moteFade = (1 - s) * (0.28 + fxState.ratio * 0.36);
+      for (let i = 0; i < 18; i++) {
         const p = fxState.particles[i];
-        const px = ((p.driftX * W + t * (16 + fxState.ratio * 34) * (0.6 + p.size * 0.3)) % (W + 20)) - 10;
+        const px = ((p.driftX * W + t * (14 + fxState.ratio * 42) * (0.6 + p.size * 0.3)) % (W + 20)) - 10;
         const py = p.driftY * H + Math.sin(t * 1.4 + i) * 3.5;
-        ctx.fillStyle = rgbCss(i % 2 === 0 ? fxState.rgbA : fxState.rgbB, moteFade * 0.6);
+        ctx.fillStyle = rgbCss(i % 2 === 0 ? fxState.rgbA : fxState.rgbB, moteFade * 0.65);
         ctx.beginPath();
-        ctx.arc(px, py, p.size * 0.9, 0, Math.PI * 2);
+        ctx.arc(px, py, p.size * 0.95, 0, Math.PI * 2);
         ctx.fill();
       }
       ctx.globalCompositeOperation = "source-over";
     }
 
-    // 2) Fluid Black Hole Singularity (Event Horizon + Warped Accretion Disk + Spiraling Trails)
     if (s > 0.02) {
-      const cx = W - 62;
-      const cy = H * 0.48;
+      const cx = W - 64;
+      const cy = H * 0.44;
       const horizonR = 11.5 + s * 4.5;
 
-      // Deep spacetime gravity well vignette
       const wellGrad = ctx.createRadialGradient(cx, cy, horizonR * 0.6, cx, cy, 130 * s + 20);
       wellGrad.addColorStop(0, `rgba(2, 1, 7, ${0.95 * s})`);
       wellGrad.addColorStop(0.28, `rgba(24, 8, 48, ${0.62 * s})`);
@@ -501,11 +586,9 @@
       ctx.fillStyle = wellGrad;
       ctx.fillRect(0, 0, W, H);
 
-      // Additive relativistic accretion rings & swirling filaments
       ctx.save();
       ctx.globalCompositeOperation = "lighter";
 
-      // Tilted elliptical accretion bands (Interstellar gravitational lensing)
       for (let ring = 0; ring < 3; ring++) {
         ctx.save();
         ctx.translate(cx, cy);
@@ -538,16 +621,14 @@
         ctx.restore();
       }
 
-      // Spiraling fluid accretion particles pulled inward along curved Keplerian orbits
       const palette = [
-        [251, 191, 36], // relativistic photon gold
-        [236, 72, 153], // accretion magenta
-        [168, 85, 247]  // deep cosmic violet
+        [251, 191, 36],
+        [236, 72, 153],
+        [168, 85, 247]
       ];
       for (let i = 0; i < fxState.particles.length; i++) {
         const p = fxState.particles[i];
         if (!staticOnly) {
-          // Faster orbital speed closer to the event horizon (Keplerian)
           const boost = 24 / Math.max(12, p.radius);
           p.angle += p.speed * boost * (0.7 + s * 0.9);
           p.radius -= p.inward * (0.55 + s * 0.85);
@@ -583,15 +664,7 @@
         ctx.stroke();
       }
 
-      // Gravitational lensing Einstein Halo right around the Schwarzschild horizon
-      const photonGrad = ctx.createRadialGradient(
-        cx,
-        cy,
-        horizonR * 0.82,
-        cx,
-        cy,
-        horizonR * 1.95
-      );
+      const photonGrad = ctx.createRadialGradient(cx, cy, horizonR * 0.82, cx, cy, horizonR * 1.95);
       photonGrad.addColorStop(0, "rgba(0, 0, 0, 0)");
       photonGrad.addColorStop(0.28, `rgba(254, 240, 138, ${0.85 * s})`);
       photonGrad.addColorStop(0.5, `rgba(236, 72, 153, ${0.62 * s})`);
@@ -603,7 +676,6 @@
       ctx.fill();
       ctx.restore();
 
-      // Event Horizon Obsidian Core (pure darkness at the singularity center)
       const coreGrad = ctx.createRadialGradient(cx, cy, 0, cx, cy, horizonR);
       coreGrad.addColorStop(0, `rgba(0, 0, 0, ${0.98 * s})`);
       coreGrad.addColorStop(0.78, `rgba(4, 2, 10, ${0.95 * s})`);
@@ -623,8 +695,7 @@
     if (!canvas) return;
     initParticles();
 
-    const staticMode = REDUCED_MOTION_MQ.matches || state.fxPaused;
-    if (staticMode) {
+    if (REDUCED_MOTION_MQ.matches || state.fxPaused) {
       drawEffortCanvasFrame(canvas, true);
       return;
     }
@@ -642,7 +713,22 @@
     fxState.rafId = requestAnimationFrame(tick);
   }
 
-  // Update slider DOM in-place at 60fps without rebuilding HTML (ZERO stutter!)
+  function commitEffortChoice(chosenEffortId) {
+    if (!state.selection) return;
+    if (state.selection.kind === "combo") {
+      state.selection = { ...state.selection, effort: chosenEffortId };
+    } else {
+      const prov = findSelectedProvider();
+      const mod = findModelInProvider(prov, state.selection);
+      if (prov && mod) {
+        state.selection = buildSyncedSelection(prov, mod, chosenEffortId);
+      } else {
+        state.selection = { ...state.selection, effort: chosenEffortId };
+      }
+    }
+    vscode.postMessage({ type: "saveSelection", selection: state.selection });
+  }
+
   function syncSliderDom(ratio, snapWithSpring) {
     const profile = getActiveEffortProfile();
     const stops = profile.effortLevels;
@@ -658,6 +744,7 @@
     const levelName = document.getElementById("r001-effort-level-name");
     const powerTag = document.getElementById("r001-effort-power-tag");
     const descEl = document.getElementById("r001-effort-desc");
+    const routeEl = document.getElementById("r001-effort-route");
     const rangeInput = document.getElementById("r001-effort-range");
     const composerEl = document.querySelector(".r001-composer");
     const modelPill = document.querySelector(".r001-model-pill");
@@ -674,17 +761,13 @@
 
     if (shell) {
       shell.classList.toggle("spring-snap", Boolean(snapWithSpring));
-      const shellW = shell.clientWidth || 132;
+      const shellW = shell.clientWidth || 136;
       const pad = 14;
       const thumbX = pad + vis.clamped * Math.max(10, shellW - pad * 2);
       const fillScale = Math.max(0.16, Math.min(1, (thumbX + 10) / shellW));
 
-      if (fill) {
-        fill.style.transform = `scaleX(${fillScale.toFixed(4)})`;
-      }
-      if (thumb) {
-        thumb.style.transform = `translate3d(${thumbX.toFixed(2)}px, -50%, 0)`;
-      }
+      if (fill) fill.style.transform = `scaleX(${fillScale.toFixed(4)})`;
+      if (thumb) thumb.style.transform = `translate3d(${thumbX.toFixed(2)}px, -50%, 0)`;
     }
 
     const theme = EFFORT_THEME[vis.nearestStop.id] || EFFORT_THEME.medium;
@@ -692,24 +775,30 @@
     if (powerTag) {
       powerTag.textContent = vis.isSingularity
         ? `SINGULARITY · ${vis.nearestStop.label.toUpperCase()}`
-        : theme.badge;
+        : `${theme.badge} · ${vis.nearestStop.percent}%`;
     }
     if (descEl) {
       descEl.textContent = vis.isSingularity
-        ? "Event Horizon unlocked — maximum depth & compute"
+        ? "Event Horizon — tối đa năng lực suy luận"
         : vis.nearestStop.description;
     }
     if (pillEffort) pillEffort.textContent = vis.nearestStop.label;
-    if (rangeInput) {
-      rangeInput.setAttribute(
-        "aria-valuetext",
-        `${vis.nearestStop.label} (${vis.nearestStop.description})`
-      );
+    if (routeEl) {
+      const prov = findSelectedProvider();
+      const mod = findModelInProvider(prov, state.selection);
+      const v = mod?.variantMap?.[vis.nearestStop.id];
+      routeEl.textContent = v ? v.id || v.modelId : mod?.id || state.selection?.displayLabel || "Model";
     }
 
-    const dots = document.querySelectorAll(".r001-effort-dot");
-    dots.forEach((d, idx) => {
+    if (rangeInput) {
+      rangeInput.setAttribute("aria-valuetext", `${vis.nearestStop.label} (${vis.nearestStop.description})`);
+    }
+
+    document.querySelectorAll(".r001-effort-dot").forEach((d, idx) => {
       d.classList.toggle("passed", idx <= vis.nearestIdx);
+    });
+    document.querySelectorAll(".r001-tier-pill").forEach((p) => {
+      p.classList.toggle("active", p.dataset.tier === vis.nearestStop.id);
     });
 
     if (REDUCED_MOTION_MQ.matches || state.fxPaused) {
@@ -720,7 +809,7 @@
   }
 
   // =========================================================================
-  // Markdown Renderer (Headings, Lists, Blockquotes, Fenced Code + Copy/Apply)
+  // Markdown Renderer (with Copy / Apply / Live Terminal Run on shell blocks)
   // =========================================================================
   function formatInlineText(raw) {
     return escapeHtml(raw)
@@ -821,15 +910,19 @@
       if (match.index > lastIndex) {
         parts.push(renderTextChunk(text.slice(lastIndex, match.index)));
       }
-      const lang = match[1] || "code";
+      const lang = (match[1] || "code").trim();
       const code = match[2];
       const blockKey = `${messageId}:${blockIdx++}`;
       const copied = state.copiedBlockId === blockKey;
+      const isShell = SHELL_LANGS.has(lang.toLowerCase());
       parts.push(
         `<div class="r001-codeblock">` +
           `<div class="r001-codeblock-head">` +
             `<span>${escapeHtml(lang)}</span>` +
             `<div class="r001-codeblock-actions">` +
+              (isShell
+                ? `<button type="button" class="r001-mini-btn run-btn" data-action="run-code" data-block="${escapeHtml(blockKey)}" title="Chạy lệnh ngay trong Terminal">${ICONS.terminal}<span>Run</span></button>`
+                : "") +
               `<button type="button" class="r001-mini-btn" data-action="copy-code" data-block="${escapeHtml(blockKey)}">${ICONS.copy}<span>${copied ? "Copied" : "Copy"}</span></button>` +
               `<button type="button" class="r001-mini-btn" data-action="apply-code" data-block="${escapeHtml(blockKey)}">${ICONS.apply}<span>Apply</span></button>` +
             `</div>` +
@@ -845,24 +938,121 @@
       parts.push(renderTextChunk(text.slice(lastIndex)));
     }
 
-    const html = parts.join("") || (isStreamingThis ? "" : "<p>...</p>");
-    return isStreamingThis ? `${html}<span class="r001-stream-caret"></span>` : html;
+    const html = parts.join("");
+    if (!html && isStreamingThis) {
+      return "";
+    }
+    return isStreamingThis ? `${html}<span class="r001-stream-caret"></span>` : html || "<p>...</p>";
   }
 
-  function renderMascotSvg() {
-    return `<svg class="r001-mascot" viewBox="0 0 64 52" fill="none" xmlns="http://www.w3.org/2000/svg">
-      <rect x="10" y="10" width="44" height="24" rx="2" fill="#D97757"/>
-      <rect x="4" y="18" width="6" height="10" fill="#D97757"/>
-      <rect x="54" y="18" width="6" height="10" fill="#D97757"/>
-      <rect x="18" y="17" width="6" height="7" fill="#1E1E1E"/>
-      <rect x="40" y="17" width="6" height="7" fill="#1E1E1E"/>
-      <rect x="12" y="34" width="6" height="10" fill="#D97757"/>
-      <rect x="22" y="34" width="6" height="10" fill="#D97757"/>
-      <rect x="36" y="34" width="6" height="10" fill="#D97757"/>
-      <rect x="46" y="34" width="6" height="10" fill="#D97757"/>
-      <circle cx="32" cy="5.5" r="3" fill="#F59E0B"/>
-      <rect x="30.5" y="7" width="3" height="3.5" fill="#F59E0B"/>
-    </svg>`;
+  function renderAssistantPhaseHeader(msg, isLastStreaming, hasRunningTerminal) {
+    const effId = String(msg.effort || "medium").toLowerCase();
+    const rawPhase = hasRunningTerminal
+      ? "terminal"
+      : isLastStreaming
+        ? msg.phase || (msg.text ? "streaming" : msg.reasoning ? "thinking" : "analyzing")
+        : "done";
+
+    let titleText = "001Router Neural AI";
+    let subText = "";
+    const elapsedMs = isLastStreaming && msg.startedAt
+      ? Date.now() - msg.startedAt
+      : msg.durationMs || 0;
+
+    if (rawPhase === "terminal") {
+      titleText = "AI Core · Đang chạy Terminal";
+      subText = "Thực thi lệnh dự án trực tiếp...";
+    } else if (rawPhase === "analyzing") {
+      titleText = "AI Core · Đang phân tích dự án";
+      subText = msg.phaseDetail || "Đang đọc ngữ cảnh file & kiến trúc...";
+    } else if (rawPhase === "thinking") {
+      titleText = "AI Core · Đang suy nghĩ sâu";
+      subText = "Phân tích chuỗi suy luận đa bước...";
+    } else if (rawPhase === "streaming") {
+      titleText = "AI Core · Đang tổng hợp giải pháp";
+      subText = "Đang truyền phản hồi trực tiếp...";
+    } else if (elapsedMs > 0) {
+      subText = `Hoàn tất trong ${formatDuration(elapsedMs)}`;
+    }
+
+    return (
+      `<div class="r001-msg-header" data-msg-header="${escapeHtml(msg.id)}">` +
+        render3DAiFaceCore("msg", rawPhase) +
+        `<div class="r001-ai-status-col">` +
+          `<div class="r001-ai-status-row">` +
+            `<span class="r001-ai-persona-label">${escapeHtml(titleText)}</span>` +
+            `<span class="r001-effort-badge" data-effort="${escapeHtml(effId)}">${escapeHtml(effId.toUpperCase())}</span>` +
+          `</div>` +
+          `<div class="r001-ai-substatus">` +
+            (rawPhase !== "done"
+              ? `<progress aria-label="Đang xử lý" class="r001-spinner"></progress>`
+              : "") +
+            `<span class="r001-live-sub-text">${escapeHtml(subText || "Sẵn sàng")}</span>` +
+            (isLastStreaming && msg.startedAt
+              ? `<span class="r001-live-elapsed" data-started="${msg.startedAt}">· ${formatDuration(elapsedMs)}</span>`
+              : "") +
+          `</div>` +
+        `</div>` +
+      `</div>`
+    );
+  }
+
+  function renderThinkingCard(msg, isLastStreaming) {
+    const isThinkingNow = isLastStreaming && !msg.text;
+    if (!msg.reasoning && !isThinkingNow) return "";
+
+    const lines = String(msg.reasoning || "").trim().split("\n").filter(Boolean);
+    const lastLine = lines.length
+      ? lines[lines.length - 1]
+      : msg.phaseDetail || "Đang khởi tạo luồng suy luận ngữ cảnh...";
+
+    return (
+      `<details class="r001-thinking-card ${isThinkingNow ? "active" : ""}" data-thinking-card="${escapeHtml(msg.id)}" ${isThinkingNow && msg.reasoning ? "open" : ""}>` +
+        `<summary>` +
+          `<span class="r001-thinking-head-left">` +
+            (isThinkingNow
+              ? `<progress aria-label="Đang suy nghĩ" class="r001-spinner"></progress>`
+              : ICONS.brain) +
+            `<span class="r001-thinking-title">${isThinkingNow ? "Đang suy nghĩ & phân tích..." : `Chuỗi suy luận (${msg.reasoning.length} ký tự)`}</span>` +
+          `</span>` +
+          `<span style="font-size:10.5px;color:var(--text-muted)">${isThinkingNow ? "Live" : "Chi tiết"}</span>` +
+        `</summary>` +
+        `<div class="r001-thinking-preview">${escapeHtml(lastLine)}</div>` +
+        `<div class="r001-reasoning-body">${escapeHtml(msg.reasoning || lastLine)}</div>` +
+      `</details>`
+    );
+  }
+
+  function renderTerminalCard(run) {
+    const isRunning = run.status === "running";
+    const isFailed = !isRunning && run.exitCode !== 0;
+    const elapsed = isRunning ? Date.now() - run.startedAt : run.durationMs || 0;
+
+    return (
+      `<div class="r001-terminal-card ${isRunning ? "running" : ""} ${isFailed ? "failed" : ""}" id="term-${escapeHtml(run.runId)}">` +
+        `<div class="r001-terminal-head">` +
+          `<div class="r001-terminal-cmd">` +
+            `<span class="r001-terminal-prompt">$</span>` +
+            `<span title="${escapeHtml(run.command)}">${escapeHtml(run.command)}</span>` +
+          `</div>` +
+          `<div class="r001-terminal-meta">` +
+            (isRunning
+              ? `<progress aria-label="Đang chạy lệnh" class="r001-spinner"></progress>` +
+                `<span class="r001-term-status run" data-started="${run.startedAt}">RUNNING · ${formatDuration(elapsed)}</span>` +
+                `<button type="button" class="r001-mini-btn" data-action="kill-term" data-run="${escapeHtml(run.runId)}">Dừng</button>`
+              : `<span class="r001-term-status ${isFailed ? "err" : "ok"}">${isFailed ? `✕ Exit ${run.exitCode}` : "✓ Exit 0"} · ${formatDuration(elapsed)}</span>`) +
+          `</div>` +
+        `</div>` +
+        `<div class="r001-terminal-cwd">cwd: ${escapeHtml(run.cwd || "")}</div>` +
+        `<pre class="r001-terminal-out">${escapeHtml(run.output || (isRunning ? "Đang chờ kết quả đầu ra..." : "(Không có stdout/stderr)"))}</pre>` +
+        `<div class="r001-terminal-foot">` +
+          `<button type="button" class="r001-mini-btn" data-action="open-ide-term" data-cmd="${escapeHtml(run.command)}">${ICONS.terminal}<span>Mở IDE Terminal</span></button>` +
+          (isFailed
+            ? `<button type="button" class="r001-mini-btn run-btn" data-action="fix-term-error" data-run="${escapeHtml(run.runId)}">${ICONS.bolt}<span>Nhờ AI sửa lỗi này</span></button>`
+            : "") +
+        `</div>` +
+      `</div>`
+    );
   }
 
   function renderEffortBar() {
@@ -875,7 +1065,11 @@
     const rangeVal = Math.round(ratio * 1000);
     const isSing = isSingularityStop(stop, profile);
     const theme = EFFORT_THEME[stop.id] || EFFORT_THEME.medium;
-    const modelShort = state.selection?.modelId || "Model";
+
+    const prov = findSelectedProvider();
+    const mod = findModelInProvider(prov, state.selection);
+    const activeVariant = mod?.variantMap?.[stop.id];
+    const resolvedRoute = activeVariant ? activeVariant.id || activeVariant.modelId : mod?.id || state.selection?.displayLabel || "Model";
 
     return `
       <div class="r001-effort-bar" id="r001-effort-bar" data-power="${stop.power}" data-effort="${escapeHtml(stop.id)}" data-singularity="${isSing ? "1" : "0"}">
@@ -884,16 +1078,14 @@
         <div class="r001-effort-top">
           <div class="r001-effort-label-wrap">
             <label class="r001-effort-title" for="r001-effort-range">Effort (<span class="r001-effort-level-name" id="r001-effort-level-name">${escapeHtml(stop.label)}</span>)</label>
-            <span class="r001-effort-power-tag" id="r001-effort-power-tag">${escapeHtml(isSing ? `SINGULARITY · ${stop.label.toUpperCase()}` : theme.badge)}</span>
+            <span class="r001-effort-power-tag" id="r001-effort-power-tag">${escapeHtml(isSing ? `SINGULARITY · ${stop.label.toUpperCase()}` : `${theme.badge} · ${stop.percent}%`)}</span>
           </div>
           <div class="r001-effort-track-shell" id="r001-effort-shell">
             <div class="r001-effort-clip">
               <div class="r001-effort-fill" id="r001-effort-fill"></div>
             </div>
             <div class="r001-effort-dots" aria-hidden="true">
-              ${stops
-                .map((_, i) => `<span class="r001-effort-dot ${i <= idx ? "passed" : ""}"></span>`)
-                .join("")}
+              ${stops.map((_, i) => `<span class="r001-effort-dot ${i <= idx ? "passed" : ""}"></span>`).join("")}
             </div>
             <div class="r001-effort-thumb" id="r001-effort-thumb" aria-hidden="true">
               <span class="r001-effort-thumb-ring"></span>
@@ -907,18 +1099,26 @@
               max="1000"
               step="1"
               value="${rangeVal}"
-              aria-label="Mức Effort cho model"
+              aria-label="Mức Effort đồng bộ với model"
               aria-valuetext="${escapeHtml(stop.label)} — ${escapeHtml(stop.description)}"
             />
           </div>
         </div>
+        <div class="r001-effort-tiers" role="group" aria-label="Chọn nhanh mức Effort">
+          ${stops
+            .map(
+              (s) =>
+                `<button type="button" class="r001-tier-pill ${s.id === stop.id ? "active" : ""}" data-action="pick-effort-tier" data-tier="${escapeHtml(s.id)}">${escapeHtml(s.label)}</button>`
+            )
+            .join("")}
+        </div>
         <div class="r001-effort-sub">
-          <span class="r001-effort-sub-left" id="r001-effort-desc">${escapeHtml(isSing ? "Event Horizon unlocked — maximum depth & compute" : stop.description)}</span>
+          <span class="r001-effort-sub-left" id="r001-effort-desc">${escapeHtml(isSing ? "Event Horizon — tối đa năng lực suy luận" : stop.description)}</span>
           <span class="r001-effort-sub-right">
-            <span>Max: <strong>${escapeHtml(profile.maxLabel)}</strong> · ${escapeHtml(modelShort)}</span>
+            <span>Max: <strong>${escapeHtml(profile.maxLabel)}</strong> · <span id="r001-effort-route">${escapeHtml(resolvedRoute)}</span></span>
             ${
               !REDUCED_MOTION_MQ.matches
-                ? `<button type="button" class="r001-fx-pause-btn" data-action="toggle-fx" title="Tạm dừng / phát hiệu ứng Hố Đen">${state.fxPaused ? "Play FX" : "Pause FX"}</button>`
+                ? `<button type="button" class="r001-fx-pause-btn" data-action="toggle-fx" title="Tạm dừng hoặc phát hiệu ứng chuyển động">${state.fxPaused ? "Play FX" : "Pause FX"}</button>`
                 : ""
             }
           </span>
@@ -935,22 +1135,17 @@
     if (state.pickerStep === "providers") {
       const q = state.providerSearch.trim().toLowerCase();
       const filteredProviders = providers.filter(
-        (p) =>
-          !q ||
-          p.name.toLowerCase().includes(q) ||
-          p.slug.toLowerCase().includes(q)
+        (p) => !q || p.name.toLowerCase().includes(q) || p.slug.toLowerCase().includes(q)
       );
-      const filteredCombos = combos.filter(
-        (c) => !q || c.name.toLowerCase().includes(q)
-      );
+      const filteredCombos = combos.filter((c) => !q || c.name.toLowerCase().includes(q));
 
       return `
         <div class="r001-popover" id="r001-popover">
           <div class="r001-popover-head">
-            <span class="r001-popover-title">Select a provider</span>
-            <button type="button" class="r001-back-btn" data-action="refresh-catalog" title="Đồng bộ lại danh sách provider">${ICONS.refresh}<span>Sync</span></button>
+            <span class="r001-popover-title">Chọn nhà cung cấp (Provider)</span>
+            <button type="button" class="r001-back-btn" data-action="refresh-catalog" title="Đồng bộ lại danh sách Provider & Model">${ICONS.refresh}<span>Sync</span></button>
           </div>
-          <input type="text" class="r001-search" id="r001-provider-search" placeholder="Tìm nhà cung cấp (OpenAI, Anthropic, Antigravity, xAI...)" value="${escapeHtml(state.providerSearch)}" />
+          <input type="text" class="r001-search" id="r001-provider-search" placeholder="Tìm nhà cung cấp (Antigravity, Anthropic, OpenAI, Gemini CLI...)" value="${escapeHtml(state.providerSearch)}" />
           <div class="r001-popover-list">
             <div class="r001-section-label">Connected Providers (${filteredProviders.length})</div>
             ${
@@ -967,7 +1162,7 @@
                             ${renderLogoPlate(pLogo, p.monogram || p.slug.slice(0, 2).toUpperCase(), p.color, "lg")}
                             <div style="min-width:0">
                               <div class="r001-prov-name">${escapeHtml(p.name)}</div>
-                              <div class="r001-prov-sub">${escapeHtml(connLabel)} · ${p.modelCount} models</div>
+                              <div class="r001-prov-sub">${escapeHtml(connLabel)} · ${p.modelCount} dòng model đồng bộ</div>
                             </div>
                           </div>
                           <div class="r001-prov-right">
@@ -1005,7 +1200,6 @@
       `;
     }
 
-    // Step 2: Models for the chosen provider (with real Model Family Images!)
     const provider = providers.find((p) => p.slug === activeSlug) || providers[0];
     const pLogo = resolveProviderLogoFile(provider);
     const q = state.modelSearch.trim().toLowerCase();
@@ -1013,9 +1207,11 @@
       (m) =>
         !q ||
         m.id.toLowerCase().includes(q) ||
+        (m.label || "").toLowerCase().includes(q) ||
         m.description.toLowerCase().includes(q)
     );
-    const defaultModel = provider?.models?.[0];
+    const currentUnifiedObj =
+      state.selection?.providerSlug === provider?.slug ? findModelInProvider(provider, state.selection) : null;
 
     return `
       <div class="r001-popover" id="r001-popover">
@@ -1027,36 +1223,13 @@
           </div>
           <span style="font-size:11px;color:var(--text-muted);flex-shrink:0">${models.length} models</span>
         </div>
-        <input type="text" class="r001-search" id="r001-model-search" placeholder="Lọc model trong ${escapeHtml(provider?.name || "")}..." value="${escapeHtml(state.modelSearch)}" />
+        <input type="text" class="r001-search" id="r001-model-search" placeholder="Lọc dòng model trong ${escapeHtml(provider?.name || "")}..." value="${escapeHtml(state.modelSearch)}" />
         <div class="r001-popover-list">
-          ${
-            defaultModel && !q
-              ? (() => {
-                  const defLogo = resolveModelLogoFile(defaultModel.id, provider, defaultModel.logoFile);
-                  const isDefSel =
-                    state.selection?.providerSlug === provider.slug &&
-                    state.selection?.modelId === defaultModel.id;
-                  return `
-                    <button type="button" class="r001-model-item ${isDefSel ? "selected" : ""}" data-action="select-model" data-slug="${escapeHtml(provider.slug)}" data-model="${escapeHtml(defaultModel.id)}">
-                      <div class="r001-model-left">
-                        ${renderLogoPlate(defLogo, provider?.monogram || "AI", provider?.color, "md")}
-                        <div style="min-width:0;flex:1">
-                          <div class="r001-model-name">Default (recommended)</div>
-                          <div class="r001-model-desc">${escapeHtml(defaultModel.id)} · Best everyday choice</div>
-                        </div>
-                      </div>
-                      ${isDefSel ? ICONS.check : ""}
-                    </button>`;
-                })()
-              : ""
-          }
           ${models
             .map((m) => {
-              const isSelected =
-                state.selection?.kind !== "combo" &&
-                state.selection?.providerSlug === provider.slug &&
-                state.selection?.modelId === m.id;
+              const isSelected = Boolean(currentUnifiedObj && currentUnifiedObj.id === m.id);
               const mLogo = resolveModelLogoFile(m.id, provider, m.logoFile);
+              const levelsText = (m.effort?.effortLevels || []).map((l) => l.shortLabel || l.label).join(" · ");
               const isTopTier = m.effort?.maxEffort === "max" || m.effort?.maxEffort === "xhigh";
               return `
                 <button type="button" class="r001-model-item ${isSelected ? "selected" : ""}" data-action="select-model" data-slug="${escapeHtml(provider.slug)}" data-model="${escapeHtml(m.id)}">
@@ -1064,10 +1237,10 @@
                     ${renderLogoPlate(mLogo, provider?.monogram || "AI", provider?.color, "md")}
                     <div style="min-width:0;flex:1">
                       <div class="r001-model-title-row">
-                        <span class="r001-model-name">${escapeHtml(m.label)}</span>
+                        <span class="r001-model-name">${escapeHtml(m.label || m.id)}</span>
                         <span class="r001-cap-tag ${isTopTier ? "max-tag" : ""}">Max ${escapeHtml(m.effort?.maxLabel || "High")}</span>
                       </div>
-                      <div class="r001-model-desc">${escapeHtml(m.description)}</div>
+                      <div class="r001-model-desc">${escapeHtml(levelsText)} — ${escapeHtml(m.description)}</div>
                     </div>
                   </div>
                   ${isSelected ? `<span style="flex-shrink:0">${ICONS.check}</span>` : ""}
@@ -1081,6 +1254,40 @@
   }
 
   function renderSecondaryPopover() {
+    if (state.activePopover === "sync") {
+      const tools = state.envSync?.cliTools || [];
+      const ctx = state.editorContext || {};
+      return `
+        <div class="r001-popover" id="r001-popover" style="max-height:360px">
+          <div class="r001-popover-head">
+            <span class="r001-popover-title">Đồng bộ hệ sinh thái (${escapeHtml(state.envSync?.ideName || "IDE")})</span>
+            <button type="button" class="r001-back-btn" data-action="sync-env">${ICONS.refresh}<span>Đồng bộ ngay</span></button>
+          </div>
+          <div class="r001-popover-list" style="gap:5px;padding:8px 10px">
+            <div class="r001-eco-row">
+              <span>Tệp đang mở tự động</span>
+              <span class="r001-eco-badge ${ctx.activeFile ? "synced" : "idle"}">${escapeHtml(ctx.activeFile ? ctx.activeFile.fileName : "Chưa mở tệp")}</span>
+            </div>
+            <div class="r001-eco-row">
+              <span>Thư mục làm việc (Auto CWD)</span>
+              <span class="r001-eco-badge detected" title="${escapeHtml(ctx.workingDir || "")}">${escapeHtml(ctx.workspaceName || "Tự động theo tệp")}</span>
+            </div>
+            ${tools
+              .map((t) => {
+                const cls = t.synced ? "synced" : t.detected ? "detected" : "idle";
+                const lbl = t.synced ? "Đã đồng bộ" : t.detected ? "Đã phát hiện" : "Chưa cài";
+                return `
+                  <div class="r001-eco-row">
+                    <span>${escapeHtml(t.label)}</span>
+                    <span class="r001-eco-badge ${cls}">${lbl}</span>
+                  </div>`;
+              })
+              .join("")}
+          </div>
+        </div>
+      `;
+    }
+
     if (state.activePopover === "history") {
       return `
         <div class="r001-popover" id="r001-popover">
@@ -1107,22 +1314,36 @@
     }
 
     if (state.activePopover === "attach") {
+      const openTabs = state.editorContext?.openTabs || [];
       return `
-        <div class="r001-popover" id="r001-popover" style="max-height:220px">
+        <div class="r001-popover" id="r001-popover" style="max-height:310px">
           <div class="r001-popover-head">
-            <span class="r001-popover-title">Đính kèm ngữ cảnh mã nguồn</span>
+            <span class="r001-popover-title">Ngữ cảnh mã nguồn (Không cần mở Folder)</span>
             <button type="button" class="r001-back-btn" data-action="close-popover">Đóng</button>
           </div>
           <div class="r001-popover-list">
             <button type="button" class="r001-model-item" data-action="attach-ctx" data-kind="activeFile">
-              <div class="r001-model-left">${ICONS.file}<div><div class="r001-model-name">Tệp đang mở (Active Editor)</div><div class="r001-model-desc">Đưa toàn bộ file đang mở vào prompt</div></div></div>
+              <div class="r001-model-left">${ICONS.file}<div><div class="r001-model-name">Tệp đang mở (Active Editor)</div><div class="r001-model-desc">Đưa tệp đang mở + lỗi Diagnostics vào prompt</div></div></div>
             </button>
             <button type="button" class="r001-model-item" data-action="attach-ctx" data-kind="selection">
-              <div class="r001-model-left">${ICONS.scissors}<div><div class="r001-model-name">Đoạn code đang chọn (Selection)</div><div class="r001-model-desc">Chỉ đính kèm vùng dòng đang bôi đen</div></div></div>
+              <div class="r001-model-left">${ICONS.scissors}<div><div class="r001-model-name">Đoạn code đang bôi đen (Selection)</div><div class="r001-model-desc">Chỉ đính kèm các dòng đang chọn</div></div></div>
             </button>
             <button type="button" class="r001-model-item" data-action="attach-ctx" data-kind="workspaceFile">
-              <div class="r001-model-left">${ICONS.folder}<div><div class="r001-model-name">Chọn tệp từ Workspace...</div><div class="r001-model-desc">Tìm kiếm bất kỳ file nào trong dự án</div></div></div>
+              <div class="r001-model-left">${ICONS.folder}<div><div class="r001-model-name">Chọn tệp cùng thư mục / dự án...</div><div class="r001-model-desc">Hoạt động ngay cả khi chưa mở Workspace Folder</div></div></div>
             </button>
+            ${
+              openTabs.length > 0
+                ? `<div class="r001-section-label">Các Tab đang mở (${openTabs.length})</div>` +
+                  openTabs
+                    .map(
+                      (tab) => `
+                        <button type="button" class="r001-model-item" data-action="attach-tab" data-uri="${escapeHtml(tab.uri)}">
+                          <div class="r001-model-left">${ICONS.file}<div><div class="r001-model-name">${escapeHtml(tab.fileName)}</div><div class="r001-model-desc">${escapeHtml(tab.displayPath)}</div></div></div>
+                        </button>`
+                    )
+                    .join("")
+                : ""
+            }
           </div>
         </div>
       `;
@@ -1130,7 +1351,7 @@
 
     if (state.activePopover === "slash") {
       return `
-        <div class="r001-popover" id="r001-popover" style="max-height:240px">
+        <div class="r001-popover" id="r001-popover" style="max-height:250px">
           <div class="r001-popover-head">
             <span class="r001-popover-title">Slash Commands</span>
           </div>
@@ -1148,9 +1369,9 @@
 
     if (state.activePopover === "mode") {
       const modes = [
-        { id: "auto", label: "Auto", desc: "Tự động phân tích & đề xuất chỉnh sửa code trực tiếp" },
-        { id: "ask", label: "Ask", desc: "Hỏi đáp nhanh, giải thích code và debug" },
-        { id: "plan", label: "Plan", desc: "Lập kế hoạch kiến trúc từng bước trước khi viết code" }
+        { id: "auto", label: "Auto", desc: "Tự động phân tích file đang mở, viết code & lệnh thực thi" },
+        { id: "ask", label: "Ask", desc: "Hỏi đáp kiến trúc, giải thích code và debug nhanh" },
+        { id: "plan", label: "Plan", desc: "Lập kế hoạch từng bước như Cline Plan Mode trước khi sửa" }
       ];
       return `
         <div class="r001-popover" id="r001-popover" style="max-height:220px">
@@ -1177,21 +1398,22 @@
 
   function renderAuthOverlay() {
     if (!state.authModalOpen && state.connected) return "";
+    if (!state.authModalOpen) return "";
     const hasConnected = state.connected;
     return `
       <div class="r001-auth-backdrop" id="r001-auth-backdrop">
         <form class="r001-auth-card" id="r001-auth-form">
           <div class="r001-auth-head">
-            <img src="${escapeHtml(logoUri)}" alt="001Router" />
+            <img src="${escapeHtml(aiFaceUri || logoUri)}" alt="001Router" />
             <div>
-              <div class="r001-auth-title">Kết nối Web 001Router</div>
-              <div class="r001-auth-desc">Nhập URL & mật khẩu trang quản trị 001Router để xác nhận kết nối.</div>
+              <div class="r001-auth-title">Kết nối & Đồng bộ 001Router</div>
+              <div class="r001-auth-desc">Nhập mật khẩu quản trị 001Router một lần để đồng bộ Antigravity, CLI & VS Code.</div>
             </div>
           </div>
 
           <div class="r001-field">
             <label for="r001-auth-url">001Router Web URL</label>
-            <input id="r001-auth-url" class="r001-input" type="text" placeholder="http://127.0.0.1:20128 hoặc https://your-001router.vercel.app" value="${escapeHtml(state.authServerInput)}" required />
+            <input id="r001-auth-url" class="r001-input" type="text" placeholder="http://127.0.0.1:20128" value="${escapeHtml(state.authServerInput)}" required />
           </div>
 
           <div class="r001-field">
@@ -1209,18 +1431,141 @@
           }
 
           <button type="submit" class="r001-primary-btn" ${state.authLoading ? "disabled" : ""}>
-            ${state.authLoading ? "Đang xác thực mật khẩu..." : "Xác nhận & Kết nối 001Router"}
+            ${state.authLoading ? "Đang xác thực & đồng bộ..." : "Xác nhận & Đồng bộ ngay"}
           </button>
 
           ${
             hasConnected
-              ? `<button type="button" class="r001-secondary-btn" data-action="disconnect" style="color:#fca5a5">Ngắt kết nối thiết bị này</button>
-                 <button type="button" class="r001-secondary-btn" data-action="close-auth">Đóng</button>`
+              ? `<button type="button" class="r001-secondary-btn" data-action="disconnect" style="color:#fca5a5">Ngắt kết nối thiết bị này</button>`
               : ""
           }
+          <button type="button" class="r001-secondary-btn" data-action="close-auth">Đóng</button>
         </form>
       </div>
     `;
+  }
+
+  function renderContextStrip() {
+    const af = state.editorContext?.activeFile;
+    if (!af) {
+      return `
+        <div class="r001-context-strip">
+          <span style="font-size:11px;color:var(--text-muted)">Mở bất kỳ file nào để nhận diện tự động (không cần mở Folder)</span>
+          <div class="r001-context-actions">
+            <button type="button" class="r001-at-btn" data-action="toggle-popover" data-popover="attach">+ File</button>
+          </div>
+        </div>
+      `;
+    }
+
+    const loc = af.selectionLabel ? ` · ${af.selectionLabel}` : ` · ${af.lineCount} dòng`;
+    return `
+      <div class="r001-context-strip">
+        <div style="display:flex;align-items:center;gap:5px;min-width:0;flex:1">
+          <button
+            type="button"
+            class="r001-active-file-pill ${state.autoActiveFile ? "" : "muted"}"
+            data-action="toggle-auto-file"
+            title="${state.autoActiveFile ? "Đang tự động gửi kèm file đang mở. Nhấn để tắt tạm thời." : "Đã tắt gửi tự động file đang mở. Nhấn để bật lại."}"
+          >
+            ${state.autoActiveFile ? ICONS.eye : ICONS.eyeOff}
+            <span class="r001-active-file-name">${escapeHtml(af.fileName)}${escapeHtml(loc)}</span>
+            ${af.diagnosticErrors > 0 ? `<span class="r001-diag-tag">${af.diagnosticErrors} err</span>` : ""}
+            ${af.diagnosticErrors === 0 && af.diagnosticWarnings > 0 ? `<span class="r001-diag-tag warn">${af.diagnosticWarnings} warn</span>` : ""}
+          </button>
+        </div>
+        <div class="r001-context-actions">
+          <button type="button" class="r001-at-btn" data-action="reveal-active-file" title="Mở tệp này trong Editor">Mở</button>
+          <button type="button" class="r001-at-btn" data-action="toggle-popover" data-popover="attach" title="Đính kèm thêm Tab hoặc File khác">@ Ngữ cảnh</button>
+        </div>
+      </div>
+    `;
+  }
+
+  function ensureLiveTicker() {
+    const hasActiveWork =
+      Boolean(state.streamingSessionId) || state.terminalRuns.some((r) => r.status === "running");
+    if (!hasActiveWork) {
+      if (liveTimerInterval) {
+        clearInterval(liveTimerInterval);
+        liveTimerInterval = null;
+      }
+      return;
+    }
+    if (liveTimerInterval) return;
+    liveTimerInterval = setInterval(() => {
+      document.querySelectorAll(".r001-live-elapsed[data-started]").forEach((el) => {
+        const st = Number(el.dataset.started);
+        if (st > 0) el.textContent = `· ${formatDuration(Date.now() - st)}`;
+      });
+      document.querySelectorAll(".r001-term-status.run[data-started]").forEach((el) => {
+        const st = Number(el.dataset.started);
+        if (st > 0) el.textContent = `RUNNING · ${formatDuration(Date.now() - st)}`;
+      });
+    }, 200);
+  }
+
+  /**
+   * Incremental 60fps streaming patch so token arrival NEVER destroys 3D AI animations or <details open>.
+   */
+  function patchStreamingAssistantDom(msg) {
+    const container = document.getElementById(`msg-${msg.id}`);
+    if (!container) {
+      render();
+      return;
+    }
+    const mdEl = container.querySelector(".r001-markdown");
+    if (mdEl) {
+      mdEl.innerHTML = renderMarkdown(msg.text, msg.id, true);
+    }
+
+    const hasRunningTerm = state.terminalRuns.some(
+      (r) => r.sessionId === state.activeSessionId && r.status === "running"
+    );
+    const phase = hasRunningTerm
+      ? "terminal"
+      : msg.phase || (msg.text ? "streaming" : msg.reasoning ? "thinking" : "analyzing");
+
+    const aiCore = container.querySelector(".r001-ai-core");
+    if (aiCore) aiCore.dataset.phase = phase;
+
+    const personaEl = container.querySelector(".r001-ai-persona-label");
+    const subEl = container.querySelector(".r001-live-sub-text");
+    if (personaEl) {
+      personaEl.textContent =
+        phase === "thinking"
+          ? "AI Core · Đang suy nghĩ sâu"
+          : phase === "streaming"
+            ? "AI Core · Đang tổng hợp giải pháp"
+            : "AI Core · Đang phân tích dự án";
+    }
+    if (subEl) {
+      subEl.textContent =
+        phase === "thinking"
+          ? "Phân tích chuỗi suy luận đa bước..."
+          : phase === "streaming"
+            ? "Đang truyền phản hồi trực tiếp..."
+            : msg.phaseDetail || "Đang đọc ngữ cảnh file...";
+    }
+
+    const thinkWrap = container.querySelector(".r001-thinking-slot");
+    if (thinkWrap) {
+      const existingDetails = thinkWrap.querySelector("details");
+      const wasOpen = existingDetails ? existingDetails.open : true;
+      thinkWrap.innerHTML = renderThinkingCard(msg, true);
+      const nextDetails = thinkWrap.querySelector("details");
+      if (nextDetails && msg.text) {
+        nextDetails.open = false;
+      } else if (nextDetails) {
+        nextDetails.open = wasOpen;
+      }
+    }
+
+    const scrollEl = document.getElementById("r001-scroll");
+    if (scrollEl) {
+      const nearBottom = scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight < 120;
+      if (nearBottom) scrollEl.scrollTop = scrollEl.scrollHeight;
+    }
   }
 
   function render() {
@@ -1236,15 +1581,23 @@
 
     const selProvider = findSelectedProvider();
     const selModelObj = findSelectedModelObj();
-    const selLogoFile = resolveModelLogoFile(
-      state.selection?.modelId,
-      selProvider,
-      selModelObj?.logoFile
-    );
-    const pillModelLabel = state.selection?.modelId || "Select Model";
+    const cleanBaseModelLabel =
+      state.selection?.displayLabel ||
+      state.selection?.baseModelId ||
+      selModelObj?.label ||
+      selModelObj?.id ||
+      state.selection?.modelId ||
+      "Select Model";
+    const selLogoFile = resolveModelLogoFile(cleanBaseModelLabel, selProvider, selModelObj?.logoFile);
     const modeLabel = state.mode === "ask" ? "Ask" : state.mode === "plan" ? "Plan" : "Auto";
     const isStreaming = Boolean(state.streamingSessionId && state.streamingSessionId === activeSession?.id);
     const totalModels = (state.catalog?.providers || []).reduce((acc, p) => acc + (p.modelCount || 0), 0);
+
+    const syncedCliCount = (state.envSync?.cliTools || []).filter((t) => t.synced).length;
+    const sessionTerminals = state.terminalRuns.filter(
+      (r) => !r.sessionId || r.sessionId === activeSession?.id
+    );
+    const hasRunningTerminal = sessionTerminals.some((r) => r.status === "running");
 
     const textareaEl = document.getElementById("r001-input");
     const selectionStart = textareaEl ? textareaEl.selectionStart : null;
@@ -1258,13 +1611,16 @@
             <span class="r001-session-title">${escapeHtml(activeSession?.title || "Untitled")}</span>
             <button type="button" class="r001-conn-pill ${state.connected ? "connected" : ""}" data-action="open-auth" title="${escapeHtml(state.serverUrl)}">
               <span class="r001-conn-dot"></span>
-              <span>${state.connected ? "Connected" : "Locked"}</span>
+              <span>${state.connected ? "Connected" : "Connect"}</span>
+            </button>
+            <button type="button" class="r001-sync-pill" data-action="toggle-popover" data-popover="sync" title="Trạng thái đồng bộ Antigravity, CLI & Editor">
+              <span>${escapeHtml(state.envSync?.ideKind === "antigravity" ? "AG" : "IDE")} · ${syncedCliCount} Sync</span>
             </button>
           </div>
           <div class="r001-topbar-actions">
             ${
               surface === "sidebar"
-                ? `<button type="button" class="r001-icon-btn" data-action="open-tab" title="Mở thành Editor Tab (giống Claude Code)">${ICONS.popout}</button>`
+                ? `<button type="button" class="r001-icon-btn" data-action="open-tab" title="Mở rộng sang Editor Tab">${ICONS.popout}</button>`
                 : ""
             }
             <button type="button" class="r001-icon-btn ${activeSession?.bookmarked ? "active" : ""}" data-action="toggle-bookmark" title="Đánh dấu hội thoại">${activeSession?.bookmarked ? ICONS.bookmarkFilled : ICONS.bookmark}</button>
@@ -1275,22 +1631,26 @@
 
         <main class="r001-main" id="r001-scroll">
           ${
-            messages.length === 0
+            messages.length === 0 && sessionTerminals.length === 0
               ? `
-              <div class="r001-hero">
+              <div class="r001-hero" id="r001-hero-stage">
                 <div class="r001-hero-brand">
                   <img class="r001-hero-logo" src="${escapeHtml(logoUri)}" alt="001Router" />
                   <span class="r001-hero-title">001Router</span>
                 </div>
                 <div class="r001-hero-center">
-                  ${renderMascotSvg()}
-                  <div class="r001-hero-subtitle">You've come to the absolutely right place!</div>
+                  ${render3DAiFaceCore("hero", hasRunningTerminal ? "terminal" : "idle")}
+                  <div class="r001-hero-subtitle">3D Neural Core đã đồng bộ ${escapeHtml(state.envSync?.ideName || "IDE")}${state.editorContext?.activeFile ? ` · Đang theo dõi ${escapeHtml(state.editorContext.activeFile.fileName)}` : ""}</div>
                   <div class="r001-hero-meta">
                     <span>${(state.catalog?.providers || []).length} providers</span>
                     <span>·</span>
                     <span>${totalModels} models</span>
                     <span>·</span>
                     <span>Effort: <strong style="color:var(--effort-color)">${escapeHtml(stop.label)}</strong></span>
+                  </div>
+                  <div class="r001-hero-quick">
+                    <button type="button" class="r001-quick-pill" data-action="quick-prompt" data-prompt="Phân tích kiến trúc và tìm điểm cần tối ưu trong file đang mở">${ICONS.brain}<span>Phân tích file đang mở</span></button>
+                    <button type="button" class="r001-quick-pill" data-action="open-model-picker">${ICONS.bolt}<span>Chỉnh Model & Effort</span></button>
                   </div>
                 </div>
                 <div></div>
@@ -1314,25 +1674,16 @@
                         </div>`;
                     }
                     const isLastStreaming = isStreaming && idx === messages.length - 1;
-                    const msgModelLogo = resolveModelLogoFile(m.model || "", null);
-                    const effId = String(m.effort || "medium").toLowerCase();
                     return `
-                      <div class="r001-msg r001-msg-assistant">
-                        <div class="r001-msg-header">
-                          ${renderLogoPlate(msgModelLogo, "01", "#d97757", "sm")}
-                          <span class="r001-msg-model-name">${escapeHtml(m.model || "001Router")}</span>
-                          <span class="r001-effort-badge" data-effort="${escapeHtml(effId)}">${escapeHtml(effId.toUpperCase())}</span>
-                        </div>
-                        ${
-                          m.reasoning
-                            ? `<details class="r001-reasoning"><summary>Thinking process (${m.reasoning.length} chars)</summary><div class="r001-reasoning-body">${escapeHtml(m.reasoning)}</div></details>`
-                            : ""
-                        }
+                      <div class="r001-msg r001-msg-assistant" id="msg-${escapeHtml(m.id)}">
+                        ${renderAssistantPhaseHeader(m, isLastStreaming, isLastStreaming && hasRunningTerminal)}
+                        <div class="r001-thinking-slot">${renderThinkingCard(m, isLastStreaming)}</div>
                         <div class="r001-markdown">${renderMarkdown(m.text, m.id, isLastStreaming)}</div>
                         ${m.error ? `<div class="r001-error-banner">${escapeHtml(m.error)}</div>` : ""}
                       </div>`;
                   })
                   .join("")}
+                ${sessionTerminals.map((r) => renderTerminalCard(r)).join("")}
               </div>
             `
           }
@@ -1341,6 +1692,7 @@
         <footer class="r001-dock">
           ${state.activePopover === "model" ? renderModelPopover() : renderSecondaryPopover()}
           <div class="r001-composer" data-singularity="${isSing ? "1" : "0"}">
+            ${renderContextStrip()}
             ${
               state.attachments.length
                 ? `<div class="r001-composer-chips">
@@ -1352,14 +1704,14 @@
                   </div>`
                 : ""
             }
-            <textarea id="r001-input" class="r001-textarea" rows="1" placeholder="ctrl esc to focus or unfocus 001Router">${escapeHtml(state.draft)}</textarea>
+            <textarea id="r001-input" class="r001-textarea" rows="1" placeholder="Nhập yêu cầu code, @ đính kèm tab, hoặc /run <lệnh terminal>...">${escapeHtml(state.draft)}</textarea>
             <div class="r001-toolbar">
               <div class="r001-toolbar-left">
-                <button type="button" class="r001-tool-btn" data-action="toggle-popover" data-popover="attach" title="Đính kèm file / code">${ICONS.plus}</button>
+                <button type="button" class="r001-tool-btn" data-action="toggle-popover" data-popover="attach" title="Đính kèm file / tab">${ICONS.plus}</button>
                 <button type="button" class="r001-tool-btn framed" data-action="toggle-popover" data-popover="slash" title="Slash Commands">${ICONS.slash}</button>
-                <button type="button" class="r001-model-pill" data-action="open-model-picker" data-singularity="${isSing ? "1" : "0"}" title="${escapeHtml(`${state.selection?.providerName || "Provider"} / ${pillModelLabel} (${stop.label})`)}">
+                <button type="button" class="r001-model-pill" data-action="open-model-picker" data-singularity="${isSing ? "1" : "0"}" title="${escapeHtml(`${state.selection?.providerName || "Provider"} · ${state.selection?.fullId || cleanBaseModelLabel} (${stop.label})`)}">
                   ${renderLogoPlate(selLogoFile, selProvider?.monogram || "01", selProvider?.color, "sm")}
-                  <span class="r001-model-pill-name">${escapeHtml(pillModelLabel)}</span>
+                  <span class="r001-model-pill-name">${escapeHtml(cleanBaseModelLabel)}</span>
                   <span class="r001-model-pill-effort">
                     <span class="r001-pill-orb"></span>
                     <span class="r001-model-pill-effort-text">${escapeHtml(stop.label)}</span>
@@ -1386,6 +1738,7 @@
     `;
 
     bindDynamicListeners(hadFocus, selectionStart, selectionEnd);
+    ensureLiveTicker();
 
     if (state.activePopover === "model") {
       const stops = profile.effortLevels;
@@ -1396,18 +1749,18 @@
     }
 
     const scrollEl = document.getElementById("r001-scroll");
-    if (scrollEl && messages.length > 0) {
+    if (scrollEl && (messages.length > 0 || sessionTerminals.length > 0)) {
       scrollEl.scrollTop = scrollEl.scrollHeight;
     }
   }
 
-  function submitChat() {
+  function submitChat(overrideText) {
     if (!state.connected) {
       state.authModalOpen = true;
       render();
       return;
     }
-    const text = state.draft.trim();
+    const text = (overrideText !== undefined ? overrideText : state.draft).trim();
     if (!text && state.attachments.length === 0) return;
 
     const session = getActiveSession();
@@ -1415,13 +1768,16 @@
     state.draft = "";
     state.attachments = [];
     state.activePopover = null;
-    state.streamingSessionId = session?.id || "pending";
+    if (!/^\/run\s+/i.test(text)) {
+      state.streamingSessionId = session?.id || "pending";
+    }
 
     vscode.postMessage({
       type: "sendChat",
       sessionId: session?.id,
       text,
       attachments,
+      includeActiveFile: state.autoActiveFile,
       mode: state.mode,
       selection: state.selection
     });
@@ -1446,6 +1802,9 @@
         if (state.draft === "/") {
           state.activePopover = "slash";
           render();
+        } else if (state.draft.endsWith("@")) {
+          state.activePopover = "attach";
+          render();
         }
       });
       input.addEventListener("keydown", (e) => {
@@ -1453,6 +1812,20 @@
           e.preventDefault();
           submitChat();
         }
+      });
+    }
+
+    // Interactive 3D mouse-tracking parallax on Hero 3D AI Face
+    const heroStage = document.getElementById("r001-hero-stage");
+    if (heroStage && !REDUCED_MOTION_MQ.matches && !state.fxPaused) {
+      heroStage.addEventListener("pointermove", (e) => {
+        const core = heroStage.querySelector(".r001-ai-core.hero");
+        if (!core) return;
+        const r = heroStage.getBoundingClientRect();
+        const nx = ((e.clientX - r.left) / Math.max(1, r.width) - 0.5) * 2;
+        const ny = ((e.clientY - r.top) / Math.max(1, r.height) - 0.5) * 2;
+        core.style.setProperty("--tilt-y", `${(nx * 15).toFixed(1)}deg`);
+        core.style.setProperty("--tilt-x", `${(-ny * 12).toFixed(1)}deg`);
       });
     }
 
@@ -1515,7 +1888,6 @@
       });
     }
 
-    // Native Range Slider — ZERO innerHTML rebuild while dragging (butter-smooth 60-144Hz!)
     const rangeInput = document.getElementById("r001-effort-range");
     if (rangeInput) {
       const commitSnap = () => {
@@ -1528,12 +1900,8 @@
         const chosen = stops[snapIdx] || stops[0];
 
         rangeInput.value = String(Math.round(snapRatio * 1000));
+        commitEffortChoice(chosen.id);
         syncSliderDom(snapRatio, true);
-
-        if (state.selection && chosen.id !== state.selection.effort) {
-          state.selection = { ...state.selection, effort: chosen.id };
-          vscode.postMessage({ type: "saveSelection", selection: state.selection });
-        }
       };
 
       rangeInput.addEventListener("input", () => {
@@ -1555,12 +1923,11 @@
         const delta = e.key === "ArrowRight" || e.key === "ArrowUp" ? 1 : -1;
         const nextIdx = Math.min(stops.length - 1, Math.max(0, curIdx + delta));
         const nextRatio = stops.length === 1 ? 1 : nextIdx / Math.max(1, stops.length - 1);
-        rangeInput.value = String(Math.round(nextRatio * 1000));
-        syncSliderDom(nextRatio, true);
         const chosen = stops[nextIdx];
-        if (state.selection && chosen) {
-          state.selection = { ...state.selection, effort: chosen.id };
-          vscode.postMessage({ type: "saveSelection", selection: state.selection });
+        if (chosen) {
+          rangeInput.value = String(Math.round(nextRatio * 1000));
+          commitEffortChoice(chosen.id);
+          syncSliderDom(nextRatio, true);
         }
       });
     }
@@ -1569,7 +1936,13 @@
   root.addEventListener("click", (e) => {
     const btn = e.target.closest("[data-action]");
     if (!btn) {
-      if (state.activePopover && !e.target.closest("#r001-popover") && !e.target.closest(".r001-toolbar")) {
+      if (
+        state.activePopover &&
+        !e.target.closest("#r001-popover") &&
+        !e.target.closest(".r001-toolbar") &&
+        !e.target.closest(".r001-topbar") &&
+        !e.target.closest(".r001-context-strip")
+      ) {
         state.activePopover = null;
         render();
       }
@@ -1622,12 +1995,29 @@
         state.activePopover = null;
         render();
         break;
+      case "sync-env":
+        vscode.postMessage({ type: "syncEnv" });
+        break;
+      case "toggle-auto-file":
+        state.autoActiveFile = !state.autoActiveFile;
+        vscode.postMessage({ type: "saveAutoActiveFile", enabled: state.autoActiveFile });
+        render();
+        break;
+      case "reveal-active-file":
+        if (state.editorContext?.activeFile?.uri) {
+          vscode.postMessage({ type: "revealFile", uri: state.editorContext.activeFile.uri });
+        }
+        break;
+      case "quick-prompt":
+        submitChat(btn.dataset.prompt || "");
+        break;
       case "open-model-picker":
         if (state.activePopover === "model") {
           state.activePopover = null;
         } else {
           state.activePopover = "model";
-          state.pickerStep = "providers";
+          state.inspectingProviderSlug = state.selection?.providerSlug || null;
+          state.pickerStep = state.selection?.providerSlug ? "models" : "providers";
           state.providerSearch = "";
           state.modelSearch = "";
         }
@@ -1649,24 +2039,31 @@
         const prov = (state.catalog?.providers || []).find((p) => p.slug === slug);
         const mod = prov?.models?.find((m) => m.id === modelId);
         if (prov && mod) {
-          const levels = mod.effort?.effortLevels || [];
-          const prevEffort = state.selection?.effort;
-          const keepEffort = levels.some((l) => l.id === prevEffort)
-            ? prevEffort
-            : mod.effort?.defaultEffort || levels[0]?.id || "medium";
-          state.selection = {
-            kind: "provider",
-            providerSlug: prov.slug,
-            providerName: prov.name,
-            providerPreset: prov.preset,
-            providerColor: prov.color,
-            modelId: mod.id,
-            fullId: mod.fullId,
-            effort: keepEffort
-          };
+          state.selection = buildSyncedSelection(prov, mod, state.selection?.effort);
           vscode.postMessage({ type: "saveSelection", selection: state.selection });
           render();
         }
+        break;
+      }
+      case "pick-effort-tier": {
+        const tierId = btn.dataset.tier;
+        if (!tierId) break;
+        const provSlug = state.inspectingProviderSlug || state.selection?.providerSlug;
+        const prov = (state.catalog?.providers || []).find((p) => p.slug === provSlug) || findSelectedProvider();
+        const mod = findModelInProvider(prov, state.selection);
+        if (prov && mod && state.selection?.kind !== "combo") {
+          state.selection = buildSyncedSelection(prov, mod, tierId);
+          vscode.postMessage({ type: "saveSelection", selection: state.selection });
+        } else {
+          commitEffortChoice(tierId);
+        }
+        const profile = getActiveEffortProfile();
+        const stops = profile.effortLevels;
+        const idx = Math.max(0, stops.findIndex((s) => s.id === tierId));
+        const ratio = stops.length === 1 ? 1 : idx / Math.max(1, stops.length - 1);
+        const rangeInput = document.getElementById("r001-effort-range");
+        if (rangeInput) rangeInput.value = String(Math.round(ratio * 1000));
+        syncSliderDom(ratio, true);
         break;
       }
       case "select-combo": {
@@ -1679,6 +2076,8 @@
             providerName: "Combo",
             providerPreset: "combo",
             providerColor: "#d97757",
+            baseModelId: combo.name,
+            displayLabel: combo.name,
             modelId: combo.name,
             fullId: combo.name,
             effort: combo.effort?.defaultEffort || "medium"
@@ -1700,9 +2099,16 @@
         vscode.postMessage({ type: "deleteSession", sessionId: btn.dataset.id });
         break;
       case "attach-ctx":
+        if (state.draft.endsWith("@")) state.draft = state.draft.slice(0, -1);
         state.activePopover = null;
         render();
         vscode.postMessage({ type: "pickContext", kind: btn.dataset.kind });
+        break;
+      case "attach-tab":
+        if (state.draft.endsWith("@")) state.draft = state.draft.slice(0, -1);
+        state.activePopover = null;
+        render();
+        vscode.postMessage({ type: "pickContext", kind: "openTab", uri: btn.dataset.uri });
         break;
       case "remove-attach":
         state.attachments = state.attachments.filter((a) => a.id !== btn.dataset.id);
@@ -1724,12 +2130,14 @@
         } else if (cmd === "/effort") {
           state.activePopover = "model";
           state.pickerStep = "models";
+        } else if (cmd === "/sync") {
+          vscode.postMessage({ type: "syncEnv" });
+        } else if (cmd === "/run ") {
+          state.draft = "/run ";
         } else if (cmd === "/new") {
           vscode.postMessage({ type: "newChat" });
         } else if (cmd === "/connect") {
           state.authModalOpen = true;
-        } else if (cmd === "/refresh") {
-          vscode.postMessage({ type: "refreshCatalog" });
         }
         render();
         break;
@@ -1762,6 +2170,33 @@
         }
         break;
       }
+      case "run-code": {
+        const code = codeBlockCache.get(btn.dataset.block);
+        if (code !== undefined) {
+          const sess = getActiveSession();
+          vscode.postMessage({
+            type: "runCommand",
+            command: code.trim(),
+            sessionId: sess?.id
+          });
+        }
+        break;
+      }
+      case "kill-term":
+        vscode.postMessage({ type: "killCommand", runId: btn.dataset.run });
+        break;
+      case "open-ide-term":
+        vscode.postMessage({ type: "openInTerminal", command: btn.dataset.cmd || "" });
+        break;
+      case "fix-term-error": {
+        const run = state.terminalRuns.find((r) => r.runId === btn.dataset.run);
+        if (run) {
+          submitChat(
+            `Lệnh \`${run.command}\` vừa thất bại với Exit Code ${run.exitCode}.\nOutput:\n\`\`\`\n${(run.output || "").slice(-3000)}\n\`\`\`\nHãy phân tích nguyên nhân và sửa lỗi.`
+          );
+        }
+        break;
+      }
     }
   });
 
@@ -1779,13 +2214,27 @@
         state.catalog = msg.catalog || state.catalog;
         state.selection = msg.selection || state.selection;
         state.mode = msg.mode || state.mode;
+        if (typeof msg.autoActiveFile === "boolean") {
+          state.autoActiveFile = msg.autoActiveFile;
+        }
+        if (msg.envSync) state.envSync = msg.envSync;
+        if (msg.editorContext) state.editorContext = msg.editorContext;
         state.sessions = Array.isArray(msg.sessions) ? msg.sessions : [];
         state.activeSessionId = msg.activeSessionId || state.sessions[0]?.id || null;
         state.lastError = msg.lastError || "";
-        if (!state.connected) {
+        if (!state.connected && state.lastError) {
           state.authModalOpen = true;
         }
         render();
+        break;
+
+      case "editorContext":
+        if (msg.editorContext) {
+          state.editorContext = msg.editorContext;
+          if (!state.streamingSessionId) {
+            render();
+          }
+        }
         break;
 
       case "connectResult":
@@ -1802,18 +2251,20 @@
         break;
 
       case "selectionUpdated": {
-        // Avoid nuking the slider mid-drag if this echo matches our own live effort change
-        const sameProviderModel =
+        const sameBase =
           state.selection?.providerSlug === msg.selection?.providerSlug &&
-          state.selection?.modelId === msg.selection?.modelId;
+          (state.selection?.baseModelId || state.selection?.modelId) ===
+            (msg.selection?.baseModelId || msg.selection?.modelId);
         state.selection = msg.selection;
-        if (state.activePopover === "model" && sameProviderModel) {
+        if (state.activePopover === "model" && sameBase) {
           const prof = getActiveEffortProfile();
           const stops = prof.effortLevels;
           const idx = Math.max(0, stops.findIndex((s) => s.id === state.selection?.effort));
           const r = stops.length === 1 ? 1 : idx / Math.max(1, stops.length - 1);
           const rangeInput = document.getElementById("r001-effort-range");
           if (rangeInput) rangeInput.value = String(Math.round(r * 1000));
+          const pillName = document.querySelector(".r001-model-pill-name");
+          if (pillName) pillName.textContent = state.selection?.displayLabel || state.selection?.baseModelId || state.selection?.modelId;
           syncSliderDom(r, true);
         } else {
           render();
@@ -1851,7 +2302,8 @@
         if (target) {
           target.text = (target.text || "") + (msg.deltaText || "");
           target.reasoning = (target.reasoning || "") + (msg.deltaReasoning || "");
-          render();
+          if (msg.phase) target.phase = msg.phase;
+          patchStreamingAssistantDom(target);
         }
         break;
       }
@@ -1865,8 +2317,8 @@
             id: `err-${Date.now()}`,
             role: "assistant",
             text: "",
-            model: state.selection?.fullId || "001Router",
             effort: state.selection?.effort || "medium",
+            phase: "done",
             error: state.lastError
           });
         }
@@ -1875,13 +2327,58 @@
       }
 
       case "streamEnd": {
-        if (msg.error) {
-          const sess = state.sessions.find((s) => s.id === msg.sessionId);
-          const target = sess?.messages?.find((m) => m.id === msg.messageId);
-          if (target) target.error = msg.error;
+        const sess = state.sessions.find((s) => s.id === msg.sessionId);
+        const target = sess?.messages?.find((m) => m.id === msg.messageId);
+        if (target) {
+          target.phase = "done";
+          if (msg.durationMs) target.durationMs = msg.durationMs;
+          if (msg.error) target.error = msg.error;
         }
         state.streamingSessionId = null;
         render();
+        break;
+      }
+
+      case "terminalStart":
+        state.terminalRuns.push({
+          runId: msg.runId,
+          sessionId: msg.sessionId || state.activeSessionId,
+          command: msg.command,
+          cwd: msg.cwd,
+          startedAt: msg.startedAt || Date.now(),
+          status: "running",
+          output: "",
+          exitCode: null,
+          durationMs: 0
+        });
+        render();
+        break;
+
+      case "terminalOutput": {
+        const run = state.terminalRuns.find((r) => r.runId === msg.runId);
+        if (run) {
+          run.output = (run.output || "") + (msg.chunk || "");
+          const outEl = document.querySelector(`#term-${CSS.escape(run.runId)} .r001-terminal-out`);
+          if (outEl) {
+            outEl.textContent = run.output;
+            outEl.scrollTop = outEl.scrollHeight;
+          } else {
+            render();
+          }
+        }
+        break;
+      }
+
+      case "terminalEnd": {
+        const run = state.terminalRuns.find((r) => r.runId === msg.runId);
+        if (run) {
+          run.status = "done";
+          run.exitCode = typeof msg.exitCode === "number" ? msg.exitCode : 0;
+          run.durationMs = msg.durationMs || Date.now() - run.startedAt;
+          if (msg.output) run.output = msg.output;
+          if (msg.error) run.output = `${run.output ? `${run.output}\n` : ""}${msg.error}`;
+          render();
+        }
         break;
       }
 

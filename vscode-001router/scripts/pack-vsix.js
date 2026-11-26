@@ -312,6 +312,7 @@ function packVsix() {
   <Default Extension=".css" ContentType="text/css" />
   <Default Extension=".svg" ContentType="image/svg+xml" />
   <Default Extension=".png" ContentType="image/png" />
+  <Default Extension=".jpg" ContentType="image/jpeg" />
   <Default Extension=".md" ContentType="text/markdown" />
   <Default Extension=".txt" ContentType="text/plain" />
   <Default Extension=".vsixmanifest" ContentType="text/xml" />
@@ -357,6 +358,7 @@ function packVsix() {
     "media/icon.svg",
     "media/icon-activity.svg",
     "media/icon.png",
+    "media/ai-face-3d.jpg",
     "media/webview.css",
     "media/webview.js",
     ...bundledLogos

@@ -1,4 +1,5 @@
 import { isRouterKeyModelAllowed } from "./auth.js";
+import { getAllCliToolStatuses } from "./cliTools.js";
 import { getPreset } from "./presets.js";
 
 /**
@@ -82,13 +83,21 @@ function buildStops(levelIds) {
   });
 }
 
+const EFFORT_SUFFIX_RE = /^(.*?)-(minimal|low|medium|high|xhigh|max)$/i;
+const EFFORT_ORDER = Object.freeze(["low", "medium", "high", "xhigh", "max"]);
+
+function splitEffortSuffix(modelId) {
+  const raw = String(modelId || "").trim();
+  const m = EFFORT_SUFFIX_RE.exec(raw);
+  if (!m || !m[1]) return { baseId: raw, suffix: null };
+  let suffix = m[2].toLowerCase();
+  if (suffix === "minimal") suffix = "low";
+  return { baseId: m[1], suffix };
+}
+
 function detectSuffixEffort(modelLower) {
-  if (modelLower.endsWith("-xhigh")) return "xhigh";
-  if (modelLower.endsWith("-max")) return "max";
-  if (modelLower.endsWith("-high")) return "high";
-  if (modelLower.endsWith("-medium")) return "medium";
-  if (modelLower.endsWith("-low")) return "low";
-  return null;
+  const { suffix } = splitEffortSuffix(modelLower);
+  return suffix;
 }
 
 /**
@@ -133,6 +142,9 @@ export function getModelEffortProfile(provider, modelId, catalogEntry = null) {
     if (idLower.includes("flash-lite") || idLower.includes("nano")) {
       levels = ["low", "medium"];
       defaultEffort = "low";
+    } else if (idLower.includes("carbon")) {
+      levels = ["low", "medium", "high"];
+      defaultEffort = "medium";
     } else if (
       idLower.startsWith("gemini-3") ||
       idLower.startsWith("gemini-4") ||
@@ -140,7 +152,6 @@ export function getModelEffortProfile(provider, modelId, catalogEntry = null) {
       idLower.includes("ultra") ||
       idLower.includes("neon") ||
       idLower.includes("hydrogen") ||
-      idLower.includes("carbon") ||
       idLower.includes("argon") ||
       idLower.includes("claude-sonnet") ||
       idLower.includes("claude-opus") ||
@@ -409,7 +420,7 @@ export function buildExtensionCatalog(storage, routerKey = null) {
     const activeKeys = enabledKeys.filter((k) => !k.cooldownUntil || k.cooldownUntil <= now);
     const isKeyOptional = presetDef?.keyOptional === true;
 
-    const models = [];
+    const rawModels = [];
     const seenModels = new Set();
 
     for (const modelId of provider.models || []) {
@@ -420,21 +431,101 @@ export function buildExtensionCatalog(storage, routerKey = null) {
       if (routerKey && !isRouterKeyModelAllowed(routerKey, fullId)) continue;
 
       seenModels.add(modelId);
-      const cat = catById.get(modelId) || null;
-      const effort = getModelEffortProfile(provider, modelId, cat);
+      rawModels.push(modelId);
+    }
 
-      models.push({
-        id: modelId,
-        fullId,
-        label: formatModelDisplayName(modelId),
-        description: buildModelDescription(modelId, cat, provider),
-        logoFile: resolveModelLogoFile(modelId, provider),
-        kind: cat?.kind || "chat",
-        vision: Boolean(cat?.vision),
-        reasoning: Boolean(cat?.reasoning || effort.maxPower >= 4),
-        contextWindow: cat?.contextWindow || 128000,
-        effort
-      });
+    // Group effort-suffixed sibling variants (e.g. gemini-4-neon-{low,medium,high,xhigh})
+    // into one unified model family so Effort slider & Model ID stay 100% synchronized.
+    const familyBuckets = new Map();
+    for (const modelId of rawModels) {
+      const { baseId, suffix } = splitEffortSuffix(modelId);
+      const key = suffix ? baseId.toLowerCase() : modelId.toLowerCase();
+      let bucket = familyBuckets.get(key);
+      if (!bucket) {
+        bucket = {
+          baseId: suffix ? baseId : modelId,
+          bareId: null,
+          variants: new Map(),
+          firstId: modelId
+        };
+        familyBuckets.set(key, bucket);
+      }
+      if (suffix) {
+        bucket.variants.set(suffix, modelId);
+      } else {
+        bucket.bareId = modelId;
+        bucket.baseId = modelId;
+      }
+    }
+
+    const models = [];
+    for (const bucket of familyBuckets.values()) {
+      const hasSuffixVariants = bucket.variants.size >= 1;
+
+      if (hasSuffixVariants) {
+        const availableLevels = EFFORT_ORDER.filter((lvl) => bucket.variants.has(lvl));
+        const stops = buildStops(availableLevels);
+        const maxStop = stops[stops.length - 1];
+        const defaultEffort = availableLevels.includes("medium")
+          ? "medium"
+          : availableLevels.includes("high")
+            ? "high"
+            : availableLevels[0];
+
+        const variantMap = {};
+        for (const lvl of availableLevels) {
+          const rawId = bucket.variants.get(lvl);
+          variantMap[lvl] = {
+            id: rawId,
+            modelId: rawId,
+            fullId: `${provider.slug}/${rawId}`
+          };
+        }
+
+        const repId = bucket.bareId || bucket.variants.get(defaultEffort) || bucket.firstId;
+        const cat = catById.get(bucket.baseId) || catById.get(repId) || null;
+        const effort = {
+          effortLevels: stops,
+          defaultEffort,
+          maxEffort: maxStop.id,
+          maxLabel: maxStop.label,
+          maxPower: stops.length
+        };
+
+        models.push({
+          id: bucket.baseId,
+          fullId: variantMap[defaultEffort]?.fullId || `${provider.slug}/${repId}`,
+          resolvedModelId: variantMap[defaultEffort]?.modelId || repId,
+          label: formatModelDisplayName(bucket.baseId),
+          description: buildModelDescription(bucket.baseId, cat, provider),
+          logoFile: resolveModelLogoFile(bucket.baseId, provider),
+          kind: cat?.kind || "chat",
+          vision: Boolean(cat?.vision),
+          reasoning: Boolean(cat?.reasoning || effort.maxPower >= 4),
+          contextWindow: cat?.contextWindow || 128000,
+          variantMap,
+          effort
+        });
+      } else {
+        const modelId = bucket.firstId;
+        const fullId = `${provider.slug}/${modelId}`;
+        const cat = catById.get(modelId) || null;
+        const effort = getModelEffortProfile(provider, modelId, cat);
+
+        models.push({
+          id: modelId,
+          fullId,
+          resolvedModelId: modelId,
+          label: formatModelDisplayName(modelId),
+          description: buildModelDescription(modelId, cat, provider),
+          logoFile: resolveModelLogoFile(modelId, provider),
+          kind: cat?.kind || "chat",
+          vision: Boolean(cat?.vision),
+          reasoning: Boolean(cat?.reasoning || effort.maxPower >= 4),
+          contextWindow: cat?.contextWindow || 128000,
+          effort
+        });
+      }
     }
 
     if (models.length === 0) continue;

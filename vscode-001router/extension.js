@@ -1,7 +1,10 @@
 "use strict";
 
 const crypto = require("node:crypto");
+const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
+const { spawn } = require("node:child_process");
 const vscode = require("vscode");
 
 const SECRET_SERVER_URL = "001router.serverUrl";
@@ -10,10 +13,15 @@ const STATE_SESSIONS = "001router.sessions";
 const STATE_ACTIVE_SESSION = "001router.activeSessionId";
 const STATE_SELECTION = "001router.selection";
 const STATE_MODE = "001router.mode";
+const STATE_AUTO_ACTIVE_FILE = "001router.autoActiveFile";
 
 const MAX_SESSIONS = 40;
 const MAX_MESSAGES_PER_SESSION = 80;
 const MAX_ATTACHMENT_CHARS = 32000;
+const MAX_TERMINAL_OUTPUT_CHARS = 24000;
+
+const EFFORT_ORDER = ["low", "medium", "high", "xhigh", "max"];
+const EFFORT_SUFFIX_RE = /^(.*)-(minimal|low|medium|high|xhigh|max)$/i;
 
 function normalizeServerUrl(rawUrl) {
   let clean = String(rawUrl || "").trim();
@@ -35,24 +43,343 @@ function formatErrorMessage(err) {
   return err.message || String(err);
 }
 
-function buildSystemPrompt(mode) {
+function stripAnsi(str) {
+  return String(str || "").replace(
+    // eslint-disable-next-line no-control-regex
+    /\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\))/g,
+    ""
+  );
+}
+
+function readTextSafe(filePath) {
+  try {
+    return fs.readFileSync(filePath, "utf8");
+  } catch {
+    return null;
+  }
+}
+
+function readJsonSafe(filePath) {
+  const raw = readTextSafe(filePath);
+  if (raw === null) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function unquoteScalar(rawVal) {
+  const trimmed = String(rawVal || "").trim();
+  if ((trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith("'") && trimmed.endsWith("'"))) {
+    return trimmed.slice(1, -1).trim();
+  }
+  return trimmed;
+}
+
+function isRouterKeyLike(val) {
+  return typeof val === "string" && val.trim().length >= 8 && !val.includes("…") && !val.includes("***");
+}
+
+function detectHostIde() {
+  const appName = String(vscode.env.appName || "VS Code");
+  const uriScheme = String(vscode.env.uriScheme || "vscode").toLowerCase();
+  const lower = `${appName} ${uriScheme}`.toLowerCase();
+  if (lower.includes("antigravity")) {
+    return { ideName: "Antigravity IDE", ideKind: "antigravity", rawAppName: appName };
+  }
+  if (lower.includes("cursor")) {
+    return { ideName: "Cursor", ideKind: "cursor", rawAppName: appName };
+  }
+  if (lower.includes("windsurf")) {
+    return { ideName: "Windsurf", ideKind: "windsurf", rawAppName: appName };
+  }
+  return { ideName: appName.includes("Code") ? "VS Code" : appName, ideKind: "vscode", rawAppName: appName };
+}
+
+/**
+ * Inspect local Antigravity, CLI tools (Claude, Codex, Cline, OpenCode, Continue, Aider, Gemini CLI),
+ * and VS Code environment to auto-discover existing 001Router URL & API key for zero-friction sync.
+ */
+function discoverLocalEcosystem(defaultServerUrl) {
+  const home = os.homedir();
+  const hostIde = detectHostIde();
+  const cliTools = [];
+  const discoveredCredentials = [];
+
+  const isLocalOrRouterUrl = (urlStr) => {
+    const norm = normalizeServerUrl(urlStr).toLowerCase();
+    if (!norm) return false;
+    const defNorm = normalizeServerUrl(defaultServerUrl).toLowerCase();
+    return (
+      norm === defNorm ||
+      norm.includes("127.0.0.1:20128") ||
+      norm.includes("localhost:20128") ||
+      norm.includes("001router")
+    );
+  };
+
+  // 1) Host IDE (Antigravity / VS Code)
+  const agDirExists =
+    fs.existsSync(path.join(home, ".gemini", "antigravity")) ||
+    fs.existsSync(path.join(home, ".antigravity"));
+  cliTools.push({
+    id: "antigravity",
+    label: "Antigravity",
+    detected: hostIde.ideKind === "antigravity" || agDirExists,
+    synced: hostIde.ideKind === "antigravity" || agDirExists
+  });
+  cliTools.push({
+    id: "vscode",
+    label: hostIde.ideName,
+    detected: true,
+    synced: true
+  });
+
+  // 2) Gemini CLI
+  const geminiCliDir = path.join(home, ".gemini");
+  cliTools.push({
+    id: "gemini-cli",
+    label: "Gemini CLI",
+    detected: fs.existsSync(geminiCliDir),
+    synced: fs.existsSync(path.join(geminiCliDir, "oauth_creds.json")) || fs.existsSync(path.join(geminiCliDir, "settings.json"))
+  });
+
+  // 3) Claude Code CLI (~/.claude/settings.json)
+  const claudeSettingsPath = path.join(home, ".claude", "settings.json");
+  const claudeData = readJsonSafe(claudeSettingsPath);
+  const claudeBase = claudeData?.env?.ANTHROPIC_BASE_URL || "";
+  const claudeKey = claudeData?.env?.ANTHROPIC_AUTH_TOKEN || "";
+  const claudeSynced = isLocalOrRouterUrl(claudeBase);
+  if (claudeSynced && isRouterKeyLike(claudeKey)) {
+    discoveredCredentials.push({ source: "Claude CLI", serverUrl: normalizeServerUrl(claudeBase), routerKey: claudeKey.trim() });
+  }
+  cliTools.push({
+    id: "claude",
+    label: "Claude CLI",
+    detected: Boolean(claudeData) || fs.existsSync(path.join(home, ".claude")),
+    synced: claudeSynced
+  });
+
+  // 4) Codex CLI (~/.codex/config.toml & auth.json)
+  const codexToml = readTextSafe(path.join(home, ".codex", "config.toml"));
+  const codexAuth = readJsonSafe(path.join(home, ".codex", "auth.json"));
+  const codexBaseMatch = codexToml ? codexToml.match(/base_url\s*=\s*"([^"\r\n]*)"/i) : null;
+  const codexBase = codexBaseMatch ? codexBaseMatch[1] : "";
+  const codexKey = codexAuth?.OPENAI_API_KEY || "";
+  const codexSynced = Boolean(codexToml && /router_001/i.test(codexToml) && isLocalOrRouterUrl(codexBase));
+  if (codexSynced && isRouterKeyLike(codexKey)) {
+    discoveredCredentials.push({ source: "Codex CLI", serverUrl: normalizeServerUrl(codexBase), routerKey: codexKey.trim() });
+  }
+  cliTools.push({
+    id: "codex",
+    label: "Codex CLI",
+    detected: codexToml !== null || fs.existsSync(path.join(home, ".codex")),
+    synced: codexSynced
+  });
+
+  // 5) Cline (~/.cline/data/globalState.json & secrets.json)
+  const clineState = readJsonSafe(path.join(home, ".cline", "data", "globalState.json"));
+  const clineSecrets = readJsonSafe(path.join(home, ".cline", "data", "secrets.json"));
+  const clineBase = clineState?.openAiBaseUrl || "";
+  const clineKey = clineSecrets?.openAiApiKey || "";
+  const clineSynced = isLocalOrRouterUrl(clineBase);
+  if (clineSynced && isRouterKeyLike(clineKey)) {
+    discoveredCredentials.push({ source: "Cline", serverUrl: normalizeServerUrl(clineBase), routerKey: clineKey.trim() });
+  }
+  cliTools.push({
+    id: "cline",
+    label: "Cline",
+    detected: Boolean(clineState) || fs.existsSync(path.join(home, ".cline")),
+    synced: clineSynced
+  });
+
+  // 6) OpenCode (~/.config/opencode/opencode.json)
+  const openCodeData = readJsonSafe(path.join(home, ".config", "opencode", "opencode.json"));
+  const ocBase = openCodeData?.provider?.router001?.options?.baseURL || "";
+  const ocKey = openCodeData?.provider?.router001?.options?.apiKey || "";
+  const ocSynced = isLocalOrRouterUrl(ocBase);
+  if (ocSynced && isRouterKeyLike(ocKey)) {
+    discoveredCredentials.push({ source: "OpenCode", serverUrl: normalizeServerUrl(ocBase), routerKey: ocKey.trim() });
+  }
+  cliTools.push({
+    id: "opencode",
+    label: "OpenCode",
+    detected: Boolean(openCodeData) || fs.existsSync(path.join(home, ".config", "opencode")),
+    synced: ocSynced
+  });
+
+  // 7) Continue (~/.continue/config.yaml)
+  const contYaml = readTextSafe(path.join(home, ".continue", "config.yaml"));
+  const contBaseMatch = contYaml ? contYaml.match(/^\s*apiBase:\s*(.+)$/m) : null;
+  const contKeyMatch = contYaml ? contYaml.match(/^\s*apiKey:\s*(.+)$/m) : null;
+  const contBase = contBaseMatch ? unquoteScalar(contBaseMatch[1]) : "";
+  const contKey = contKeyMatch ? unquoteScalar(contKeyMatch[1]) : "";
+  const contSynced = Boolean(contYaml && (contYaml.includes("001ROUTER") || isLocalOrRouterUrl(contBase)));
+  if (contSynced && isRouterKeyLike(contKey)) {
+    discoveredCredentials.push({ source: "Continue", serverUrl: normalizeServerUrl(contBase), routerKey: contKey.trim() });
+  }
+  cliTools.push({
+    id: "continue",
+    label: "Continue",
+    detected: contYaml !== null || fs.existsSync(path.join(home, ".continue")),
+    synced: contSynced
+  });
+
+  return {
+    hostIde,
+    cliTools,
+    discoveredCredentials
+  };
+}
+
+/**
+ * Defensive client-side normalization: ensures effort-suffixed models (e.g. gemini-4-carbon-low/medium/high)
+ * are unified into one base model with accurate variantMap even if talking to an older server build.
+ */
+function normalizeCatalogForExtension(rawCatalog) {
+  if (!rawCatalog || typeof rawCatalog !== "object") {
+    return { providers: [], combos: [], aliases: {} };
+  }
+  const providers = (Array.isArray(rawCatalog.providers) ? rawCatalog.providers : []).map((prov) => {
+    const rawModels = Array.isArray(prov.models) ? prov.models : [];
+    const alreadyUnified = rawModels.some((m) => m && m.variantMap && typeof m.variantMap === "object");
+    if (alreadyUnified) return prov;
+
+    const groups = new Map();
+    const order = [];
+    for (const m of rawModels) {
+      if (!m || !m.id) continue;
+      const match = EFFORT_SUFFIX_RE.exec(m.id);
+      const rawTier = match ? match[2].toLowerCase() : null;
+      const tier = rawTier === "minimal" ? "low" : rawTier;
+      const baseId = match ? match[1] : m.id;
+      if (!groups.has(baseId)) {
+        groups.set(baseId, { baseId, baseModel: null, variants: new Map(), first: m });
+        order.push(baseId);
+      }
+      const g = groups.get(baseId);
+      if (tier) {
+        if (!g.variants.has(tier)) g.variants.set(tier, m);
+      } else {
+        g.baseModel = m;
+      }
+    }
+
+    const unified = [];
+    for (const baseId of order) {
+      const g = groups.get(baseId);
+      if (g.variants.size === 0) {
+        unified.push(g.baseModel || g.first);
+        continue;
+      }
+      const availableTiers = EFFORT_ORDER.filter((t) => g.variants.has(t));
+      const variantMap = {};
+      for (const t of availableTiers) {
+        const vm = g.variants.get(t);
+        variantMap[t] = { id: vm.id, fullId: vm.fullId || `${prov.slug}/${vm.id}` };
+      }
+      const defaultEffort = availableTiers.includes("medium")
+        ? "medium"
+        : availableTiers.includes("high")
+          ? "high"
+          : availableTiers[0];
+      const baseRef = g.baseModel || g.variants.get(defaultEffort) || g.first;
+      const existingStops = baseRef.effort?.effortLevels || [];
+      const stops = availableTiers.map((t, idx) => {
+        const found = existingStops.find((s) => s.id === t);
+        return {
+          id: t,
+          label: found?.label || (t === "xhigh" ? "XHigh" : t.charAt(0).toUpperCase() + t.slice(1)),
+          shortLabel: found?.shortLabel || (t === "medium" ? "Med" : t === "xhigh" ? "XHigh" : t.charAt(0).toUpperCase() + t.slice(1)),
+          power: idx + 1,
+          maxScale: availableTiers.length,
+          percent: Math.round(((idx + 1) / availableTiers.length) * 100),
+          color: found?.color || "#3B82F6",
+          accent: found?.accent || "#6366F1",
+          glow: found?.glow || "rgba(59, 130, 246, 0.5)",
+          description: found?.description || "Balanced speed & reasoning depth"
+        };
+      });
+      const maxStop = stops[stops.length - 1];
+      const defaultVariant = variantMap[defaultEffort];
+      unified.push({
+        ...baseRef,
+        id: baseId,
+        label: baseId,
+        fullId: g.baseModel ? g.baseModel.fullId : defaultVariant.fullId,
+        defaultVariantId: defaultVariant.id,
+        variantMap,
+        effort: {
+          effortLevels: stops,
+          defaultEffort,
+          maxEffort: maxStop.id,
+          maxLabel: maxStop.label,
+          maxPower: stops.length
+        }
+      });
+    }
+
+    return {
+      ...prov,
+      modelCount: unified.length,
+      models: unified
+    };
+  });
+
+  return {
+    ...rawCatalog,
+    providers
+  };
+}
+
+function buildUnifiedSelection(prov, model, desiredEffort) {
+  const levels = model.effort?.effortLevels || [];
+  const hasDesired = levels.some((l) => l.id === desiredEffort);
+  const effort = hasDesired
+    ? desiredEffort
+    : model.effort?.defaultEffort || levels[0]?.id || "medium";
+  const variant = model.variantMap?.[effort] || null;
+  const resolvedId = variant ? variant.id || variant.modelId : model.id;
+  return {
+    kind: "provider",
+    providerSlug: prov.slug,
+    providerName: prov.name,
+    providerPreset: prov.preset,
+    providerColor: prov.color,
+    baseModelId: model.id,
+    displayLabel: model.label || model.id,
+    modelId: resolvedId,
+    fullId: variant ? variant.fullId : model.fullId,
+    effort
+  };
+}
+
+function buildSystemPrompt(mode, editorContext) {
+  const envLine = editorContext?.activeFile
+    ? `Active open file: ${editorContext.activeFile.displayPath} (${editorContext.activeFile.languageId || "text"}, cwd: ${editorContext.workingDir}). `
+    : editorContext?.workingDir
+      ? `Working directory: ${editorContext.workingDir}. `
+      : "";
+
   if (mode === "ask") {
     return (
-      "You are 001Router AI Coding Assistant in Ask mode inside the developer's IDE. " +
-      "Give accurate, concise architectural and debugging answers grounded in the attached files and workspace context. " +
+      `You are 001Router AI Coding Assistant in Ask mode inside the developer's IDE. ${envLine}` +
+      "Give accurate, concise architectural and debugging answers grounded in the active file, attached context, and workspace. " +
       "Do not invent file paths or APIs that were not provided."
     );
   }
   if (mode === "plan") {
     return (
-      "You are 001Router AI Coding Assistant in Plan mode inside the developer's IDE. " +
+      `You are 001Router AI Coding Assistant in Plan mode inside the developer's IDE. ${envLine}` +
       "Produce clear step-by-step engineering plans, trade-offs, exact files to inspect or change, " +
       "and verification commands before implementation."
     );
   }
   return (
-    "You are 001Router AI Coding Assistant in Auto mode inside VS Code / Antigravity IDE. " +
-    "Provide direct, production-ready code solutions, clear diffs/complete functions, and concise explanations. " +
+    `You are 001Router AI Coding Assistant in Auto mode inside VS Code / Antigravity IDE. ${envLine}` +
+    "Provide direct, production-ready code solutions, clear diffs/complete functions, runnable shell commands in fenced blocks when needed, and concise explanations. " +
     "Preserve existing conventions and cite exact file paths."
   );
 }
@@ -66,9 +393,27 @@ class Router001Controller {
     this.sidebarView = null;
     this.editorPanel = null;
     this.activeAbort = null;
+    this.activeProcesses = new Map();
     this.catalog = { providers: [], combos: [], aliases: {} };
     this.connected = false;
     this.lastError = "";
+    this.autoSyncedFrom = null;
+    this.envSync = {
+      ideName: detectHostIde().ideName,
+      ideKind: detectHostIde().ideKind,
+      autoSyncedFrom: null,
+      cliTools: []
+    };
+    this.lastActiveUri = null;
+    this.editorContext = {
+      hasWorkspaceFolder: false,
+      workspaceName: "",
+      workingDir: os.homedir(),
+      activeFile: null,
+      openTabs: []
+    };
+    this._editorTimer = null;
+    this._syncInFlight = null;
   }
 
   getDefaultServerUrl() {
@@ -138,6 +483,293 @@ class Router001Controller {
     }
   }
 
+  /**
+   * Resolve the best active editor or open tab URI even when focus is inside the webview
+   * and even when NO workspace folder is opened!
+   */
+  resolveActiveDocument() {
+    const activeEditor = vscode.window.activeTextEditor;
+    if (activeEditor && activeEditor.document && activeEditor.document.uri.scheme !== "output") {
+      this.lastActiveUri = activeEditor.document.uri;
+      return { doc: activeEditor.document, editor: activeEditor };
+    }
+
+    for (const vis of vscode.window.visibleTextEditors || []) {
+      if (vis?.document && vis.document.uri.scheme !== "output") {
+        this.lastActiveUri = vis.document.uri;
+        return { doc: vis.document, editor: vis };
+      }
+    }
+
+    const activeTab = vscode.window.tabGroups?.activeTabGroup?.activeTab;
+    const tabUri = activeTab?.input && "uri" in activeTab.input ? activeTab.input.uri : null;
+    const fallbackUri = tabUri || this.lastActiveUri;
+    if (fallbackUri) {
+      const openDoc = vscode.workspace.textDocuments.find(
+        (d) => d.uri.toString() === fallbackUri.toString()
+      );
+      if (openDoc) {
+        return { doc: openDoc, editor: null };
+      }
+    }
+
+    const anyDoc = vscode.workspace.textDocuments.find(
+      (d) => (d.uri.scheme === "file" || d.uri.scheme === "untitled") && !d.isClosed
+    );
+    if (anyDoc) {
+      return { doc: anyDoc, editor: null };
+    }
+    return { doc: null, editor: null };
+  }
+
+  collectEditorContext() {
+    const folders = vscode.workspace.workspaceFolders || [];
+    const hasWorkspaceFolder = folders.length > 0;
+    const { doc, editor } = this.resolveActiveDocument();
+
+    let activeFile = null;
+    let workingDir = hasWorkspaceFolder ? folders[0].uri.fsPath : os.homedir();
+    let workspaceName = hasWorkspaceFolder ? folders[0].name : "";
+
+    if (doc) {
+      const fsPath = doc.uri.scheme === "file" ? doc.uri.fsPath : doc.fileName;
+      const fileName = path.basename(fsPath || "Untitled");
+      const rel = hasWorkspaceFolder ? vscode.workspace.asRelativePath(doc.uri, false) : fsPath;
+      const displayPath = rel && rel !== fsPath ? rel : fileName;
+
+      if (!hasWorkspaceFolder && doc.uri.scheme === "file" && fsPath) {
+        workingDir = path.dirname(fsPath);
+        workspaceName = path.basename(workingDir) || workingDir;
+      } else if (hasWorkspaceFolder) {
+        const owningFolder = vscode.workspace.getWorkspaceFolder(doc.uri);
+        if (owningFolder) {
+          workingDir = owningFolder.uri.fsPath;
+          workspaceName = owningFolder.name;
+        }
+      }
+
+      let selectionLabel = "";
+      let selectedLines = 0;
+      if (editor && editor.selection && !editor.selection.isEmpty) {
+        selectionLabel = `L${editor.selection.start.line + 1}-${editor.selection.end.line + 1}`;
+        selectedLines = editor.selection.end.line - editor.selection.start.line + 1;
+      }
+
+      const diags = vscode.languages.getDiagnostics(doc.uri) || [];
+      let diagnosticErrors = 0;
+      let diagnosticWarnings = 0;
+      for (const d of diags) {
+        if (d.severity === vscode.DiagnosticSeverity.Error) diagnosticErrors++;
+        else if (d.severity === vscode.DiagnosticSeverity.Warning) diagnosticWarnings++;
+      }
+
+      activeFile = {
+        uri: doc.uri.toString(),
+        fsPath,
+        fileName,
+        displayPath,
+        languageId: doc.languageId || path.extname(fileName).slice(1),
+        lineCount: doc.lineCount,
+        selectionLabel,
+        selectedLines,
+        diagnosticErrors,
+        diagnosticWarnings,
+        isDirty: doc.isDirty,
+        isUntitled: doc.isUntitled
+      };
+    }
+
+    // Collect all open file tabs across all tab groups (works without workspace folder!)
+    const openTabs = [];
+    const seenUris = new Set();
+    for (const group of vscode.window.tabGroups?.all || []) {
+      for (const tab of group.tabs || []) {
+        const uri = tab.input && "uri" in tab.input ? tab.input.uri : null;
+        if (!uri || (uri.scheme !== "file" && uri.scheme !== "untitled")) continue;
+        const key = uri.toString();
+        if (seenUris.has(key)) continue;
+        seenUris.add(key);
+        const fsPath = uri.scheme === "file" ? uri.fsPath : tab.label;
+        const fileName = path.basename(fsPath || tab.label || "Untitled");
+        const rel = hasWorkspaceFolder ? vscode.workspace.asRelativePath(uri, false) : fileName;
+        openTabs.push({
+          uri: key,
+          fsPath,
+          fileName,
+          displayPath: rel || fileName,
+          isActive: Boolean(activeFile && activeFile.uri === key)
+        });
+      }
+    }
+
+    this.editorContext = {
+      hasWorkspaceFolder,
+      workspaceName,
+      workingDir,
+      activeFile,
+      openTabs: openTabs.slice(0, 24)
+    };
+    return this.editorContext;
+  }
+
+  scheduleEditorContextPush(delayMs = 120) {
+    if (this._editorTimer) clearTimeout(this._editorTimer);
+    this._editorTimer = setTimeout(() => {
+      this._editorTimer = null;
+      const ctx = this.collectEditorContext();
+      this.postToAll({ type: "editorContext", editorContext: ctx });
+    }, delayMs);
+  }
+
+  async tryFetchCatalog(serverUrl, routerKey) {
+    const headers = { Accept: "application/json" };
+    if (routerKey) {
+      headers.Authorization = `Bearer ${routerKey}`;
+    }
+    const resp = await fetch(`${serverUrl}/v1/extension/catalog`, {
+      method: "GET",
+      headers
+    });
+    if (resp.status === 401 || resp.status === 403) {
+      return { ok: false, authFailed: true, status: resp.status };
+    }
+    const data = await resp.json().catch(() => null);
+    if (!resp.ok || !data?.catalog) {
+      return {
+        ok: false,
+        authFailed: false,
+        error: data?.error?.message || data?.error || `HTTP ${resp.status}`
+      };
+    }
+    return {
+      ok: true,
+      catalog: normalizeCatalogForExtension(data.catalog)
+    };
+  }
+
+  /**
+   * Automatically sync with Antigravity, local CLI tools (Claude, Codex, Cline, OpenCode, Continue, Gemini CLI),
+   * and VS Code on startup or manual refresh.
+   */
+  async autoSyncEnvironment(silent = true) {
+    if (this._syncInFlight) return this._syncInFlight;
+    this._syncInFlight = (async () => {
+      const defaultUrl = this.getDefaultServerUrl();
+      const eco = discoverLocalEcosystem(defaultUrl);
+      this.envSync = {
+        ideName: eco.hostIde.ideName,
+        ideKind: eco.hostIde.ideKind,
+        autoSyncedFrom: this.autoSyncedFrom,
+        cliTools: eco.cliTools
+      };
+      this.collectEditorContext();
+
+      // 1) Try stored credentials first
+      const stored = await this.getStoredCredentials();
+      if (stored.serverUrl && stored.routerKey) {
+        try {
+          const res = await this.tryFetchCatalog(stored.serverUrl, stored.routerKey);
+          if (res.ok) {
+            this.catalog = res.catalog;
+            this.connected = true;
+            this.lastError = "";
+            this.autoSyncedFrom = this.autoSyncedFrom || "saved";
+            this.envSync.autoSyncedFrom = this.autoSyncedFrom;
+            await this.ensureValidSelection();
+            return true;
+          }
+          if (res.authFailed) {
+            await this.context.secrets.delete(SECRET_ROUTER_KEY);
+          }
+        } catch (err) {
+          if (!silent) {
+            this.lastError = `Không thể kết nối tới ${stored.serverUrl}: ${formatErrorMessage(err)}`;
+          }
+        }
+      }
+
+      // 2) Auto-discover valid 001Router credentials from synced CLI tools (Claude, Codex, Cline, OpenCode, Continue)
+      for (const cand of eco.discoveredCredentials) {
+        if (!cand.serverUrl || !cand.routerKey) continue;
+        try {
+          const res = await this.tryFetchCatalog(cand.serverUrl, cand.routerKey);
+          if (res.ok) {
+            await Promise.all([
+              this.context.secrets.store(SECRET_SERVER_URL, cand.serverUrl),
+              this.context.secrets.store(SECRET_ROUTER_KEY, cand.routerKey)
+            ]);
+            this.catalog = res.catalog;
+            this.connected = true;
+            this.lastError = "";
+            this.autoSyncedFrom = cand.source;
+            this.envSync.autoSyncedFrom = cand.source;
+            await this.ensureValidSelection();
+            return true;
+          }
+        } catch {
+          // try next discovered CLI source
+        }
+      }
+
+      // 3) Try local server anonymous mode or one-time loopback default-password bootstrap
+      if (defaultUrl) {
+        try {
+          const res = await this.tryFetchCatalog(defaultUrl, "");
+          if (res.ok) {
+            await this.context.secrets.store(SECRET_SERVER_URL, defaultUrl);
+            this.catalog = res.catalog;
+            this.connected = true;
+            this.lastError = "";
+            this.autoSyncedFrom = "Local 001Router";
+            this.envSync.autoSyncedFrom = this.autoSyncedFrom;
+            await this.ensureValidSelection();
+            return true;
+          }
+          const isLoopback = /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(?::\d+)?$/i.test(defaultUrl);
+          if (isLoopback && !this._triedDefaultHandshake) {
+            this._triedDefaultHandshake = true;
+            const bootResp = await fetch(`${defaultUrl}/api/extension/connect`, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "X-Requested-With": "001router"
+              },
+              body: JSON.stringify({
+                password: "1234",
+                clientName: `001Router (${this.envSync.ideName})`
+              })
+            });
+            const bootData = await bootResp.json().catch(() => null);
+            if (bootResp.ok && bootData?.ok && bootData?.routerKey) {
+              await Promise.all([
+                this.context.secrets.store(SECRET_SERVER_URL, defaultUrl),
+                this.context.secrets.store(SECRET_ROUTER_KEY, bootData.routerKey)
+              ]);
+              this.catalog = normalizeCatalogForExtension(bootData.catalog || { providers: [], combos: [], aliases: {} });
+              this.connected = true;
+              this.lastError = "";
+              this.autoSyncedFrom = "Local Auto-Bootstrap";
+              this.envSync.autoSyncedFrom = this.autoSyncedFrom;
+              await this.ensureValidSelection();
+              return true;
+            }
+          }
+        } catch {
+          // local server not reachable or requires custom password
+        }
+      }
+
+      this.connected = false;
+      return false;
+    })();
+
+    try {
+      return await this._syncInFlight;
+    } finally {
+      this._syncInFlight = null;
+    }
+  }
+
   async syncStateToWebviews() {
     const [creds, sessionData] = await Promise.all([
       this.getStoredCredentials(),
@@ -145,14 +777,19 @@ class Router001Controller {
     ]);
     const selection = this.context.globalState.get(STATE_SELECTION) || null;
     const mode = this.context.globalState.get(STATE_MODE) || "auto";
+    const autoActiveFile = this.context.globalState.get(STATE_AUTO_ACTIVE_FILE);
+    const editorContext = this.collectEditorContext();
 
     this.postToAll({
       type: "state",
-      connected: this.connected && Boolean(creds.routerKey),
+      connected: this.connected,
       serverUrl: creds.serverUrl,
       catalog: this.catalog,
       selection,
       mode,
+      autoActiveFile: autoActiveFile !== false,
+      envSync: this.envSync,
+      editorContext,
       sessions: sessionData.sessions,
       activeSessionId: sessionData.activeId,
       lastError: this.lastError
@@ -160,46 +797,7 @@ class Router001Controller {
   }
 
   async refreshCatalogFromServer(silent = false) {
-    const creds = await this.getStoredCredentials();
-    if (!creds.serverUrl || !creds.routerKey) {
-      this.connected = false;
-      this.catalog = { providers: [], combos: [], aliases: {} };
-      return false;
-    }
-
-    try {
-      const resp = await fetch(`${creds.serverUrl}/v1/extension/catalog`, {
-        method: "GET",
-        headers: {
-          Authorization: `Bearer ${creds.routerKey}`,
-          Accept: "application/json"
-        }
-      });
-
-      if (resp.status === 401 || resp.status === 403) {
-        this.connected = false;
-        this.lastError = "Phiên kết nối đã hết hạn hoặc key bị thu hồi. Vui lòng nhập lại mật khẩu web 001Router.";
-        await this.context.secrets.delete(SECRET_ROUTER_KEY);
-        return false;
-      }
-
-      const data = await resp.json().catch(() => null);
-      if (!resp.ok || !data?.catalog) {
-        throw new Error(data?.error?.message || data?.error || `HTTP ${resp.status}`);
-      }
-
-      this.catalog = data.catalog;
-      this.connected = true;
-      this.lastError = "";
-      await this.ensureValidSelection();
-      return true;
-    } catch (err) {
-      this.connected = false;
-      if (!silent) {
-        this.lastError = `Không thể kết nối tới ${creds.serverUrl}: ${formatErrorMessage(err)}`;
-      }
-      return false;
-    }
+    return this.autoSyncEnvironment(silent);
   }
 
   async ensureValidSelection() {
@@ -225,44 +823,36 @@ class Router001Controller {
     if (current?.providerSlug) {
       const prov = providers.find((p) => p.slug === current.providerSlug);
       if (prov) {
-        const model =
-          prov.models.find((m) => m.id === current.modelId) || prov.models[0];
+        const baseMatch = current.baseModelId
+          ? prov.models.find((m) => m.id === current.baseModelId)
+          : null;
+        const directMatch = prov.models.find((m) => m.id === current.modelId);
+        const variantMatch = prov.models.find(
+          (m) =>
+            m.variantMap &&
+            Object.values(m.variantMap).some((v) => (v.id || v.modelId) === current.modelId)
+        );
+        const stemMatch = EFFORT_SUFFIX_RE.exec(String(current.modelId || ""));
+        const stemModel = stemMatch ? prov.models.find((m) => m.id === stemMatch[1]) : null;
+        const model = baseMatch || directMatch || variantMatch || stemModel || prov.models[0];
         if (model) {
-          const levels = model.effort?.effortLevels || [];
-          const hasEffort = levels.some((l) => l.id === current.effort);
-          const nextEffort = hasEffort
-            ? current.effort
-            : model.effort?.defaultEffort || levels[0]?.id || "medium";
-          await this.context.globalState.update(STATE_SELECTION, {
-            kind: "provider",
-            providerSlug: prov.slug,
-            providerName: prov.name,
-            providerPreset: prov.preset,
-            providerColor: prov.color,
-            modelId: model.id,
-            fullId: model.fullId,
-            effort: nextEffort
-          });
+          const unified = buildUnifiedSelection(prov, model, current.effort);
+          await this.context.globalState.update(STATE_SELECTION, unified);
           return;
         }
       }
     }
 
-    if (providers.length > 0) {
-      const prov = providers[0];
-      const model = prov.models[0];
-      if (model) {
-        await this.context.globalState.update(STATE_SELECTION, {
-          kind: "provider",
-          providerSlug: prov.slug,
-          providerName: prov.name,
-          providerPreset: prov.preset,
-          providerColor: prov.color,
-          modelId: model.id,
-          fullId: model.fullId,
-          effort: model.effort?.defaultEffort || "medium"
-        });
-      }
+    // Prefer Antigravity provider automatically if running inside Antigravity IDE
+    let preferredProv = providers[0] || null;
+    if (this.envSync.ideKind === "antigravity") {
+      const agProv = providers.find((p) => p.preset === "antigravity" || p.slug === "antigravity");
+      if (agProv) preferredProv = agProv;
+    }
+
+    if (preferredProv && preferredProv.models[0]) {
+      const unified = buildUnifiedSelection(preferredProv, preferredProv.models[0], null);
+      await this.context.globalState.update(STATE_SELECTION, unified);
     } else if (combos.length > 0) {
       const combo = combos[0];
       await this.context.globalState.update(STATE_SELECTION, {
@@ -271,6 +861,8 @@ class Router001Controller {
         providerName: "Combo",
         providerPreset: "combo",
         providerColor: "#E56A4A",
+        baseModelId: combo.name,
+        displayLabel: combo.name,
         modelId: combo.name,
         fullId: combo.name,
         effort: combo.effort?.defaultEffort || "medium"
@@ -298,7 +890,7 @@ class Router001Controller {
         },
         body: JSON.stringify({
           password,
-          clientName: "001Router VS Code Extension"
+          clientName: `001Router (${this.envSync.ideName})`
         })
       });
 
@@ -315,9 +907,11 @@ class Router001Controller {
         this.context.secrets.store(SECRET_ROUTER_KEY, data.routerKey)
       ]);
 
-      this.catalog = data.catalog || { providers: [], combos: [], aliases: {} };
+      this.catalog = normalizeCatalogForExtension(data.catalog || { providers: [], combos: [], aliases: {} });
       this.connected = true;
       this.lastError = "";
+      this.autoSyncedFrom = "Web Password";
+      this.envSync.autoSyncedFrom = this.autoSyncedFrom;
       await this.ensureValidSelection();
       this.postToAll({ type: "connectResult", ok: true });
       await this.syncStateToWebviews();
@@ -335,45 +929,159 @@ class Router001Controller {
     }
     await this.context.secrets.delete(SECRET_ROUTER_KEY);
     this.connected = false;
+    this.autoSyncedFrom = null;
+    this.envSync.autoSyncedFrom = null;
     this.lastError = "";
     await this.syncStateToWebviews();
   }
 
-  async handlePickContext(kind, targetWebview) {
+  async readActiveFileAttachment(preferSelection = true) {
+    const { doc, editor } = this.resolveActiveDocument();
+    if (!doc) return null;
+    const hasWorkspace = (vscode.workspace.workspaceFolders || []).length > 0;
+    const fsPath = doc.uri.scheme === "file" ? doc.uri.fsPath : doc.fileName;
+    const relPath = hasWorkspace ? vscode.workspace.asRelativePath(doc.uri, false) : fsPath;
+    const displayLabel = path.basename(fsPath || relPath || "Untitled");
+    const sel = editor?.selection;
+
+    let content = "";
+    let rangeLabel = "";
+    if (preferSelection && sel && !sel.isEmpty) {
+      content = doc.getText(sel);
+      rangeLabel = `L${sel.start.line + 1}-${sel.end.line + 1}`;
+    } else {
+      content = doc.getText();
+    }
+    if (content.length > MAX_ATTACHMENT_CHARS) {
+      content = `${content.slice(0, MAX_ATTACHMENT_CHARS)}\n...[truncated]`;
+    }
+
+    const diags = vscode.languages.getDiagnostics(doc.uri) || [];
+    const diagSummary = diags
+      .slice(0, 12)
+      .map((d) => {
+        const sev = d.severity === vscode.DiagnosticSeverity.Error ? "ERROR" : "WARN";
+        return `- [${sev}] Line ${d.range.start.line + 1}: ${d.message}`;
+      })
+      .join("\n");
+
+    return {
+      id: `auto:${doc.uri.toString()}:${rangeLabel || "full"}`,
+      label: rangeLabel ? `${displayLabel} (${rangeLabel})` : displayLabel,
+      path: relPath || fsPath,
+      languageId: doc.languageId || "",
+      content,
+      diagnostics: diagSummary,
+      isAuto: true
+    };
+  }
+
+  async handlePickContext(kind, targetWebview, extraUri) {
     if (kind === "activeFile" || kind === "selection") {
-      const editor = vscode.window.activeTextEditor;
-      if (!editor) {
+      const item = await this.readActiveFileAttachment(kind === "selection");
+      if (!item) {
         vscode.window.showInformationMessage("Chưa có tệp nào đang mở trong editor.");
         return;
       }
-      const doc = editor.document;
-      const relPath = vscode.workspace.asRelativePath(doc.uri, false) || path.basename(doc.fileName);
-      const sel = editor.selection;
-      let content = "";
-      let rangeLabel = "";
-      if (kind === "selection" && sel && !sel.isEmpty) {
-        content = doc.getText(sel);
-        rangeLabel = `L${sel.start.line + 1}-${sel.end.line + 1}`;
-      } else {
-        content = doc.getText();
-      }
-      if (content.length > MAX_ATTACHMENT_CHARS) {
-        content = `${content.slice(0, MAX_ATTACHMENT_CHARS)}\n...[truncated]`;
-      }
-      targetWebview.postMessage({
-        type: "attachedContext",
-        item: {
-          id: `${relPath}:${rangeLabel || "full"}:${Date.now()}`,
-          label: rangeLabel ? `${relPath} (${rangeLabel})` : relPath,
-          path: relPath,
-          languageId: doc.languageId || "",
-          content
+      item.id = `${item.path}:${Date.now()}`;
+      item.isAuto = false;
+      targetWebview.postMessage({ type: "attachedContext", item });
+      return;
+    }
+
+    if (kind === "openTab" && extraUri) {
+      try {
+        const uri = vscode.Uri.parse(extraUri);
+        const doc = await vscode.workspace.openTextDocument(uri);
+        const fsPath = doc.uri.scheme === "file" ? doc.uri.fsPath : doc.fileName;
+        let content = doc.getText();
+        if (content.length > MAX_ATTACHMENT_CHARS) {
+          content = `${content.slice(0, MAX_ATTACHMENT_CHARS)}\n...[truncated]`;
         }
-      });
+        targetWebview.postMessage({
+          type: "attachedContext",
+          item: {
+            id: `${fsPath}:${Date.now()}`,
+            label: path.basename(fsPath || "Untitled"),
+            path: fsPath,
+            languageId: doc.languageId || "",
+            content
+          }
+        });
+      } catch (err) {
+        vscode.window.showWarningMessage(`Không thể đọc tab: ${formatErrorMessage(err)}`);
+      }
       return;
     }
 
     if (kind === "workspaceFile") {
+      const hasWorkspace = (vscode.workspace.workspaceFolders || []).length > 0;
+      if (!hasWorkspace) {
+        // Fallback when no folder is open: list sibling files in active file's directory or open file dialog!
+        const ctx = this.collectEditorContext();
+        const dir = ctx.workingDir;
+        let items = [];
+        try {
+          const entries = fs.readdirSync(dir, { withFileTypes: true });
+          items = entries
+            .filter((e) => e.isFile())
+            .slice(0, 120)
+            .map((e) => ({
+              label: e.name,
+              description: dir,
+              uri: vscode.Uri.file(path.join(dir, e.name))
+            }));
+        } catch {
+          items = [];
+        }
+
+        if (items.length > 0) {
+          const picked = await vscode.window.showQuickPick(items, {
+            placeHolder: `Chọn tệp cùng thư mục (${dir})`
+          });
+          if (!picked) return;
+          const bytes = await vscode.workspace.fs.readFile(picked.uri);
+          let content = Buffer.from(bytes).toString("utf8");
+          if (content.length > MAX_ATTACHMENT_CHARS) {
+            content = `${content.slice(0, MAX_ATTACHMENT_CHARS)}\n...[truncated]`;
+          }
+          targetWebview.postMessage({
+            type: "attachedContext",
+            item: {
+              id: `${picked.uri.fsPath}:${Date.now()}`,
+              label: picked.label,
+              path: picked.uri.fsPath,
+              languageId: path.extname(picked.label).slice(1),
+              content
+            }
+          });
+          return;
+        }
+
+        const pickedUris = await vscode.window.showOpenDialog({
+          canSelectMany: false,
+          openLabel: "Đính kèm vào 001Router"
+        });
+        if (!pickedUris?.length) return;
+        const uri = pickedUris[0];
+        const bytes = await vscode.workspace.fs.readFile(uri);
+        let content = Buffer.from(bytes).toString("utf8");
+        if (content.length > MAX_ATTACHMENT_CHARS) {
+          content = `${content.slice(0, MAX_ATTACHMENT_CHARS)}\n...[truncated]`;
+        }
+        targetWebview.postMessage({
+          type: "attachedContext",
+          item: {
+            id: `${uri.fsPath}:${Date.now()}`,
+            label: path.basename(uri.fsPath),
+            path: uri.fsPath,
+            languageId: path.extname(uri.fsPath).slice(1),
+            content
+          }
+        });
+        return;
+      }
+
       const uris = await vscode.workspace.findFiles("**/*", "**/{node_modules,.git,dist,build,.next}/**", 250);
       if (!uris.length) {
         vscode.window.showInformationMessage("Không tìm thấy tệp nào trong workspace.");
@@ -411,7 +1119,7 @@ class Router001Controller {
 
   async applyCodeToEditor(code) {
     if (typeof code !== "string" || !code) return;
-    const editor = vscode.window.activeTextEditor;
+    const { editor } = this.resolveActiveDocument();
     if (!editor) {
       const doc = await vscode.workspace.openTextDocument({ content: code });
       await vscode.window.showTextDocument(doc, vscode.ViewColumn.One);
@@ -427,22 +1135,129 @@ class Router001Controller {
     vscode.window.showInformationMessage("Đã chèn đoạn mã từ 001Router vào editor.");
   }
 
+  /**
+   * Execute a shell command with live streaming output to the chat UI (Cline / Claude Code style).
+   * Works even when no workspace folder is open (auto-uses active open file's directory).
+   */
+  runTerminalCommand(rawCommand, sessionId) {
+    const command = String(rawCommand || "").trim();
+    if (!command) return;
+
+    const ctx = this.collectEditorContext();
+    const cwd = ctx.workingDir && fs.existsSync(ctx.workingDir) ? ctx.workingDir : os.homedir();
+    const runId = `term-${Date.now()}-${crypto.randomBytes(3).toString("hex")}`;
+    const startedAt = Date.now();
+
+    this.postToAll({
+      type: "terminalStart",
+      runId,
+      sessionId,
+      command,
+      cwd,
+      startedAt
+    });
+
+    let acc = "";
+    const child = spawn(command, {
+      cwd,
+      shell: true,
+      windowsHide: true,
+      env: { ...process.env, FORCE_COLOR: "0", NO_COLOR: "1" }
+    });
+    this.activeProcesses.set(runId, child);
+
+    const pushChunk = (buf, streamName) => {
+      const clean = stripAnsi(buf.toString("utf8"));
+      if (!clean) return;
+      if (acc.length < MAX_TERMINAL_OUTPUT_CHARS) {
+        acc += clean;
+      }
+      this.postToAll({
+        type: "terminalOutput",
+        runId,
+        stream: streamName,
+        chunk: clean
+      });
+    };
+
+    child.stdout?.on("data", (d) => pushChunk(d, "stdout"));
+    child.stderr?.on("data", (d) => pushChunk(d, "stderr"));
+
+    child.on("error", (err) => {
+      this.activeProcesses.delete(runId);
+      this.postToAll({
+        type: "terminalEnd",
+        runId,
+        exitCode: 1,
+        durationMs: Date.now() - startedAt,
+        error: formatErrorMessage(err)
+      });
+    });
+
+    child.on("close", (code, signal) => {
+      this.activeProcesses.delete(runId);
+      this.postToAll({
+        type: "terminalEnd",
+        runId,
+        exitCode: typeof code === "number" ? code : signal ? 130 : 0,
+        killed: Boolean(signal),
+        durationMs: Date.now() - startedAt,
+        output: acc.slice(-MAX_TERMINAL_OUTPUT_CHARS)
+      });
+    });
+  }
+
+  killTerminalCommand(runId) {
+    const child = this.activeProcesses.get(runId);
+    if (!child) return;
+    try {
+      if (process.platform === "win32" && child.pid) {
+        spawn("taskkill", ["/pid", String(child.pid), "/t", "/f"], { windowsHide: true });
+      } else {
+        child.kill("SIGTERM");
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  openInVsCodeTerminal(command) {
+    const ctx = this.collectEditorContext();
+    const cwd = ctx.workingDir && fs.existsSync(ctx.workingDir) ? ctx.workingDir : os.homedir();
+    const term = vscode.window.createTerminal({ name: "001Router", cwd });
+    term.show(true);
+    if (command) term.sendText(String(command), true);
+  }
+
   async handleSendChat(payload) {
     const creds = await this.getStoredCredentials();
-    if (!creds.routerKey) {
-      this.connected = false;
-      this.lastError = "Vui lòng nhập mật khẩu web 001Router để kết nối trước khi gửi yêu cầu.";
-      await this.syncStateToWebviews();
-      return;
+    if (!this.connected) {
+      const synced = await this.autoSyncEnvironment(true);
+      if (!synced) {
+        this.lastError = "Vui lòng nhập mật khẩu web 001Router để kết nối trước khi gửi yêu cầu.";
+        await this.syncStateToWebviews();
+        return;
+      }
     }
+    const freshCreds = await this.getStoredCredentials();
+    const serverUrl = freshCreds.serverUrl || creds.serverUrl;
+    const routerKey = freshCreds.routerKey || creds.routerKey;
 
     const sessionId = payload.sessionId;
     const promptText = String(payload.text || "").trim();
-    const attachments = Array.isArray(payload.attachments) ? payload.attachments : [];
+    const attachments = Array.isArray(payload.attachments) ? [...payload.attachments] : [];
     const mode = payload.mode || this.context.globalState.get(STATE_MODE) || "auto";
     const selection = payload.selection || this.context.globalState.get(STATE_SELECTION);
+    const includeActiveFile = payload.includeActiveFile !== false;
 
     if (!promptText && attachments.length === 0) return;
+
+    // Support `/run <command>` directly from chat!
+    if (/^\/run\s+.+/i.test(promptText)) {
+      const cmd = promptText.replace(/^\/run\s+/i, "").trim();
+      this.runTerminalCommand(cmd, sessionId);
+      return;
+    }
 
     const modelTarget = selection?.fullId || selection?.modelId;
     if (!modelTarget) {
@@ -452,6 +1267,19 @@ class Router001Controller {
         error: "Chưa chọn Provider & Model. Vui lòng chọn model ở thanh dưới cùng."
       });
       return;
+    }
+
+    const editorContext = this.collectEditorContext();
+
+    // Auto-include currently open active file if enabled and not already attached
+    if (includeActiveFile && editorContext.activeFile) {
+      const alreadyAttached = attachments.some((a) => a.path === editorContext.activeFile.displayPath || a.path === editorContext.activeFile.fsPath);
+      if (!alreadyAttached) {
+        const autoItem = await this.readActiveFileAttachment(true);
+        if (autoItem) {
+          attachments.unshift(autoItem);
+        }
+      }
     }
 
     let sessions = this.getSessions();
@@ -474,7 +1302,10 @@ class Router001Controller {
     }
 
     const contextBlock = attachments
-      .map((a) => `### File: ${a.path || a.label}\n\`\`\`${a.languageId || ""}\n${a.content || ""}\n\`\`\``)
+      .map((a) => {
+        const diagNote = a.diagnostics ? `\nDiagnostics:\n${a.diagnostics}\n` : "";
+        return `### File: ${a.path || a.label}${diagNote}\n\`\`\`${a.languageId || ""}\n${a.content || ""}\n\`\`\``;
+      })
       .join("\n\n");
 
     const llmUserContent = contextBlock
@@ -485,10 +1316,11 @@ class Router001Controller {
       id: crypto.randomUUID(),
       role: "user",
       text: userDisplayText,
-      attachments: attachments.map((a) => ({ label: a.label, path: a.path })),
+      attachments: attachments.map((a) => ({ label: a.label, path: a.path, isAuto: Boolean(a.isAuto) })),
       createdAt: new Date().toISOString()
     };
 
+    const startedAt = Date.now();
     const assistantMsg = {
       id: crypto.randomUUID(),
       role: "assistant",
@@ -496,12 +1328,17 @@ class Router001Controller {
       reasoning: "",
       model: modelTarget,
       effort: selection?.effort || "medium",
+      phase: "analyzing",
+      phaseDetail: editorContext.activeFile
+        ? `Đang phân tích ${editorContext.activeFile.fileName}...`
+        : "Đang phân tích yêu cầu & khởi tạo suy luận...",
+      startedAt,
+      durationMs: 0,
       createdAt: new Date().toISOString()
     };
 
-    // Build history before adding empty assistant placeholder
     const apiMessages = [
-      { role: "system", content: buildSystemPrompt(mode) },
+      { role: "system", content: buildSystemPrompt(mode, editorContext) },
       ...session.messages
         .filter((m) => m.role === "user" || m.role === "assistant")
         .slice(-18)
@@ -542,14 +1379,18 @@ class Router001Controller {
         bodyPayload.reasoning_effort = selection.effort;
       }
 
-      const resp = await fetch(`${creds.serverUrl}/v1/chat/completions`, {
+      const reqHeaders = {
+        "Content-Type": "application/json"
+      };
+      if (routerKey) {
+        reqHeaders.Authorization = `Bearer ${routerKey}`;
+        reqHeaders["x-api-key"] = routerKey;
+      }
+
+      const resp = await fetch(`${serverUrl}/v1/chat/completions`, {
         method: "POST",
         signal: controller.signal,
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${creds.routerKey}`,
-          "x-api-key": creds.routerKey
-        },
+        headers: reqHeaders,
         body: JSON.stringify(bodyPayload)
       });
 
@@ -574,6 +1415,7 @@ class Router001Controller {
       let buffer = "";
       let contentAcc = "";
       let reasoningAcc = "";
+      let currentPhase = "analyzing";
 
       while (true) {
         const { value, done } = await reader.read();
@@ -600,6 +1442,8 @@ class Router001Controller {
                   : "";
 
             if (chunkText || chunkReason) {
+              const nextPhase = chunkText ? "streaming" : "thinking";
+              currentPhase = nextPhase;
               contentAcc += chunkText;
               reasoningAcc += chunkReason;
               this.postToAll({
@@ -607,7 +1451,8 @@ class Router001Controller {
                 sessionId: session.id,
                 messageId: assistantMsg.id,
                 deltaText: chunkText,
-                deltaReasoning: chunkReason
+                deltaReasoning: chunkReason,
+                phase: currentPhase
               });
             } else if (parsed?.error) {
               throw new Error(parsed.error.message || parsed.error);
@@ -620,7 +1465,7 @@ class Router001Controller {
         }
       }
 
-      // Update saved session with complete response
+      const durationMs = Date.now() - startedAt;
       const latestSessions = this.getSessions();
       const targetSession = latestSessions.find((s) => s.id === session.id);
       if (targetSession) {
@@ -628,6 +1473,8 @@ class Router001Controller {
         if (targetMsg) {
           targetMsg.text = contentAcc || "(Không có phản hồi văn bản)";
           targetMsg.reasoning = reasoningAcc;
+          targetMsg.phase = "done";
+          targetMsg.durationMs = durationMs;
         }
         targetSession.updatedAt = new Date().toISOString();
         await this.saveSessions(latestSessions);
@@ -636,16 +1483,20 @@ class Router001Controller {
       this.postToAll({
         type: "streamEnd",
         sessionId: session.id,
-        messageId: assistantMsg.id
+        messageId: assistantMsg.id,
+        durationMs
       });
     } catch (err) {
       const isAbort = err?.name === "AbortError";
       const messageText = isAbort ? "Đã dừng tạo phản hồi." : formatErrorMessage(err);
+      const durationMs = Date.now() - startedAt;
       const latestSessions = this.getSessions();
       const targetSession = latestSessions.find((s) => s.id === session.id);
       if (targetSession) {
         const targetMsg = targetSession.messages.find((m) => m.id === assistantMsg.id);
         if (targetMsg) {
+          targetMsg.phase = "done";
+          targetMsg.durationMs = durationMs;
           if (!targetMsg.text) {
             targetMsg.error = isAbort ? "" : messageText;
             if (isAbort) targetMsg.text = "_(Đã dừng)_";
@@ -657,6 +1508,7 @@ class Router001Controller {
         type: "streamEnd",
         sessionId: session.id,
         messageId: assistantMsg.id,
+        durationMs,
         error: isAbort ? "" : messageText
       });
       if (!this.connected) {
@@ -713,7 +1565,7 @@ class Router001Controller {
     });
 
     this.bindWebviewMessages(panel.webview);
-    await this.refreshCatalogFromServer(true);
+    await this.autoSyncEnvironment(true);
     await this.syncStateToWebviews();
   }
 
@@ -722,7 +1574,7 @@ class Router001Controller {
       if (!msg || typeof msg !== "object") return;
       switch (msg.type) {
         case "ready": {
-          await this.refreshCatalogFromServer(true);
+          await this.autoSyncEnvironment(true);
           await this.syncStateToWebviews();
           break;
         }
@@ -734,8 +1586,9 @@ class Router001Controller {
           await this.disconnect();
           break;
         }
-        case "refreshCatalog": {
-          await this.refreshCatalogFromServer(false);
+        case "refreshCatalog":
+        case "syncEnv": {
+          await this.autoSyncEnvironment(false);
           await this.syncStateToWebviews();
           break;
         }
@@ -747,6 +1600,10 @@ class Router001Controller {
         case "saveMode": {
           await this.context.globalState.update(STATE_MODE, msg.mode || "auto");
           this.postToAll({ type: "modeUpdated", mode: msg.mode || "auto" });
+          break;
+        }
+        case "saveAutoActiveFile": {
+          await this.context.globalState.update(STATE_AUTO_ACTIVE_FILE, Boolean(msg.enabled));
           break;
         }
         case "newChat": {
@@ -771,7 +1628,7 @@ class Router001Controller {
           break;
         }
         case "deleteSession": {
-          let sessions = this.getSessions().filter((s) => s.id !== msg.sessionId);
+          const sessions = this.getSessions().filter((s) => s.id !== msg.sessionId);
           await this.saveSessions(sessions);
           const activeId = this.context.globalState.get(STATE_ACTIVE_SESSION);
           if (activeId === msg.sessionId) {
@@ -784,7 +1641,7 @@ class Router001Controller {
           break;
         }
         case "pickContext": {
-          await this.handlePickContext(msg.kind, webview);
+          await this.handlePickContext(msg.kind, webview, msg.uri);
           break;
         }
         case "sendChat": {
@@ -799,6 +1656,30 @@ class Router001Controller {
         }
         case "applyCode": {
           await this.applyCodeToEditor(msg.code);
+          break;
+        }
+        case "runCommand": {
+          this.runTerminalCommand(msg.command, msg.sessionId);
+          break;
+        }
+        case "killCommand": {
+          this.killTerminalCommand(msg.runId);
+          break;
+        }
+        case "openInTerminal": {
+          this.openInVsCodeTerminal(msg.command);
+          break;
+        }
+        case "revealFile": {
+          if (msg.uri) {
+            try {
+              const targetUri = msg.uri.includes("://") ? vscode.Uri.parse(msg.uri) : vscode.Uri.file(msg.uri);
+              const doc = await vscode.workspace.openTextDocument(targetUri);
+              await vscode.window.showTextDocument(doc, { preview: false });
+            } catch {
+              // ignore unresolvable path
+            }
+          }
           break;
         }
         case "openExternalPanel": {
@@ -824,6 +1705,9 @@ class Router001Controller {
     const logoUri = webview.asWebviewUri(
       vscode.Uri.joinPath(this.context.extensionUri, "media", "icon.svg")
     );
+    const aiFaceUri = webview.asWebviewUri(
+      vscode.Uri.joinPath(this.context.extensionUri, "media", "ai-face-3d.jpg")
+    );
     const providersUri = webview.asWebviewUri(
       vscode.Uri.joinPath(this.context.extensionUri, "media", "providers")
     );
@@ -837,7 +1721,7 @@ class Router001Controller {
   <title>001Router</title>
   <link rel="stylesheet" href="${cssUri}" />
 </head>
-<body data-surface="${surface}" data-logo-uri="${logoUri}" data-providers-uri="${providersUri}">
+<body data-surface="${surface}" data-logo-uri="${logoUri}" data-ai-face-uri="${aiFaceUri}" data-providers-uri="${providersUri}">
   <div id="app"></div>
   <script nonce="${nonce}" src="${jsUri}"></script>
 </body>
@@ -881,12 +1765,28 @@ function activate(context) {
   const controller = new Router001Controller(context);
   const sidebarProvider = new Router001SidebarProvider(controller);
 
+  // Immediately auto-sync Antigravity, CLI tools, and active open file on extension startup
+  controller.collectEditorContext();
+  controller.autoSyncEnvironment(true).catch(() => {});
+
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider("001router.chatView", sidebarProvider, {
       webviewOptions: { retainContextWhenHidden: true }
     }),
+    vscode.window.onDidChangeActiveTextEditor(() => controller.scheduleEditorContextPush(60)),
+    vscode.window.onDidChangeTextEditorSelection(() => controller.scheduleEditorContextPush(150)),
+    vscode.window.tabGroups.onDidChangeTabs(() => controller.scheduleEditorContextPush(100)),
+    vscode.languages.onDidChangeDiagnostics(() => controller.scheduleEditorContextPush(350)),
+    vscode.workspace.onDidChangeWorkspaceFolders(() => controller.scheduleEditorContextPush(100)),
     vscode.commands.registerCommand("001router.openPanel", () => controller.openEditorTab()),
     vscode.commands.registerCommand("001router.newChat", () => controller.createNewChat()),
+    vscode.commands.registerCommand("001router.syncEnv", async () => {
+      await controller.autoSyncEnvironment(false);
+      await controller.syncStateToWebviews();
+      vscode.window.showInformationMessage(
+        `001Router đã đồng bộ (${controller.envSync.ideName} · ${controller.connected ? "Connected" : "Offline"}).`
+      );
+    }),
     vscode.commands.registerCommand("001router.connect", () => {
       controller.postToAll({ type: "openAuthModal" });
       if (!controller.sidebarView && !controller.editorPanel) {

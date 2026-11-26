@@ -105,6 +105,7 @@ export const ANTIGRAVITY_MODEL_ALIASES = Object.freeze({
   "gemini-4-argon-high": "gemini-4-argon-high(high)",
   "gemini-4-argon-medium": "gemini-4-argon-medium(medium)",
   "gemini-4-argon-low": "gemini-4-argon-low(low)",
+  "gemini-4-neon-xhigh": "gemini-4-neon-xhigh",
   "gemini-4-neon-high": "gemini-4-neon-high(high)",
   "gemini-4-neon-medium": "gemini-4-neon-medium(medium)",
   "gemini-4-neon-low": "gemini-4-neon-low(low)",
@@ -1277,6 +1278,17 @@ export function resolveCatalogModel(requested, models, body) {
   const ids = new Set((Array.isArray(models) ? models : []).map((m) => m?.id).filter(Boolean));
   const id = String(requested || "").trim();
   if (!id || ids.size === 0) return "";
+  const reqEffortRaw =
+    typeof body?.reasoning_effort === "string" ? body.reasoning_effort.trim().toLowerCase() : "";
+  const reqEffort = reqEffortRaw === "minimal" ? "low" : reqEffortRaw;
+  if (reqEffort) {
+    const stemMatchForEffort = id.match(/^(.*?)-(low|medium|high|minimal|xhigh|max)$/i);
+    const effortStem = stemMatchForEffort ? stemMatchForEffort[1] : id;
+    if (ids.has(`${effortStem}-${reqEffort}`)) return `${effortStem}-${reqEffort}`;
+    if ((reqEffort === "xhigh" || reqEffort === "max") && ids.has(`${effortStem}-high`)) {
+      return `${effortStem}-high`;
+    }
+  }
   if (ids.has(id)) return id;
   const viaAlias = resolveUpstreamModel(id, body, CLOUD_CODE_FLAVORS.antigravity).model;
   if (ids.has(viaAlias)) return viaAlias;

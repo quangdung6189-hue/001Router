@@ -4,6 +4,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { createApp } from "../server/index.js";
+import { resolveCatalogModel } from "../server/geminiCliOAuth.js";
 import { packVsix } from "../vscode-001router/scripts/pack-vsix.js";
 
 describe("001Router IDE Extension API & VSIX Packaging", () => {
@@ -50,7 +51,17 @@ describe("001Router IDE Extension API & VSIX Packaging", () => {
           baseUrl: "https://daily-cloudcode-pa.googleapis.com/v1internal",
           formatType: "gemini-openai",
           apiKeys: [{ id: "k3", authMethod: "antigravity", enabled: true }],
-          models: ["gemini-4-neon", "gemini-4-flash-lite"],
+          models: [
+            "gemini-4-neon",
+            "gemini-4-flash-lite",
+            "gemini-4-carbon-low",
+            "gemini-4-carbon-medium",
+            "gemini-4-carbon-high",
+            "gemini-4-argon-low",
+            "gemini-4-argon-medium",
+            "gemini-4-argon-high",
+            "gemini-4-argon-xhigh"
+          ],
           enabled: true
         }
       );
@@ -137,6 +148,39 @@ describe("001Router IDE Extension API & VSIX Packaging", () => {
     const lite = ag.models.find((m) => m.id === "gemini-4-flash-lite");
     assert.equal(neon.effort.maxEffort, "xhigh");
     assert.equal(lite.effort.maxEffort, "medium");
+
+    // Verify suffixed sibling models collapse into one unified model with exact real Effort stops
+    const carbon = ag.models.find((m) => m.id === "gemini-4-carbon");
+    assert.ok(carbon, "gemini-4-carbon-{low,medium,high} must unify into gemini-4-carbon");
+    assert.equal(ag.models.find((m) => m.id === "gemini-4-carbon-medium"), undefined);
+    assert.equal(carbon.effort.maxEffort, "high");
+    assert.deepEqual(
+      carbon.effort.effortLevels.map((l) => l.id),
+      ["low", "medium", "high"]
+    );
+    assert.equal(carbon.variantMap.high.fullId, "antigravity/gemini-4-carbon-high");
+
+    const argon = ag.models.find((m) => m.id === "gemini-4-argon");
+    assert.ok(argon, "gemini-4-argon-{low,medium,high,xhigh} must unify into gemini-4-argon");
+    assert.equal(argon.effort.maxEffort, "xhigh");
+    assert.equal(argon.variantMap.xhigh.fullId, "antigravity/gemini-4-argon-xhigh");
+
+    // Verify resolveCatalogModel honors reasoning_effort across base and suffixed IDs
+    const mockCatalog = [
+      { id: "gemini-4-carbon-low" },
+      { id: "gemini-4-carbon-medium" },
+      { id: "gemini-4-carbon-high" },
+      { id: "gemini-4-argon-high" },
+      { id: "gemini-4-argon-xhigh" }
+    ];
+    assert.equal(
+      resolveCatalogModel("gemini-4-carbon-medium", mockCatalog, { reasoning_effort: "high" }),
+      "gemini-4-carbon-high"
+    );
+    assert.equal(
+      resolveCatalogModel("gemini-4-argon", mockCatalog, { reasoning_effort: "xhigh" }),
+      "gemini-4-argon-xhigh"
+    );
   });
 
   it("3. protects /v1/extension/catalog with router API key auth", async () => {
@@ -164,6 +208,7 @@ describe("001Router IDE Extension API & VSIX Packaging", () => {
     assert.ok(asLatin1.includes("extension.vsixmanifest"));
     assert.ok(asLatin1.includes("extension/extension.js"));
     assert.ok(asLatin1.includes("extension/media/icon.png"));
+    assert.ok(asLatin1.includes("extension/media/ai-face-3d.jpg"));
     assert.ok(asLatin1.includes("extension/media/webview.js"));
     assert.ok(asLatin1.includes("extension/media/providers/claude.png"));
     assert.ok(asLatin1.includes("extension/media/providers/openai.png"));

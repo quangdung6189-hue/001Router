@@ -1,8 +1,8 @@
 {
   "name": "001router-code",
   "displayName": "001Router",
-  "description": "AI Coding Assistant powered by 001Router — Multi-Provider Model Selector (Provider -> Model) with Dynamic Power-Scaling Effort Slider & Password-Protected Router Sync for VS Code & Antigravity IDE.",
-  "version": "1.1.0",
+  "description": "AI Coding Assistant powered by 001Router — 3D Neural AI Avatar, Unified Model & Effort Sync, Auto Antigravity/CLI/VS Code Sync, Active File Awareness & Live Terminal Runner.",
+  "version": "1.2.0",
   "publisher": "001router",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -36,11 +36,13 @@
     "openrouter"
   ],
   "activationEvents": [
+    "onStartupFinished",
     "onView:001router.chatView",
     "onCommand:001router.openPanel",
     "onCommand:001router.connect",
     "onCommand:001router.focus",
-    "onCommand:001router.newChat"
+    "onCommand:001router.newChat",
+    "onCommand:001router.syncEnv"
   ],
   "main": "./extension.js",
   "contributes": {
@@ -88,6 +90,12 @@
         "title": "New Chat",
         "category": "001Router",
         "icon": "$(add)"
+      },
+      {
+        "command": "001router.syncEnv",
+        "title": "Sync Antigravity, CLI & VS Code",
+        "category": "001Router",
+        "icon": "$(sync)"
       }
     ],
     "menus": {
@@ -130,7 +138,7 @@
   },
   "scripts": {
     "package:vsix": "node ./scripts/pack-vsix.js",
-    "publish:ovsx": "npx ovsx publish ./001router-code-1.1.0.vsix",
+    "publish:ovsx": "npx ovsx publish ./001router-code-1.2.0.vsix",
     "publish:vsce": "npx @vscode/vsce publish"
   }
 }
