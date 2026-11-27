@@ -2420,6 +2420,7 @@ export function codexSseEventToOpenAIChunk(eventType, parsed, state) {
     state.chatId = `chatcmpl-${crypto.randomBytes(8).toString("hex")}`;
     state.created = Math.floor(Date.now() / 1000);
     state.toolIdxMap = new Map();
+    state.toolHasArgs = new Set();
     state.nextToolIdx = 0;
   }
   const makeChunk = (delta, finishReason = null, usage = undefined) => ({
@@ -2477,7 +2478,42 @@ export function codexSseEventToOpenAIChunk(eventType, parsed, state) {
     const idx =
       (parsed.item_id ? state.toolIdxMap.get(parsed.item_id) : undefined) ??
       Math.max(0, state.nextToolIdx - 1);
+    state.toolHasArgs.add(idx);
     return makeChunk({ tool_calls: [{ index: idx, function: { arguments: parsed.delta } }] });
+  }
+  if (
+    type === "response.output_item.done" &&
+    (parsed?.item?.type === "function_call" || parsed?.item?.type === "custom_tool_call")
+  ) {
+    const item = parsed.item;
+    const itemKey = item.id || parsed.item_id || item.call_id;
+    const rawArgs =
+      typeof item.arguments === "string"
+        ? item.arguments
+        : typeof item.input === "string"
+          ? item.input
+          : "";
+    let idx = itemKey ? state.toolIdxMap.get(itemKey) : undefined;
+    if (idx === undefined && item.name) {
+      idx = state.nextToolIdx++;
+      if (itemKey) state.toolIdxMap.set(itemKey, idx);
+      state.toolHasArgs.add(idx);
+      return makeChunk({
+        tool_calls: [
+          {
+            index: idx,
+            id: item.call_id || `call_${idx}`,
+            type: "function",
+            function: { name: item.name, arguments: rawArgs }
+          }
+        ]
+      });
+    }
+    if (idx !== undefined && rawArgs && !state.toolHasArgs.has(idx)) {
+      state.toolHasArgs.add(idx);
+      return makeChunk({ tool_calls: [{ index: idx, function: { arguments: rawArgs } }] });
+    }
+    return null;
   }
   if (type === "response.completed" || type === "response.done") {
     const u = parsed?.response?.usage;

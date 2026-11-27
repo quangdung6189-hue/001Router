@@ -461,6 +461,9 @@ export async function createApp(options = {}) {
       const origEnd = res.end.bind(res);
       const utf8Decoder = new TextDecoder("utf-8");
       let sseBuf = "";
+      let sawFinishReason = false;
+      let sawAnyChunk = false;
+      let sawError = false;
       const MAX_V1BETA_SSE_BUF = 1024 * 1024;
       const translateLines = (chunkStr) => {
         sseBuf += chunkStr;
@@ -480,6 +483,11 @@ export async function createApp(options = {}) {
           } catch {
             continue;
           }
+          if (parsed?.error) {
+            sawError = true;
+            origWrite(`data: ${JSON.stringify({ error: parsed.error })}\n\n`);
+            continue;
+          }
           const choice = parsed?.choices?.[0];
           const deltaText = typeof choice?.delta?.content === "string" ? choice.delta.content : "";
           const finishReason = choice?.finish_reason
@@ -489,6 +497,8 @@ export async function createApp(options = {}) {
             : undefined;
           const usage = parsed?.usage;
           if (!deltaText && !finishReason && !usage) continue;
+          sawAnyChunk = true;
+          if (finishReason) sawFinishReason = true;
           const geminiChunk = {
             candidates: [
               {
@@ -538,6 +548,20 @@ export async function createApp(options = {}) {
           const tail = utf8Decoder.decode();
           if (tail) translateLines(tail);
           if (sseBuf.trim()) translateLines("\n");
+          if (sawAnyChunk && !sawFinishReason && !sawError) {
+            origWrite(
+              `data: ${JSON.stringify({
+                candidates: [
+                  {
+                    content: { role: "model", parts: [{ text: "" }] },
+                    index: 0,
+                    finishReason: "STOP"
+                  }
+                ],
+                modelVersion: modelId
+              })}\n\n`
+            );
+          }
           return origEnd(typeof chunk === "function" ? chunk : typeof encoding === "function" ? encoding : cb);
         }
         return origEnd(chunk, encoding, cb);

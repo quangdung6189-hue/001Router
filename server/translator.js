@@ -586,7 +586,7 @@ export function createOpenAIToClaudeStreamTransformer(requestedModel) {
             }
             const argsPart = tc.function?.arguments;
             if (typeof argsPart === "string" && argsPart.length > 0) {
-              if (activeBlock && activeBlock.index === entry.index) {
+              if (entry) {
                 out.push(
                   formatAnthropicSSE("content_block_delta", {
                     type: "content_block_delta",
@@ -1038,7 +1038,10 @@ export function createClaudeToOpenAIStreamTransformer(requestedModel) {
         if (typeof data.usage?.output_tokens === "number") {
           outputTokens = data.usage.output_tokens;
         }
-        const finishReason = mapAnthropicStopToOpenAIFinish(data.delta?.stop_reason);
+        if (!data.delta?.stop_reason) {
+          return "";
+        }
+        const finishReason = mapAnthropicStopToOpenAIFinish(data.delta.stop_reason);
         finishSent = true;
         return formatChunk({}, finishReason, {
           prompt_tokens: inputTokens,
@@ -1366,6 +1369,11 @@ export function createOpenAIToResponsesStreamTransformer(requestedModel) {
   let msgItemId = `msg_${nanoid(12)}`;
   let msgStarted = false;
   let msgClosed = false;
+  let reasoningItemId = `rs_${nanoid(12)}`;
+  let reasoningStarted = false;
+  let reasoningClosed = false;
+  let reasoningOutputIndex = 0;
+  let reasoningBuffer = "";
   let textBuffer = "";
   let promptTokens = 0;
   let completionTokens = 0;
@@ -1405,6 +1413,43 @@ export function createOpenAIToResponsesStreamTransformer(requestedModel) {
   };
 
   let msgOutputIndex = 0;
+
+  const ensureReasoningStarted = () => {
+    if (reasoningStarted) return "";
+    reasoningStarted = true;
+    reasoningOutputIndex = nextOutputIndex++;
+    return emit("response.output_item.added", {
+      output_index: reasoningOutputIndex,
+      item: {
+        id: reasoningItemId,
+        type: "reasoning",
+        status: "in_progress",
+        summary: []
+      }
+    });
+  };
+
+  const closeReasoningIfOpen = () => {
+    if (!reasoningStarted || reasoningClosed) return "";
+    reasoningClosed = true;
+    return (
+      emit("response.reasoning_summary_text.done", {
+        item_id: reasoningItemId,
+        output_index: reasoningOutputIndex,
+        summary_index: 0,
+        text: reasoningBuffer
+      }) +
+      emit("response.output_item.done", {
+        output_index: reasoningOutputIndex,
+        item: {
+          id: reasoningItemId,
+          type: "reasoning",
+          status: "completed",
+          summary: [{ type: "summary_text", text: reasoningBuffer }]
+        }
+      })
+    );
+  };
 
   const ensureMsgStarted = () => {
     if (msgStarted) return "";
@@ -1471,7 +1516,20 @@ export function createOpenAIToResponsesStreamTransformer(requestedModel) {
       if (!choice) return out;
       const delta = choice.delta || {};
 
+      const reasoning = delta.reasoning_content ?? delta.reasoning;
+      if (typeof reasoning === "string" && reasoning.length > 0) {
+        out += ensureReasoningStarted();
+        reasoningBuffer += reasoning;
+        out += emit("response.reasoning_summary_text.delta", {
+          item_id: reasoningItemId,
+          output_index: reasoningOutputIndex,
+          summary_index: 0,
+          delta: reasoning
+        });
+      }
+
       if (typeof delta.content === "string" && delta.content.length > 0) {
+        out += closeReasoningIfOpen();
         out += ensureMsgStarted();
         textBuffer += delta.content;
         out += emit("response.output_text.delta", {
@@ -1483,6 +1541,7 @@ export function createOpenAIToResponsesStreamTransformer(requestedModel) {
       }
 
       if (Array.isArray(delta.tool_calls)) {
+        out += closeReasoningIfOpen();
         out += closeMsgIfOpen();
         for (const tc of delta.tool_calls) {
           const tIdx = tc.index ?? 0;
@@ -1522,9 +1581,6 @@ export function createOpenAIToResponsesStreamTransformer(requestedModel) {
         }
       }
 
-      if (choice.finish_reason) {
-        out += this.finalize();
-      }
       return out;
     },
 
@@ -1532,6 +1588,7 @@ export function createOpenAIToResponsesStreamTransformer(requestedModel) {
       if (completed) return "";
       completed = true;
       let out = ensureStarted();
+      out += closeReasoningIfOpen();
       out += closeMsgIfOpen();
 
       const output = [];

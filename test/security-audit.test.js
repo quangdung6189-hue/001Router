@@ -378,7 +378,8 @@ describe("Security hardening round 2: forced password change, trust proxy, maste
     const saved = {};
     for (const [k, v] of Object.entries(env)) {
       saved[k] = process.env[k];
-      process.env[k] = v;
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
     }
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "001router-audit2-"));
     const app = await createApp({ dataDir: dir, port: 20128, ...options });
@@ -483,7 +484,7 @@ describe("Security hardening round 2: forced password change, trust proxy, maste
   });
 
   it("14. security scan flags a master key stored next to db.json and passes when supplied via env", async () => {
-    const t = await boot({});
+    const t = await boot({}, { ROUTER001_MASTER_KEY: undefined });
     try {
       const login = await post(t.base, "/api/login", { password: "1234" });
       const cookie = login.headers.get("set-cookie").split(";")[0];

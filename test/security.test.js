@@ -33,8 +33,11 @@ describe("001Router Section 9.8 Security Hardening Test Suite", () => {
   let baseUrl;
   let sessionCookie;
   let initialRouterKey;
+  let prevMasterKey;
 
   before(async () => {
+    prevMasterKey = process.env.ROUTER001_MASTER_KEY;
+    delete process.env.ROUTER001_MASTER_KEY;
     tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "001router-security-test-"));
     mock = await createMockUpstream();
     app = await createApp({ dataDir: tmpDir, port: 20128 });
@@ -54,6 +57,8 @@ describe("001Router Section 9.8 Security Hardening Test Suite", () => {
     if (tmpDir) {
       await fs.rm(tmpDir, { recursive: true, force: true });
     }
+    if (prevMasterKey === undefined) delete process.env.ROUTER001_MASTER_KEY;
+    else process.env.ROUTER001_MASTER_KEY = prevMasterKey;
   });
 
   async function apiFetch(urlPath, opts = {}) {

@@ -50,6 +50,7 @@ import { calculateRequestCost, getMergedPricingMap } from "./pricing.js";
 import {
   getDefaultUpstreamDispatcher,
   getProxyDispatcher,
+  readResponseTextBounded,
   upstreamFetch
 } from "./proxy.js";
 import {
@@ -481,12 +482,37 @@ export function buildUpstreamHeaders(provider, apiKey, clientAnthropicVersion, e
 
   const hasAuthOverride = Boolean(headers.authorization || headers.Authorization);
   if (apiKey && !hasAuthOverride) {
-    if (authStyle === "api-key") {
-      headers["api-key"] = apiKey;
-    } else if (authStyle === "x-api-key") {
-      headers["x-api-key"] = apiKey;
-    } else if (authStyle !== "none") {
-      headers["authorization"] = `Bearer ${apiKey}`;
+    switch (authStyle) {
+      case "x-subscription-token":
+        headers["x-subscription-token"] = apiKey;
+        break;
+      case "x-api-key":
+        headers["x-api-key"] = apiKey;
+        break;
+      case "xi-api-key":
+        headers["xi-api-key"] = apiKey;
+        break;
+      case "x-key":
+        headers["x-key"] = apiKey;
+        break;
+      case "api-key":
+        headers["api-key"] = apiKey;
+        break;
+      case "token":
+        headers["authorization"] = `Token ${apiKey}`;
+        break;
+      case "key":
+        headers["authorization"] = `Key ${apiKey}`;
+        break;
+      case "authorization":
+        headers["authorization"] = apiKey;
+        break;
+      case "none":
+      case "query-key":
+        break;
+      default:
+        headers["authorization"] = `Bearer ${apiKey}`;
+        break;
     }
   }
 
@@ -642,6 +668,56 @@ function sendClientError(res, clientFormat, status, message, type = "api_error")
       type: mappedType
     }
   });
+}
+
+function extractSSEErrorMessage(eventName, parsed) {
+  if (parsed && typeof parsed === "object") {
+    if (parsed.error) {
+      if (typeof parsed.error === "string") return parsed.error.slice(0, 1000);
+      if (typeof parsed.error === "object") {
+        return String(
+          parsed.error.message ||
+            parsed.error.status ||
+            parsed.error.code ||
+            JSON.stringify(parsed.error)
+        ).slice(0, 1000);
+      }
+      return String(parsed.error).slice(0, 1000);
+    }
+    if (parsed.type === "response.failed") {
+      const err = parsed.response?.error;
+      return String(
+        err?.message || (typeof err === "string" ? err : "Upstream response failed")
+      ).slice(0, 1000);
+    }
+    if (eventName === "error" || parsed.type === "error") {
+      return String(parsed.message || JSON.stringify(parsed)).slice(0, 1000);
+    }
+    return "";
+  }
+  if (eventName === "error") {
+    return "Upstream SSE error";
+  }
+  return "";
+}
+
+function formatSSEErrorFrame(clientFormat, message) {
+  const safeMsg = String(message || "Upstream stream error").slice(0, 1000);
+  if (clientFormat === "anthropic") {
+    return `event: error\ndata: ${JSON.stringify({
+      type: "error",
+      error: { type: "api_error", message: safeMsg }
+    })}\n\n`;
+  }
+  if (clientFormat === "openai-responses") {
+    return `event: error\ndata: ${JSON.stringify({
+      type: "error",
+      error: { message: safeMsg, type: "api_error" }
+    })}\n\n`;
+  }
+  return `data: ${JSON.stringify({
+    error: { message: safeMsg, type: "api_error" }
+  })}\n\n`;
 }
 
 export class RouterService {
@@ -1433,6 +1509,7 @@ export class RouterService {
 
     req.on("aborted", onClientAbort);
     res.on("close", onClientAbort);
+    res.on("error", onClientAbort);
 
     const attemptTrail = [];
     let finalTarget = null;
@@ -2317,7 +2394,11 @@ export class RouterService {
 
               // Successful HTTP 2xx response (non-streaming OR JSON fallback for stream request)
               if (!isStream || isJsonFallbackForStream) {
-                const jsonText = await upstreamRes.text();
+                const jsonText = await readResponseTextBounded(
+                  upstreamRes,
+                  25 * 1024 * 1024,
+                  timeoutMs
+                );
                 clearTimeout(timer);
                 let upstreamJson;
                 let invalidBodyMsg = "Upstream returned invalid JSON";
@@ -2343,6 +2424,10 @@ export class RouterService {
                         String(upstreamJson.error.message || "unknown").slice(0, 300),
                         [...this._allSecretKeys(), ...(resolvedSecret ? [resolvedSecret] : [])]
                       )}`;
+                      throw new Error(invalidBodyMsg);
+                    }
+                    if (!upstreamJson || !Array.isArray(upstreamJson.choices) || upstreamJson.choices.length === 0) {
+                      invalidBodyMsg = "Upstream Codex stream ended without a response";
                       throw new Error(invalidBodyMsg);
                     }
                   } else {
@@ -2493,6 +2578,7 @@ export class RouterService {
                     ...(headroomApplied ? { headroom: true } : {}),
                     ...(adapterUsed ? { adapterUsed } : {}),
                     fallbackHops,
+                    stream: Boolean(isStream),
                     attemptTrail
                   },
                   routerKey?.id || null
@@ -2595,6 +2681,14 @@ export class RouterService {
                 timeoutTimer: timer,
                 isClientAborted: () => clientAborted,
                 isTimedOut: () => timedOut,
+                abortUpstream: () => controller.abort(),
+                hasFallbackRemaining,
+                streamIdleTimeoutMs: timeoutMs,
+                streamHeartbeatMs:
+                  Number(
+                    this.options?.streamHeartbeatMs ??
+                      this.options?.appLocals?.streamHeartbeatMs
+                  ) || 15_000,
                 cloudCode: isGeminiCliKey,
                 codexResponses: isCodexOAuth,
                 onFirstByteSent: () => {
@@ -2640,6 +2734,7 @@ export class RouterService {
               finalTarget = target;
               promptTokens = streamResult.promptTokens;
               completionTokens = streamResult.completionTokens;
+              cachedTokens = streamResult.cachedTokens || cachedTokens;
               const estCost = calculateRequestCost(
                 provider.preset || provider.slug,
                 target.upstreamModel,
@@ -2649,6 +2744,7 @@ export class RouterService {
 
               if (streamResult.abortedByClient) {
                 finalStatus = 499;
+                lastErrorMessage = streamResult.error || "Client disconnected";
                 attemptTrail.push({
                   target: target.raw,
                   providerSlug: provider.slug,
@@ -2750,6 +2846,7 @@ export class RouterService {
                   ...(headroomApplied ? { headroom: true } : {}),
                   ...(adapterUsed ? { adapterUsed } : {}),
                   fallbackHops: streamFallbackHops,
+                  stream: Boolean(isStream),
                   attemptTrail,
                   ...(finalStatus !== 200 ? { error: lastErrorMessage } : {})
                 },
@@ -2859,6 +2956,7 @@ export class RouterService {
           savedChars,
           ...(cavemanApplied ? { caveman: true } : {}),
           fallbackHops: Math.max(0, attemptTrail.length - 1),
+          stream: Boolean(isStream),
           attemptTrail,
           error: lastErrorMessage
         },
@@ -2874,6 +2972,7 @@ export class RouterService {
     } finally {
       req.off("aborted", onClientAbort);
       res.off("close", onClientAbort);
+      res.off("error", onClientAbort);
     }
   }
 
@@ -2891,6 +2990,10 @@ export class RouterService {
     timeoutTimer,
     isClientAborted,
     isTimedOut,
+    abortUpstream,
+    hasFallbackRemaining = false,
+    streamIdleTimeoutMs = 120_000,
+    streamHeartbeatMs = 15_000,
     onFirstByteSent,
     cloudCode = false,
     codexResponses = false
@@ -2899,9 +3002,15 @@ export class RouterService {
     const decoder = new TextDecoder();
     let headersFlushed = false;
     let firstByteSent = false;
+    let upstreamDataSeen = false;
     let timerCleared = false;
+    let idleTimedOut = false;
+    let idleTimer = null;
+    let heartbeatTimer = null;
+    let lastWriteAt = Date.now();
     let promptTokens = 0;
     let completionTokens = 0;
+    let cachedTokens = 0;
 
     const flushSSEHeaders = () => {
       if (headersFlushed) return;
@@ -2912,6 +3021,7 @@ export class RouterService {
       res.setHeader("Connection", "keep-alive");
       res.setHeader("X-Accel-Buffering", "no");
       res.socket?.setNoDelay?.(true);
+      res.socket?.setTimeout?.(0);
       if (typeof res.flushHeaders === "function") {
         res.flushHeaders();
       }
@@ -2919,13 +3029,18 @@ export class RouterService {
 
     const writeToClient = (chunkOrString) => {
       if (!chunkOrString || chunkOrString.length === 0) return;
-      if (isClientAborted() || res.writableEnded) return;
+      if (isClientAborted() || res.writableEnded || res.destroyed) return;
       flushSSEHeaders();
       if (!firstByteSent) {
         firstByteSent = true;
         onFirstByteSent();
       }
-      res.write(chunkOrString);
+      lastWriteAt = Date.now();
+      try {
+        res.write(chunkOrString);
+      } catch {
+        abortUpstream?.();
+      }
     };
 
     const clearTtfbTimer = () => {
@@ -2935,461 +3050,745 @@ export class RouterService {
       }
     };
 
-    // Cloud Code Assist SSE: each frame is `{ response: { candidates: [...] } }`, so the frames
-    // must be translated into OpenAI chunks before they ever reach the client.
-    if (cloudCode) {
-      const chunkId = `chatcmpl-${nanoid(20)}`;
-      const tx =
-        clientFormat === "openai"
-          ? null
-          : createStreamTransformer(clientFormat, "openai", requestedModel);
-      let doneSeen = false;
-      let roleSent = false;
+    const resetIdleTimer = () => {
+      if (idleTimer) {
+        clearTimeout(idleTimer);
+        idleTimer = null;
+      }
+      if (streamIdleTimeoutMs > 0) {
+        idleTimer = setTimeout(() => {
+          idleTimedOut = true;
+          abortUpstream?.();
+        }, streamIdleTimeoutMs);
+        idleTimer.unref?.();
+      }
+    };
 
-      const parser = createSSEParser(({ data }) => {
-        if (!data || data === "[DONE]") return;
-        let parsed;
-        try {
-          parsed = JSON.parse(data);
-        } catch {
-          return;
-        }
-        const raw = unwrapCloudCodeResponse(parsed);
-        const usageMeta = raw?.usageMetadata || {};
-        if (usageMeta.promptTokenCount) promptTokens = Number(usageMeta.promptTokenCount) || 0;
-        if (usageMeta.candidatesTokenCount) {
-          completionTokens = Number(usageMeta.candidatesTokenCount) || 0;
-        }
+    const stopTimers = () => {
+      clearTtfbTimer();
+      if (idleTimer) {
+        clearTimeout(idleTimer);
+        idleTimer = null;
+      }
+      if (heartbeatTimer) {
+        clearInterval(heartbeatTimer);
+        heartbeatTimer = null;
+      }
+    };
 
-        const chunk = cloudCodeChunkToOpenAI(parsed, requestedModel, chunkId);
-        if (!chunk) return;
+    if (streamHeartbeatMs > 0) {
+      const tickMs = Math.max(20, Math.min(streamHeartbeatMs, 5000));
+      heartbeatTimer = setInterval(() => {
+        if (isClientAborted() || res.writableEnded || res.destroyed) return;
+        if (!firstByteSent && hasFallbackRemaining) return;
+        if (Date.now() - lastWriteAt < Math.max(0, streamHeartbeatMs - 5)) return;
+        writeToClient(": keep-alive\n\n");
+      }, tickMs);
+      heartbeatTimer.unref?.();
+    }
 
-        if (!roleSent) {
-          roleSent = true;
-          chunk.choices[0].delta = { role: "assistant", ...chunk.choices[0].delta };
-        }
+    const abortOnInBandError = async () => {
+      await reader.cancel().catch(() => {});
+      abortUpstream?.();
+    };
 
-        if (clientFormat === "openai") {
-          writeToClient(`data: ${JSON.stringify(chunk)}\n\n`);
-          return;
-        }
-        const out = tx.pushChunk(chunk);
-        if (out) writeToClient(out);
-      });
-
-      try {
-        while (true) {
-          if (isClientAborted()) {
-            await reader.cancel().catch(() => {});
-            return {
-              failedBeforeFirstByte: !firstByteSent,
-              abortedByClient: true,
-              midStreamError: false,
-              promptTokens,
-              completionTokens
-            };
-          }
-
-          const { value, done } = await reader.read();
-          if (done) {
-            parser.flush();
-            break;
-          }
-          if (value && value.length > 0) {
-            clearTtfbTimer();
-            parser.feed(decoder.decode(value, { stream: true }));
-          }
-        }
-
-        if (!firstByteSent) {
-          return {
-            failedBeforeFirstByte: true,
-            timedOut: false,
-            error: "Upstream Cloud Code stream ended with no data",
-            promptTokens,
-            completionTokens
-          };
-        }
-
-        if (tx) {
-          const tail = tx.finalize();
-          if (tail) writeToClient(tail);
-        } else if (!doneSeen && clientFormat === "openai") {
-          writeToClient("data: [DONE]\n\n");
-        }
-
+    const finalizeStreamFailure = (errMsg) => {
+      if (firstByteSent) {
+        writeToClient(formatSSEErrorFrame(clientFormat, errMsg));
         return {
           failedBeforeFirstByte: false,
           abortedByClient: false,
-          midStreamError: false,
+          midStreamError: true,
+          error: errMsg,
           promptTokens,
-          completionTokens
-        };
-      } catch (err) {
-        clearTtfbTimer();
-        await reader.cancel().catch(() => {});
-        if (isClientAborted()) {
-          return {
-            failedBeforeFirstByte: !firstByteSent,
-            abortedByClient: true,
-            midStreamError: false,
-            error: "Client aborted stream",
-            promptTokens,
-            completionTokens
-          };
-        }
-        return {
-          failedBeforeFirstByte: !firstByteSent,
-          abortedByClient: false,
-          midStreamError: firstByteSent,
-          timedOut: Boolean(isTimedOut?.()) || err?.name === "AbortError",
-          error: err?.message || "Upstream Cloud Code stream interrupted",
-          promptTokens,
-          completionTokens
+          completionTokens,
+          cachedTokens
         };
       }
-    }
-
-    // OpenAI Codex OAuth (chatgpt.com/backend-api/codex/responses) emits Responses API SSE events.
-    // Translate events to OpenAI chunks (and optionally to Anthropic/Responses via createStreamTransformer).
-    if (codexResponses) {
-      const codexState = { model: requestedModel };
-      const tx =
-        clientFormat === "openai"
-          ? null
-          : createStreamTransformer(clientFormat, "openai", requestedModel);
-      let finalizedSent = false;
-      let roleSent = false;
-      let streamFailure = "";
-
-      const emitTail = () => {
-        if (finalizedSent) return;
-        finalizedSent = true;
-        if (tx) {
-          const tail = tx.finalize();
-          if (tail) writeToClient(tail);
-        } else if (firstByteSent) {
-          writeToClient("data: [DONE]\n\n");
-        }
-      };
-
-      const parser = createSSEParser(({ event, data }) => {
-        if (!data || data === "[DONE]") {
-          if (data === "[DONE]") emitTail();
-          return;
-        }
-        let parsed;
-        try {
-          parsed = JSON.parse(data);
-        } catch {
-          return;
-        }
-        const chunk = codexSseEventToOpenAIChunk(event, parsed, codexState);
-        if (!chunk) return;
-        if (chunk.error) {
-          streamFailure = chunk.error;
-          return;
-        }
-        if (codexState.usage) {
-          promptTokens = codexState.usage.promptTokens || promptTokens;
-          completionTokens = codexState.usage.completionTokens || completionTokens;
-        }
-        if (!roleSent && chunk.choices?.[0]?.delta) {
-          roleSent = true;
-          chunk.choices[0].delta = { role: "assistant", ...chunk.choices[0].delta };
-        }
-        if (clientFormat === "openai") {
-          writeToClient(`data: ${JSON.stringify(chunk)}\n\n`);
-        } else {
-          const out = tx.pushChunk(chunk);
-          if (out) writeToClient(out);
-        }
-        if (chunk.choices?.[0]?.finish_reason) {
-          emitTail();
-        }
-      });
-
-      try {
-        while (true) {
-          if (isClientAborted()) {
-            await reader.cancel().catch(() => {});
-            return {
-              failedBeforeFirstByte: !firstByteSent,
-              abortedByClient: true,
-              midStreamError: false,
-              promptTokens,
-              completionTokens
-            };
-          }
-
-          const { value, done } = await reader.read();
-          if (done) {
-            parser.flush();
-            if (firstByteSent) emitTail();
-            break;
-          }
-          if (value && value.length > 0) {
-            clearTtfbTimer();
-            parser.feed(decoder.decode(value, { stream: true }));
-          }
-        }
-
-        if (!firstByteSent) {
-          return {
-            failedBeforeFirstByte: true,
-            timedOut: false,
-            error: streamFailure || "Upstream Codex stream ended with no data",
-            promptTokens,
-            completionTokens
-          };
-        }
-
-        return {
-          failedBeforeFirstByte: false,
-          abortedByClient: false,
-          midStreamError: Boolean(streamFailure),
-          ...(streamFailure ? { error: streamFailure } : {}),
-          promptTokens,
-          completionTokens
-        };
-      } catch (err) {
-        clearTtfbTimer();
-        await reader.cancel().catch(() => {});
-        if (isClientAborted()) {
-          return {
-            failedBeforeFirstByte: !firstByteSent,
-            abortedByClient: true,
-            midStreamError: false,
-            error: "Client aborted stream",
-            promptTokens,
-            completionTokens
-          };
-        }
-        return {
-          failedBeforeFirstByte: !firstByteSent,
-          abortedByClient: false,
-          midStreamError: firstByteSent,
-          timedOut: Boolean(isTimedOut?.()) || err?.name === "AbortError",
-          error: err?.message || "Upstream Codex stream interrupted",
-          promptTokens,
-          completionTokens
-        };
-      }
-    }
-
-    // Passthrough SSE (same format on client and upstream)
-    // Ultra-low-latency path: write raw upstream bytes to client socket FIRST, then inspect
-    // usage metadata lazily (skipping JSON.parse on non-usage token frames — ~3.2x less CPU).
-    if (clientFormat === upstreamFormat) {
-      const usageParser = createSSEParser(({ event, data }) => {
-        if (!data || data === "[DONE]") return;
-        if (upstreamFormat === "anthropic") {
-          if (event !== "message_start" && event !== "message_delta" && !data.includes('"usage"')) {
-            return;
-          }
-        } else if (!data.includes('"usage"')) {
-          return;
-        }
-        try {
-          const parsed = JSON.parse(data);
-          if (upstreamFormat === "anthropic") {
-            const type = parsed.type || event;
-            if (type === "message_start" && parsed.message?.usage) {
-              promptTokens = parsed.message.usage.input_tokens ?? promptTokens;
-            } else if (type === "message_delta" && parsed.usage) {
-              completionTokens = parsed.usage.output_tokens ?? completionTokens;
-            }
-          } else if (parsed.usage) {
-            promptTokens = parsed.usage.prompt_tokens ?? promptTokens;
-            completionTokens = parsed.usage.completion_tokens ?? completionTokens;
-          }
-        } catch {
-          // ignore non-JSON SSE data frames
-        }
-      });
-
-      try {
-        while (true) {
-          if (isClientAborted()) {
-            await reader.cancel().catch(() => {});
-            return {
-              failedBeforeFirstByte: !firstByteSent,
-              abortedByClient: true,
-              midStreamError: false,
-              promptTokens,
-              completionTokens
-            };
-          }
-
-          const { value, done } = await reader.read();
-          if (done) {
-            usageParser.flush();
-            break;
-          }
-
-          if (value && value.length > 0) {
-            clearTtfbTimer();
-            writeToClient(value);
-            usageParser.feed(decoder.decode(value, { stream: true }));
-          }
-        }
-
-        if (!firstByteSent) {
-          return {
-            failedBeforeFirstByte: true,
-            timedOut: false,
-            error: "Upstream SSE stream ended with no data",
-            promptTokens,
-            completionTokens
-          };
-        }
-
-        return {
-          failedBeforeFirstByte: false,
-          abortedByClient: false,
-          midStreamError: false,
-          promptTokens,
-          completionTokens
-        };
-      } catch (err) {
-        clearTtfbTimer();
-        await reader.cancel().catch(() => {});
-        if (isClientAborted()) {
-          return {
-            failedBeforeFirstByte: !firstByteSent,
-            abortedByClient: true,
-            midStreamError: false,
-            error: "Client aborted stream",
-            promptTokens,
-            completionTokens
-          };
-        }
-        return {
-          failedBeforeFirstByte: !firstByteSent,
-          abortedByClient: false,
-          midStreamError: firstByteSent,
-          timedOut: Boolean(isTimedOut?.()) || err?.name === "AbortError",
-          error: err?.message || "Upstream SSE stream interrupted",
-          promptTokens,
-          completionTokens
-        };
-      }
-    }
-
-    // Translated SSE (Anthropic <-> OpenAI or -> OpenAI Responses)
-    const transformer = createStreamTransformer(
-      clientFormat,
-      upstreamFormat,
-      requestedModel
-    );
-
-    let doneSeen = false;
-    const sseParser = createSSEParser(({ event, data }) => {
-      if (transformer.mode === "openai") {
-        if (data === "[DONE]") {
-          doneSeen = true;
-          const tail = transformer.finalize();
-          if (tail) writeToClient(tail);
-          return;
-        }
-        try {
-          const chunk = JSON.parse(data);
-          const out = transformer.pushChunk(chunk);
-          if (out) writeToClient(out);
-        } catch {
-          // ignore malformed SSE JSON frame
-        }
-      } else {
-        if (data === "[DONE]") {
-          doneSeen = true;
-          const tail = transformer.finalize();
-          if (tail) writeToClient(tail);
-          return;
-        }
-        try {
-          const parsed = JSON.parse(data);
-          const out = transformer.pushEvent(event, parsed);
-          if (out) writeToClient(out);
-          if ((parsed.type || event) === "message_stop") {
-            doneSeen = true;
-          }
-        } catch {
-          // ignore malformed SSE JSON frame
-        }
-      }
-    });
-
-    try {
-      while (true) {
-        if (isClientAborted()) {
-          await reader.cancel().catch(() => {});
-          const usage = transformer.getUsage();
-          return {
-            failedBeforeFirstByte: !firstByteSent,
-            abortedByClient: true,
-            midStreamError: false,
-            promptTokens: usage.promptTokens,
-            completionTokens: usage.completionTokens
-          };
-        }
-
-        const { value, done } = await reader.read();
-        if (done) {
-          sseParser.flush();
-          if (!doneSeen && firstByteSent) {
-            const tail = transformer.finalize();
-            if (tail) writeToClient(tail);
-          }
-          break;
-        }
-
-        if (value && value.length > 0) {
-          clearTtfbTimer();
-          sseParser.feed(decoder.decode(value, { stream: true }));
-        }
-      }
-
-      const usage = transformer.getUsage();
-      if (!firstByteSent) {
-        return {
-          failedBeforeFirstByte: true,
-          timedOut: false,
-          error: "Upstream SSE stream ended with no events",
-          promptTokens: usage.promptTokens,
-          completionTokens: usage.completionTokens
-        };
-      }
-
       return {
-        failedBeforeFirstByte: false,
+        failedBeforeFirstByte: true,
         abortedByClient: false,
         midStreamError: false,
-        promptTokens: usage.promptTokens,
-        completionTokens: usage.completionTokens
+        timedOut: Boolean(isTimedOut?.()) || idleTimedOut,
+        error: errMsg,
+        promptTokens,
+        completionTokens,
+        cachedTokens
       };
-    } catch (err) {
-      clearTtfbTimer();
+    };
+
+    const handleStreamCatch = async (err, fallbackError) => {
       await reader.cancel().catch(() => {});
-      const usage = transformer.getUsage();
-      if (isClientAborted()) {
+      if (isClientAborted() && !idleTimedOut && !isTimedOut?.()) {
         return {
           failedBeforeFirstByte: !firstByteSent,
           abortedByClient: true,
           midStreamError: false,
-          error: "Client aborted stream",
-          promptTokens: usage.promptTokens,
-          completionTokens: usage.completionTokens
+          error: "Client disconnected",
+          promptTokens,
+          completionTokens,
+          cachedTokens
         };
+      }
+      const timedOutNow = Boolean(isTimedOut?.()) || idleTimedOut || err?.name === "AbortError";
+      const errMsg = timedOutNow
+        ? `Upstream stream timed out after ${streamIdleTimeoutMs}ms`
+        : err?.message || fallbackError;
+      if (firstByteSent) {
+        writeToClient(formatSSEErrorFrame(clientFormat, errMsg));
       }
       return {
         failedBeforeFirstByte: !firstByteSent,
         abortedByClient: false,
         midStreamError: firstByteSent,
-        timedOut: err?.name === "AbortError",
-        error: err?.message || "Upstream SSE stream interrupted",
-        promptTokens: usage.promptTokens,
-        completionTokens: usage.completionTokens
+        timedOut: timedOutNow,
+        error: errMsg,
+        promptTokens,
+        completionTokens,
+        cachedTokens
       };
+    };
+
+    try {
+      // Cloud Code Assist SSE: each frame is `{ response: { candidates: [...] } }`, so the frames
+      // must be translated into OpenAI chunks before they ever reach the client.
+      if (cloudCode) {
+        const chunkId = `chatcmpl-${nanoid(20)}`;
+        const tx =
+          clientFormat === "openai"
+            ? null
+            : createStreamTransformer(clientFormat, "openai", requestedModel);
+        let roleSent = false;
+        let sawToolCalls = false;
+        let finishReasonSent = false;
+        let streamFailure = "";
+        let lastUsage = null;
+
+        const parser = createSSEParser(({ event, data }) => {
+          if (streamFailure || !data || data === "[DONE]") return;
+          let parsed;
+          try {
+            parsed = JSON.parse(data);
+          } catch {
+            return;
+          }
+          const sseErr = extractSSEErrorMessage(event, parsed);
+          if (sseErr) {
+            streamFailure = sseErr;
+            return;
+          }
+          const raw = unwrapCloudCodeResponse(parsed);
+          const usageMeta = raw?.usageMetadata || {};
+          if (usageMeta.promptTokenCount) promptTokens = Number(usageMeta.promptTokenCount) || 0;
+          if (usageMeta.candidatesTokenCount) {
+            completionTokens = Number(usageMeta.candidatesTokenCount) || 0;
+          }
+          if (usageMeta.cachedContentTokenCount) {
+            cachedTokens = Number(usageMeta.cachedContentTokenCount) || 0;
+          }
+          if (promptTokens > 0 || completionTokens > 0) {
+            lastUsage = {
+              prompt_tokens: promptTokens,
+              completion_tokens: completionTokens,
+              total_tokens: promptTokens + completionTokens
+            };
+          }
+
+          const chunk = cloudCodeChunkToOpenAI(parsed, requestedModel, chunkId, {
+            hasPriorToolCalls: sawToolCalls
+          });
+          if (!chunk) return;
+          upstreamDataSeen = true;
+
+          if (chunk.choices?.[0]?.delta?.tool_calls?.length) {
+            sawToolCalls = true;
+          }
+          if (chunk.choices?.[0]?.finish_reason) {
+            finishReasonSent = true;
+          }
+          if (!roleSent) {
+            roleSent = true;
+            chunk.choices[0].delta = { role: "assistant", ...chunk.choices[0].delta };
+          }
+
+          if (clientFormat === "openai") {
+            writeToClient(`data: ${JSON.stringify(chunk)}\n\n`);
+            return;
+          }
+          const out = tx.pushChunk(chunk);
+          if (out) writeToClient(out);
+        });
+
+        try {
+          while (true) {
+            if (isClientAborted()) {
+              await reader.cancel().catch(() => {});
+              return {
+                failedBeforeFirstByte: !firstByteSent,
+                abortedByClient: true,
+                midStreamError: false,
+                error: "Client disconnected",
+                promptTokens,
+                completionTokens,
+                cachedTokens
+              };
+            }
+
+            const { value, done } = await reader.read();
+            if (done) {
+              const rem = decoder.decode();
+              if (rem) parser.feed(rem);
+              parser.flush();
+              break;
+            }
+            if (value && value.length > 0) {
+              clearTtfbTimer();
+              resetIdleTimer();
+              parser.feed(decoder.decode(value, { stream: true }));
+              if (streamFailure) {
+                await abortOnInBandError();
+                break;
+              }
+            }
+          }
+
+          if (streamFailure) {
+            return finalizeStreamFailure(streamFailure);
+          }
+
+          if (!upstreamDataSeen) {
+            return finalizeStreamFailure("Upstream Cloud Code stream ended with no data");
+          }
+
+          if (tx) {
+            const tail = tx.finalize();
+            if (tail) writeToClient(tail);
+          } else if (clientFormat === "openai") {
+            if (!finishReasonSent) {
+              writeToClient(
+                `data: ${JSON.stringify({
+                  id: chunkId,
+                  object: "chat.completion.chunk",
+                  created: Math.floor(Date.now() / 1000),
+                  model: requestedModel,
+                  choices: [
+                    {
+                      index: 0,
+                      delta: {},
+                      finish_reason: sawToolCalls ? "tool_calls" : "stop"
+                    }
+                  ],
+                  ...(lastUsage ? { usage: lastUsage } : {})
+                })}\n\n`
+              );
+            }
+            writeToClient("data: [DONE]\n\n");
+          }
+
+          return {
+            failedBeforeFirstByte: false,
+            abortedByClient: false,
+            midStreamError: false,
+            promptTokens,
+            completionTokens,
+            cachedTokens
+          };
+        } catch (err) {
+          return handleStreamCatch(err, "Upstream Cloud Code stream interrupted");
+        }
+      }
+
+      // OpenAI Codex OAuth (chatgpt.com/backend-api/codex/responses) emits Responses API SSE events.
+      // Translate events to OpenAI chunks (and optionally to Anthropic/Responses via createStreamTransformer).
+      if (codexResponses) {
+        const codexState = { model: requestedModel };
+        const tx =
+          clientFormat === "openai"
+            ? null
+            : createStreamTransformer(clientFormat, "openai", requestedModel);
+        let finalizedSent = false;
+        let roleSent = false;
+        let sawToolCalls = false;
+        let finishReasonSent = false;
+        let streamFailure = "";
+
+        const emitTail = () => {
+          if (finalizedSent || streamFailure || !upstreamDataSeen) return;
+          finalizedSent = true;
+          if (tx) {
+            const tail = tx.finalize();
+            if (tail) writeToClient(tail);
+          } else if (firstByteSent) {
+            if (!finishReasonSent) {
+              finishReasonSent = true;
+              writeToClient(
+                `data: ${JSON.stringify({
+                  id: codexState.chatId || `chatcmpl-${nanoid(16)}`,
+                  object: "chat.completion.chunk",
+                  created: codexState.created || Math.floor(Date.now() / 1000),
+                  model: requestedModel,
+                  choices: [
+                    {
+                      index: 0,
+                      delta: {},
+                      finish_reason: sawToolCalls ? "tool_calls" : "stop"
+                    }
+                  ]
+                })}\n\n`
+              );
+            }
+            writeToClient("data: [DONE]\n\n");
+          }
+        };
+
+        const parser = createSSEParser(({ event, data }) => {
+          if (streamFailure || !data) return;
+          if (data === "[DONE]") {
+            emitTail();
+            return;
+          }
+          let parsed;
+          try {
+            parsed = JSON.parse(data);
+          } catch {
+            return;
+          }
+          const chunk = codexSseEventToOpenAIChunk(event, parsed, codexState);
+          if (!chunk) {
+            const rawErr = extractSSEErrorMessage(event, parsed);
+            if (rawErr) streamFailure = rawErr;
+            return;
+          }
+          if (chunk.error) {
+            streamFailure = chunk.error;
+            return;
+          }
+          upstreamDataSeen = true;
+          if (codexState.usage) {
+            promptTokens = codexState.usage.promptTokens || promptTokens;
+            completionTokens = codexState.usage.completionTokens || completionTokens;
+            cachedTokens = codexState.usage.cachedTokens || cachedTokens;
+          }
+          if (chunk.choices?.[0]?.delta?.tool_calls?.length) {
+            sawToolCalls = true;
+          }
+          if (chunk.choices?.[0]?.finish_reason) {
+            finishReasonSent = true;
+          }
+          if (!roleSent && chunk.choices?.[0]?.delta) {
+            roleSent = true;
+            chunk.choices[0].delta = { role: "assistant", ...chunk.choices[0].delta };
+          }
+          if (clientFormat === "openai") {
+            writeToClient(`data: ${JSON.stringify(chunk)}\n\n`);
+          } else {
+            const out = tx.pushChunk(chunk);
+            if (out) writeToClient(out);
+          }
+          if (chunk.choices?.[0]?.finish_reason) {
+            emitTail();
+          }
+        });
+
+        try {
+          while (true) {
+            if (isClientAborted()) {
+              await reader.cancel().catch(() => {});
+              return {
+                failedBeforeFirstByte: !firstByteSent,
+                abortedByClient: true,
+                midStreamError: false,
+                error: "Client disconnected",
+                promptTokens,
+                completionTokens,
+                cachedTokens
+              };
+            }
+
+            const { value, done } = await reader.read();
+            if (done) {
+              const rem = decoder.decode();
+              if (rem) parser.feed(rem);
+              parser.flush();
+              if (!streamFailure && upstreamDataSeen) emitTail();
+              break;
+            }
+            if (value && value.length > 0) {
+              clearTtfbTimer();
+              resetIdleTimer();
+              parser.feed(decoder.decode(value, { stream: true }));
+              if (streamFailure) {
+                await abortOnInBandError();
+                break;
+              }
+            }
+          }
+
+          if (streamFailure) {
+            return finalizeStreamFailure(streamFailure);
+          }
+
+          if (!upstreamDataSeen) {
+            return finalizeStreamFailure("Upstream Codex stream ended with no data");
+          }
+
+          return {
+            failedBeforeFirstByte: false,
+            abortedByClient: false,
+            midStreamError: false,
+            promptTokens,
+            completionTokens,
+            cachedTokens
+          };
+        } catch (err) {
+          return handleStreamCatch(err, "Upstream Codex stream interrupted");
+        }
+      }
+
+      // Passthrough SSE (same format on client and upstream)
+      // Frame-safe low-latency path: inspects SSE frames for errors, usage, and finish_reason
+      // without JSON.parse overhead on ordinary token chunks, and guarantees clean termination.
+      if (clientFormat === upstreamFormat) {
+        const fallbackChunkId = `chatcmpl-${nanoid(16)}`;
+        let lastChunkId = "";
+        let lastChunkModel = requestedModel;
+        let lastChunkCreated = 0;
+        let sawFinishReason = false;
+        let sawToolCalls = false;
+        let sawDone = false;
+        let sawMessageStop = false;
+        let sawStopReason = false;
+        let streamFailure = "";
+        let rawPreFrameBuf = "";
+
+        const passthroughParser = createSSEParser(({ event, data }) => {
+          if (streamFailure || !data) return;
+
+          if (data === "[DONE]") {
+            if (!upstreamDataSeen) return;
+            sawDone = true;
+            if (upstreamFormat === "openai" && !sawFinishReason) {
+              sawFinishReason = true;
+              writeToClient(
+                `data: ${JSON.stringify({
+                  id: lastChunkId || fallbackChunkId,
+                  object: "chat.completion.chunk",
+                  created: lastChunkCreated || Math.floor(Date.now() / 1000),
+                  model: lastChunkModel || requestedModel,
+                  choices: [
+                    {
+                      index: 0,
+                      delta: {},
+                      finish_reason: sawToolCalls ? "tool_calls" : "stop"
+                    }
+                  ]
+                })}\n\n`
+              );
+            }
+            writeToClient("data: [DONE]\n\n");
+            return;
+          }
+
+          const mayHaveError =
+            event === "error" ||
+            data.includes('"error"') ||
+            data.includes('"type":"error"') ||
+            data.includes('"type": "error"');
+          const needsMetaParse =
+            mayHaveError ||
+            (upstreamFormat === "anthropic"
+              ? event === "message_start" ||
+                event === "message_delta" ||
+                event === "message_stop" ||
+                data.includes('"usage"') ||
+                data.includes('"stop_reason"') ||
+                data.includes('"tool_use"')
+              : !lastChunkId ||
+                data.includes('"usage"') ||
+                data.includes('"finish_reason"') ||
+                data.includes('"tool_calls"'));
+
+          if (needsMetaParse) {
+            try {
+              const parsed = JSON.parse(data);
+              const sseErr = extractSSEErrorMessage(event, parsed);
+              if (sseErr) {
+                streamFailure = sseErr;
+                return;
+              }
+              if (upstreamFormat === "anthropic") {
+                const type = parsed.type || event;
+                if (type === "message_start" && parsed.message?.usage) {
+                  promptTokens = parsed.message.usage.input_tokens ?? promptTokens;
+                  cachedTokens =
+                    parsed.message.usage.cache_read_input_tokens ?? cachedTokens;
+                } else if (type === "content_block_start" && parsed.content_block?.type === "tool_use") {
+                  sawToolCalls = true;
+                } else if (type === "message_delta") {
+                  if (parsed.usage) {
+                    completionTokens = parsed.usage.output_tokens ?? completionTokens;
+                  }
+                  if (parsed.delta?.stop_reason) {
+                    sawStopReason = true;
+                  }
+                } else if (type === "message_stop") {
+                  sawMessageStop = true;
+                }
+              } else {
+                if (!lastChunkId && parsed.id) lastChunkId = String(parsed.id);
+                if (parsed.model) lastChunkModel = String(parsed.model);
+                if (typeof parsed.created === "number") lastChunkCreated = parsed.created;
+                const c0 = parsed.choices?.[0];
+                if (c0?.delta?.tool_calls?.length) sawToolCalls = true;
+                if (c0?.finish_reason) sawFinishReason = true;
+                if (parsed.usage) {
+                  promptTokens = parsed.usage.prompt_tokens ?? promptTokens;
+                  completionTokens = parsed.usage.completion_tokens ?? completionTokens;
+                  cachedTokens =
+                    parsed.usage.prompt_tokens_details?.cached_tokens ??
+                    parsed.usage.cached_tokens ??
+                    cachedTokens;
+                }
+              }
+            } catch {
+              if (event === "error") {
+                streamFailure = data.slice(0, 500);
+                return;
+              }
+            }
+          }
+
+          upstreamDataSeen = true;
+          const frame =
+            event && event !== "message"
+              ? `event: ${event}\ndata: ${data}\n\n`
+              : `data: ${data}\n\n`;
+          writeToClient(frame);
+        });
+
+        try {
+          while (true) {
+            if (isClientAborted()) {
+              await reader.cancel().catch(() => {});
+              return {
+                failedBeforeFirstByte: !firstByteSent,
+                abortedByClient: true,
+                midStreamError: false,
+                error: "Client disconnected",
+                promptTokens,
+                completionTokens,
+                cachedTokens
+              };
+            }
+
+            const { value, done } = await reader.read();
+            if (done) {
+              const rem = decoder.decode();
+              if (rem) {
+                if (!upstreamDataSeen && rawPreFrameBuf.length < 16384) rawPreFrameBuf += rem;
+                passthroughParser.feed(rem);
+              }
+              passthroughParser.flush();
+              break;
+            }
+
+            if (value && value.length > 0) {
+              clearTtfbTimer();
+              resetIdleTimer();
+              const textChunk = decoder.decode(value, { stream: true });
+              if (!upstreamDataSeen && rawPreFrameBuf.length < 16384) {
+                rawPreFrameBuf += textChunk.slice(0, 16384 - rawPreFrameBuf.length);
+              }
+              passthroughParser.feed(textChunk);
+              if (streamFailure) {
+                await abortOnInBandError();
+                break;
+              }
+            }
+          }
+
+          if (!streamFailure && !upstreamDataSeen && rawPreFrameBuf.trim().startsWith("{")) {
+            try {
+              const rawErrObj = JSON.parse(rawPreFrameBuf.trim());
+              const rawErr = extractSSEErrorMessage("", rawErrObj);
+              if (rawErr) streamFailure = rawErr;
+            } catch {
+              // ignore non-JSON body
+            }
+          }
+
+          if (streamFailure) {
+            return finalizeStreamFailure(streamFailure);
+          }
+
+          if (!upstreamDataSeen) {
+            return finalizeStreamFailure("Upstream SSE stream ended with no data");
+          }
+
+          if (upstreamFormat === "openai") {
+            if (!sawFinishReason) {
+              writeToClient(
+                `data: ${JSON.stringify({
+                  id: lastChunkId || fallbackChunkId,
+                  object: "chat.completion.chunk",
+                  created: lastChunkCreated || Math.floor(Date.now() / 1000),
+                  model: lastChunkModel || requestedModel,
+                  choices: [
+                    {
+                      index: 0,
+                      delta: {},
+                      finish_reason: sawToolCalls ? "tool_calls" : "stop"
+                    }
+                  ]
+                })}\n\n`
+              );
+            }
+            if (!sawDone) {
+              writeToClient("data: [DONE]\n\n");
+            }
+          } else if (upstreamFormat === "anthropic" && !sawMessageStop) {
+            if (!sawStopReason) {
+              writeToClient(
+                `event: message_delta\ndata: ${JSON.stringify({
+                  type: "message_delta",
+                  delta: {
+                    stop_reason: sawToolCalls ? "tool_use" : "end_turn",
+                    stop_sequence: null
+                  },
+                  usage: { output_tokens: completionTokens }
+                })}\n\n`
+              );
+            }
+            writeToClient(
+              `event: message_stop\ndata: ${JSON.stringify({ type: "message_stop" })}\n\n`
+            );
+          }
+
+          return {
+            failedBeforeFirstByte: false,
+            abortedByClient: false,
+            midStreamError: false,
+            promptTokens,
+            completionTokens,
+            cachedTokens
+          };
+        } catch (err) {
+          return handleStreamCatch(err, "Upstream SSE stream interrupted");
+        }
+      }
+
+      // Translated SSE (Anthropic <-> OpenAI or -> OpenAI Responses)
+      const transformer = createStreamTransformer(
+        clientFormat,
+        upstreamFormat,
+        requestedModel
+      );
+
+      let doneSeen = false;
+      let streamFailure = "";
+      const sseParser = createSSEParser(({ event, data }) => {
+        if (streamFailure || !data) return;
+        if (data === "[DONE]") {
+          if (!upstreamDataSeen) return;
+          doneSeen = true;
+          const tail = transformer.finalize();
+          if (tail) writeToClient(tail);
+          return;
+        }
+        try {
+          const parsed = JSON.parse(data);
+          const sseErr = extractSSEErrorMessage(event, parsed);
+          if (sseErr) {
+            streamFailure = sseErr;
+            return;
+          }
+          upstreamDataSeen = true;
+          if (transformer.mode === "openai") {
+            const out = transformer.pushChunk(parsed);
+            if (out) writeToClient(out);
+          } else {
+            const out = transformer.pushEvent(event, parsed);
+            if (out) writeToClient(out);
+            if ((parsed.type || event) === "message_stop") {
+              doneSeen = true;
+            }
+          }
+        } catch {
+          if (event === "error") {
+            streamFailure = data.slice(0, 500);
+          }
+        }
+      });
+
+      try {
+        while (true) {
+          if (isClientAborted()) {
+            await reader.cancel().catch(() => {});
+            const usage = transformer.getUsage();
+            promptTokens = usage.promptTokens;
+            completionTokens = usage.completionTokens;
+            return {
+              failedBeforeFirstByte: !firstByteSent,
+              abortedByClient: true,
+              midStreamError: false,
+              error: "Client disconnected",
+              promptTokens,
+              completionTokens,
+              cachedTokens
+            };
+          }
+
+          const { value, done } = await reader.read();
+          if (done) {
+            const rem = decoder.decode();
+            if (rem) sseParser.feed(rem);
+            sseParser.flush();
+            if (!streamFailure && !doneSeen && upstreamDataSeen) {
+              const tail = transformer.finalize();
+              if (tail) writeToClient(tail);
+            }
+            break;
+          }
+
+          if (value && value.length > 0) {
+            clearTtfbTimer();
+            resetIdleTimer();
+            sseParser.feed(decoder.decode(value, { stream: true }));
+            if (streamFailure) {
+              await abortOnInBandError();
+              break;
+            }
+          }
+        }
+
+        const usage = transformer.getUsage();
+        promptTokens = usage.promptTokens;
+        completionTokens = usage.completionTokens;
+
+        if (streamFailure) {
+          return finalizeStreamFailure(streamFailure);
+        }
+
+        if (!upstreamDataSeen) {
+          return finalizeStreamFailure("Upstream SSE stream ended with no events");
+        }
+
+        return {
+          failedBeforeFirstByte: false,
+          abortedByClient: false,
+          midStreamError: false,
+          promptTokens,
+          completionTokens,
+          cachedTokens
+        };
+      } catch (err) {
+        const usage = transformer.getUsage();
+        promptTokens = usage.promptTokens;
+        completionTokens = usage.completionTokens;
+        return handleStreamCatch(err, "Upstream SSE stream interrupted");
+      }
+    } finally {
+      stopTimers();
     }
   }
 }

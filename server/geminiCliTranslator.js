@@ -875,17 +875,21 @@ export function mapFinishReason(reason) {
 /**
  * Convert one Cloud Code / Gemini candidate into OpenAI `choices[0]` pieces.
  * @param {any} candidate
- * @returns {{ text: string, toolCalls: any[], finishReason: string }}
+ * @returns {{ text: string, reasoning: string, toolCalls: any[], finishReason: string }}
  */
 export function candidateToOpenAIParts(candidate) {
   const parts = Array.isArray(candidate?.content?.parts) ? candidate.content.parts : [];
   let text = "";
+  let reasoning = "";
   const toolCalls = [];
   let index = 0;
 
   for (const part of parts) {
     if (!part || typeof part !== "object") continue;
-    if (typeof part.text === "string" && !part.thought) text += part.text;
+    if (typeof part.text === "string") {
+      if (part.thought) reasoning += part.text;
+      else text += part.text;
+    }
     if (part.functionCall?.name) {
       // Keep Google's id when it sends one, so the result pairs with the same call next turn.
       const upstreamId = typeof part.functionCall.id === "string" ? part.functionCall.id.trim() : "";
@@ -903,6 +907,7 @@ export function candidateToOpenAIParts(candidate) {
 
   return {
     text,
+    reasoning,
     toolCalls,
     finishReason: mapFinishReason(candidate?.finishReason)
   };
@@ -1010,10 +1015,11 @@ export function aggregateCloudCodeStream(text) {
 export function cloudCodeToOpenAIResponse(data, model) {
   const payload = unwrapCloudCodeResponse(data);
   const candidate = Array.isArray(payload?.candidates) ? payload.candidates[0] : null;
-  const { text, toolCalls, finishReason } = candidateToOpenAIParts(candidate);
+  const { text, reasoning, toolCalls, finishReason } = candidateToOpenAIParts(candidate);
   const usage = payload?.usageMetadata || {};
 
   const message = { role: "assistant", content: text || (toolCalls.length ? null : "") };
+  if (reasoning) message.reasoning_content = reasoning;
   if (toolCalls.length) message.tool_calls = toolCalls.map(({ index, ...rest }) => rest);
 
   return {
@@ -1044,19 +1050,22 @@ export function cloudCodeToOpenAIResponse(data, model) {
  * @param {any} data
  * @param {string} model
  * @param {string} id
+ * @param {{ hasPriorToolCalls?: boolean }} [opts]
  * @returns {any | null}
  */
-export function cloudCodeChunkToOpenAI(data, model, id) {
+export function cloudCodeChunkToOpenAI(data, model, id, opts = {}) {
   const payload = unwrapCloudCodeResponse(data);
   const candidate = Array.isArray(payload?.candidates) ? payload.candidates[0] : null;
   if (!candidate) return null;
 
-  const { text, toolCalls, finishReason } = candidateToOpenAIParts(candidate);
+  const { text, reasoning, toolCalls, finishReason } = candidateToOpenAIParts(candidate);
   const delta = {};
+  if (reasoning) delta.reasoning_content = reasoning;
   if (text) delta.content = text;
   if (toolCalls.length) delta.tool_calls = toolCalls;
   if (!Object.keys(delta).length && !candidate.finishReason) return null;
 
+  const hasTools = toolCalls.length > 0 || Boolean(opts?.hasPriorToolCalls);
   return {
     id,
     object: "chat.completion.chunk",
@@ -1066,7 +1075,7 @@ export function cloudCodeChunkToOpenAI(data, model, id) {
       {
         index: 0,
         delta,
-        finish_reason: candidate.finishReason ? (toolCalls.length ? "tool_calls" : finishReason) : null
+        finish_reason: candidate.finishReason ? (hasTools ? "tool_calls" : finishReason) : null
       }
     ]
   };

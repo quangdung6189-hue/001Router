@@ -315,8 +315,10 @@ export function PlaygroundPage() {
       let promptTok = 0;
       let compTok = 0;
       let currentEvent = '';
+      let streamErrorDetected = false;
 
       const processSseLine = (line) => {
+        if (streamErrorDetected) return;
         if (!line.trim()) {
           currentEvent = '';
           return;
@@ -334,6 +336,15 @@ export function PlaygroundPage() {
 
           if (format === 'anthropic') {
             const evType = payload.type || currentEvent;
+            if (evType === 'error' || payload.error) {
+              streamErrorDetected = true;
+              setErrorMsg(
+                payload.error?.message ||
+                  (typeof payload.error === 'string' ? payload.error : payload.message) ||
+                  'Upstream streaming error'
+              );
+              return;
+            }
             if (evType === 'message_start' && payload.message?.usage) {
               promptTok = payload.message.usage.input_tokens || promptTok;
             } else if (evType === 'content_block_delta') {
@@ -349,15 +360,16 @@ export function PlaygroundPage() {
               }
             } else if (evType === 'message_delta' && payload.usage) {
               compTok = payload.usage.output_tokens || compTok;
-            } else if (evType === 'error') {
-              setErrorMsg(payload.error?.message || 'Upstream streaming error');
             }
           } else {
-            if (payload.error) {
+            if (currentEvent === 'error' || payload.error) {
+              streamErrorDetected = true;
               setErrorMsg(
                 payload.error?.message ||
-                  (typeof payload.error === 'string' ? payload.error : 'Upstream streaming error')
+                  (typeof payload.error === 'string' ? payload.error : payload.message) ||
+                  'Upstream streaming error'
               );
+              return;
             }
             const delta = payload.choices?.[0]?.delta;
             if (delta?.content) {
@@ -377,7 +389,10 @@ export function PlaygroundPage() {
             }
           }
         } catch {
-          // Ignore partial non-JSON lines
+          if (currentEvent === 'error') {
+            streamErrorDetected = true;
+            setErrorMsg(payloadStr || 'Upstream streaming error');
+          }
         }
       };
 
@@ -397,8 +412,14 @@ export function PlaygroundPage() {
 
         for (const line of lines) {
           processSseLine(line);
+          if (streamErrorDetected) break;
         }
         setRawEvents(accRaw);
+        if (streamErrorDetected) {
+          await reader.cancel().catch(() => {});
+          controller.abort();
+          return;
+        }
       }
 
       if (!isCurrent()) return;
@@ -410,9 +431,14 @@ export function PlaygroundPage() {
       if (buffer.trim()) {
         for (const line of buffer.split(/\r?\n/)) {
           processSseLine(line);
+          if (streamErrorDetected) break;
         }
       }
       setRawEvents(accRaw);
+      if (streamErrorDetected) {
+        controller.abort();
+        return;
+      }
 
       const totalMs = Math.round(performance.now() - startTime);
       const logExtra = await fetchLatestLogMetrics(activeModel);

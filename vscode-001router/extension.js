@@ -2297,78 +2297,116 @@ class Router001Controller {
         const reader = resp.body.getReader();
         const decoder = new TextDecoder("utf-8");
         let buffer = "";
+        let currentEvent = "";
         let roundText = "";
         let currentPhase = "analyzing";
         const toolCallMap = new Map();
 
-        while (true) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
+        const processStreamLine = (rawLine) => {
+          const line = rawLine.trim();
+          if (!line) {
+            currentEvent = "";
+            return;
+          }
+          if (line.startsWith(":")) return;
+          if (line.startsWith("event:")) {
+            currentEvent = line.slice(6).trim();
+            return;
+          }
+          if (!line.startsWith("data:")) return;
+          const payloadStr = line.slice(5).trim();
+          if (!payloadStr || payloadStr === "[DONE]") return;
+          let parsed;
+          try {
+            parsed = JSON.parse(payloadStr);
+          } catch {
+            if (currentEvent === "error") {
+              throw new Error(payloadStr || "Upstream streaming error");
+            }
+            return;
+          }
+          if (currentEvent === "error" || parsed?.error) {
+            const errMsg =
+              parsed?.error?.message ||
+              (typeof parsed?.error === "string" ? parsed.error : parsed?.message) ||
+              "Upstream streaming error";
+            throw new Error(errMsg);
+          }
+          const choice = parsed?.choices?.[0];
+          const delta = choice?.delta || {};
 
-          let newlineIdx;
-          while ((newlineIdx = buffer.indexOf("\n")) !== -1) {
-            const line = buffer.slice(0, newlineIdx).trim();
-            buffer = buffer.slice(newlineIdx + 1);
-            if (!line || !line.startsWith("data:")) continue;
-            const payloadStr = line.slice(5).trim();
-            if (payloadStr === "[DONE]") continue;
-            try {
-              const parsed = JSON.parse(payloadStr);
-              const choice = parsed?.choices?.[0];
-              const delta = choice?.delta || {};
-
-              if (Array.isArray(delta.tool_calls)) {
-                for (const tc of delta.tool_calls) {
-                  const tcIdx = typeof tc.index === "number" ? tc.index : 0;
-                  let entry = toolCallMap.get(tcIdx);
-                  if (!entry) {
-                    entry = {
-                      id: tc.id || `call_${round}_${tcIdx}`,
-                      type: "function",
-                      function: { name: "", arguments: "" }
-                    };
-                    toolCallMap.set(tcIdx, entry);
-                  }
-                  if (tc.id) entry.id = tc.id;
-                  if (tc.function?.name) entry.function.name += tc.function.name;
-                  if (typeof tc.function?.arguments === "string") {
-                    entry.function.arguments += tc.function.arguments;
-                  }
-                }
+          if (Array.isArray(delta.tool_calls)) {
+            for (const tc of delta.tool_calls) {
+              const tcIdx = typeof tc.index === "number" ? tc.index : 0;
+              let entry = toolCallMap.get(tcIdx);
+              if (!entry) {
+                entry = {
+                  id: tc.id || `call_${round}_${tcIdx}`,
+                  type: "function",
+                  function: { name: "", arguments: "" }
+                };
+                toolCallMap.set(tcIdx, entry);
               }
-
-              const chunkText = typeof delta.content === "string" ? delta.content : "";
-              const chunkReason =
-                typeof delta.reasoning_content === "string"
-                  ? delta.reasoning_content
-                  : typeof delta.reasoning === "string"
-                    ? delta.reasoning
-                    : "";
-
-              if (chunkText || chunkReason) {
-                const nextPhase = chunkText ? "streaming" : "thinking";
-                currentPhase = nextPhase;
-                roundText += chunkText;
-                contentAcc += chunkText;
-                reasoningAcc += chunkReason;
-                this.postToAll({
-                  type: "streamDelta",
-                  sessionId: session.id,
-                  messageId: assistantMsg.id,
-                  deltaText: chunkText,
-                  deltaReasoning: chunkReason,
-                  phase: currentPhase
-                });
-              } else if (parsed?.error) {
-                throw new Error(parsed.error.message || parsed.error);
-              }
-            } catch (parseErr) {
-              if (parseErr instanceof Error && parseErr.message && !parseErr.message.includes("JSON")) {
-                throw parseErr;
+              if (tc.id) entry.id = tc.id;
+              if (tc.function?.name) entry.function.name += tc.function.name;
+              if (typeof tc.function?.arguments === "string") {
+                entry.function.arguments += tc.function.arguments;
               }
             }
           }
+
+          const chunkText = typeof delta.content === "string" ? delta.content : "";
+          const chunkReason =
+            typeof delta.reasoning_content === "string"
+              ? delta.reasoning_content
+              : typeof delta.reasoning === "string"
+                ? delta.reasoning
+                : "";
+
+          if (chunkText || chunkReason) {
+            const nextPhase = chunkText ? "streaming" : "thinking";
+            currentPhase = nextPhase;
+            roundText += chunkText;
+            contentAcc += chunkText;
+            reasoningAcc += chunkReason;
+            this.postToAll({
+              type: "streamDelta",
+              sessionId: session.id,
+              messageId: assistantMsg.id,
+              deltaText: chunkText,
+              deltaReasoning: chunkReason,
+              phase: currentPhase
+            });
+          }
+        };
+
+        try {
+          while (true) {
+            const { value, done } = await reader.read();
+            if (done) {
+              const rem = decoder.decode();
+              if (rem) buffer += rem;
+              if (buffer.trim()) {
+                for (const trailingLine of buffer.split(/\r?\n/)) {
+                  processStreamLine(trailingLine);
+                }
+                buffer = "";
+              }
+              break;
+            }
+            buffer += decoder.decode(value, { stream: true });
+
+            let newlineIdx;
+            while ((newlineIdx = buffer.indexOf("\n")) !== -1) {
+              const rawLine = buffer.slice(0, newlineIdx);
+              buffer = buffer.slice(newlineIdx + 1);
+              processStreamLine(rawLine);
+            }
+          }
+        } catch (streamErr) {
+          await reader.cancel().catch(() => {});
+          controller.abort();
+          throw streamErr;
         }
 
         const pendingToolCalls = Array.from(toolCallMap.entries())
