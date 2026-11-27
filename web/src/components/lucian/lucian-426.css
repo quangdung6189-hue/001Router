@@ -1,0 +1,102 @@
+/* Lucian UX/UI Prompt #426 · MIT License (c) 2026 Seokwoooo · https://lucianlabs.dev/uxui-prompt/#426 */
+/* Adapted: responsive 2/4-column grid of glass cells instead of a fixed 324px card; digit row height
+   is a variable (30px → 36px on wider screens). Odometer roll curve, duration and stagger unchanged. */
+.u426 {
+  --h: 30px;
+  --fs: 24px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  color: var(--ux-ink);
+}
+@media (min-width: 640px) {
+  .u426 {
+    --h: 36px;
+    --fs: 30px;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
+.u426-c {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 18px 8px 16px;
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--ux-surface) 72%, transparent);
+  box-shadow: 0 0 0 1px var(--ux-line), 0 1px 2px var(--ux-shadow), 0 20px 40px -26px var(--ux-shadow-strong);
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
+  cursor: default;
+  overflow: hidden;
+  transition: transform 0.45s var(--ux-spring), box-shadow 0.3s;
+}
+.u426-c::after {
+  content: '';
+  position: absolute;
+  left: 20%;
+  right: 20%;
+  top: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--ux-accent) 70%, transparent), transparent);
+}
+.u426-c:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--ux-accent) 40%, transparent), 0 1px 2px var(--ux-shadow),
+    0 24px 44px -24px color-mix(in srgb, var(--ux-accent) 45%, transparent);
+}
+
+.u426-n {
+  display: flex;
+  align-items: center;
+  height: var(--h);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: var(--fs);
+  line-height: var(--h);
+  font-weight: 850;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+  color: var(--ux-accent);
+}
+.u426-n i {
+  font-style: normal;
+}
+
+.u426-col {
+  display: block;
+  height: var(--h);
+  overflow: hidden;
+}
+.u426-col > span {
+  display: flex;
+  flex-direction: column;
+  transform: translateY(calc(var(--d, 0) * -1 * var(--h)));
+  transition: transform 1.3s cubic-bezier(0.25, 1.12, 0.4, 1);
+  transition-delay: calc(var(--k, 0) * 70ms);
+}
+.u426-col b {
+  display: block;
+  height: var(--h);
+  padding: 0 0.5px;
+  font-weight: inherit;
+  text-align: center;
+}
+.u426-c small {
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--ux-ink-2);
+  text-align: center;
+}
+@media (prefers-reduced-motion: reduce) {
+  .u426-col > span {
+    transition: none !important;
+  }
+  .u426-c {
+    transition: none;
+  }
+}

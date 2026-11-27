@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react';
+import { LucianAuroraBackdrop } from './LucianAuroraBackdrop';
 import './LucianGridBeamHero.css';
 
 const BEAM_COLORS = ['229,106,74', '245,158,11', '52,211,153'];
@@ -8,7 +9,7 @@ const GRID_STEP = 40;
  * Port of Lucian UX/UI #226 (Grid-beam hero background) adapted to 001Router's palette.
  * Glides photonic beams along grid lines and lights up the grid around the cursor.
  */
-export function LucianGridBeamHero({ children, className = '' }) {
+export function LucianGridBeamHero({ children, className = '', aurora = false }) {
   const rootRef = useRef(null);
   const canvasRef = useRef(null);
 
@@ -169,6 +170,7 @@ export function LucianGridBeamHero({ children, className = '' }) {
 
   return (
     <section ref={rootRef} className={`lucian-hero-stage ${className}`.trim()}>
+      {aurora ? <LucianAuroraBackdrop /> : null}
       <div className="lucian-hero-grid" aria-hidden="true" />
       <div className="lucian-hero-grid-lit" aria-hidden="true" />
       <canvas ref={canvasRef} className="lucian-hero-canvas" aria-hidden="true" />

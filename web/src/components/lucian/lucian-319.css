@@ -1,0 +1,39 @@
+/* Lucian UX/UI Prompt #319 · MIT License (c) 2026 Seokwoooo · https://lucianlabs.dev/uxui-prompt/#319 */
+/* Adapted: full-bleed hero backdrop (no fixed 340px size, no palette picker), 001Router brand palette,
+   theme-aware opacity. Canvas, blur, grain and motion values unchanged. */
+.u319 {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  border-radius: inherit;
+  opacity: 0.62;
+  transition: opacity 0.6s ease;
+}
+
+:root[data-theme='light'] .u319 {
+  opacity: 0.4;
+}
+
+.u319 canvas {
+  position: absolute;
+  inset: -8%;
+  width: 116%;
+  height: 116%;
+  filter: blur(18px) saturate(1.15);
+}
+
+.u319-gr {
+  position: absolute;
+  inset: 0;
+  opacity: 0.16;
+  mix-blend-mode: overlay;
+  pointer-events: none;
+}
+
+.u319-fade {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(180deg, transparent 45%, var(--bg-card) 100%);
+  pointer-events: none;
+}

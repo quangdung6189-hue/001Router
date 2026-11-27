@@ -29,9 +29,13 @@ import { ProviderLogo } from '../components/ProviderLogo';
 import { CopyButton } from '../components/CopyButton';
 import { LucianMagneticButton } from '../components/lucian/LucianMagneticButton';
 import { LucianGlowGrid, LucianGlowCard } from '../components/lucian/LucianGlowGrid';
-import { LucianGradientText } from '../components/lucian/LucianGradientText';
 import { LucianSlidingTabs } from '../components/lucian/LucianSlidingTabs';
 import { LucianGridBeamHero } from '../components/lucian/LucianGridBeamHero';
+import {
+  LucianReleasePill,
+  LucianWordRiseHeadline,
+} from '../components/lucian/LucianWordRiseHeadline';
+import { LucianOdometerStats } from '../components/lucian/LucianOdometerStats';
 import { LucianLogoMarquee } from '../components/lucian/LucianLogoMarquee';
 import { LucianSpotlightCta } from '../components/lucian/LucianSpotlightCta';
 import './LandingPage.css';
@@ -55,6 +59,13 @@ const MARQUEE_PROVIDERS = [
   { preset: 'claude', name: 'Claude Code' },
   { preset: 'cursor', name: 'Cursor' },
   { preset: 'codex', name: 'Codex CLI' },
+];
+
+const HERO_STATS = [
+  { value: '47+', label: 'AI Providers' },
+  { value: '9', label: 'Unified Service Kinds' },
+  { value: '470+', label: 'Cataloged AI Models' },
+  { value: '3-Tier', label: 'Smart Auto Failover' },
 ];
 
 const SERVICE_KINDS = [
@@ -441,28 +452,24 @@ claude`,
 
       <main className="mx-auto max-w-7xl space-y-20 px-4 py-8 sm:px-6 sm:py-12 lg:px-8">
         {/* 1. HERO SECTION WITH LUCIAN #226 GRID-BEAM STAGE & #216 STAGGERED ENTRANCE */}
-        <LucianGridBeamHero className="px-5 py-12 text-center sm:px-10 sm:py-16">
+        <LucianGridBeamHero aurora className="landing-hero-shell px-5 py-14 text-center sm:px-10 sm:py-20">
           <div className="mx-auto max-w-4xl">
-            <div
-              className="landing-hero-stagger inline-flex items-center gap-2 rounded-full border border-[#E56A4A]/35 bg-[#E56A4A]/10 px-3.5 py-1 text-xs font-semibold text-[#E56A4A]"
-              style={{ '--stagger': 0 }}
-            >
-              <Sparkles className="h-3.5 w-3.5" aria-hidden="true" />
-              Smart AI Router · OpenAI &amp; Anthropic Compatible · 47+ Providers
-            </div>
+            {/* Lucian #419: release pill + word-by-word rising headline */}
+            <LucianReleasePill tag="v2.0">
+              Smart AI Router · OpenAI &amp; Anthropic Compatible
+            </LucianReleasePill>
 
-            <h1
-              className="landing-hero-stagger landing-hero-title mt-6 font-extrabold tracking-tight"
-              style={{ '--stagger': 1 }}
-            >
-              One Router.{' '}
-              <LucianGradientText>47+ AI Providers.</LucianGradientText>{' '}
-              Zero Downtime.
-            </h1>
+            <LucianWordRiseHeadline
+              className="landing-hero-title mt-6 font-extrabold"
+              lines={[
+                [{ text: 'One Router.' }, { text: '47+ AI Providers.', gradient: true }],
+                [{ text: 'Zero Downtime.' }],
+              ]}
+            />
 
             <p
-              className="landing-hero-stagger landing-copy mx-auto mt-5 text-base text-[var(--text-secondary)] sm:text-lg"
-              style={{ '--stagger': 2 }}
+              className="landing-hero-stagger landing-copy mx-auto mt-6 text-base text-[var(--text-secondary)] sm:text-lg"
+              style={{ '--stagger': 7 }}
             >
               Connect Claude Code, Codex, Cursor, Cline, Roo Code, and Windsurf to 47+ AI
               providers and 470+ models through a single unified endpoint. Smart 3-tier failover
@@ -473,10 +480,11 @@ claude`,
 
             {/* Quick Endpoint & Action Bar */}
             <div
-              className="landing-hero-stagger mx-auto mt-8 flex max-w-xl flex-wrap items-center justify-center gap-3"
-              style={{ '--stagger': 3 }}
+              className="landing-hero-stagger mx-auto mt-9 flex max-w-xl flex-wrap items-center justify-center gap-3"
+              style={{ '--stagger': 8 }}
             >
-              <div className="flex min-w-[260px] flex-1 items-center justify-between gap-2 rounded-xl border border-[var(--border-strong)] bg-[var(--bg-main)]/85 px-4 py-2.5 shadow-sm backdrop-blur-sm">
+              <div className="landing-endpoint-bar flex min-w-[260px] flex-1 items-center justify-between gap-2 rounded-xl px-4 py-2.5 backdrop-blur-md">
+                <span className="landing-live-dot" aria-hidden="true" />
                 <div className="flex items-center gap-2 overflow-hidden">
                   <Terminal className="h-4 w-4 shrink-0 text-[#E56A4A]" aria-hidden="true" />
                   <code className="truncate font-mono text-xs text-[var(--text-primary)] sm:text-sm">
@@ -489,29 +497,9 @@ claude`,
               <LucianMagneticButton to="/" label="Open Dashboard" activeLabel="Launching…" />
             </div>
 
-            {/* 4 Hero Stat Counters */}
-            <div
-              className="landing-hero-stagger mt-10 grid grid-cols-2 gap-3.5 sm:grid-cols-4"
-              style={{ '--stagger': 4 }}
-            >
-              {[
-                { value: '47+', label: 'AI Providers' },
-                { value: '9', label: 'Unified Service Kinds' },
-                { value: '470+', label: 'Cataloged AI Models' },
-                { value: '3-Tier', label: 'Smart Auto Failover' },
-              ].map((st) => (
-                <div
-                  key={st.label}
-                  className="r-card-subtle border border-[var(--border-subtle)] bg-[var(--bg-main)]/75 p-4 backdrop-blur-sm"
-                >
-                  <div className="font-mono text-2xl font-extrabold text-[#E56A4A] sm:text-3xl">
-                    {st.value}
-                  </div>
-                  <div className="mt-1 text-xs font-medium text-[var(--text-secondary)]">
-                    {st.label}
-                  </div>
-                </div>
-              ))}
+            {/* 4 Hero Stat Counters — Lucian #426 odometer */}
+            <div className="landing-hero-stagger mt-12" style={{ '--stagger': 9 }}>
+              <LucianOdometerStats items={HERO_STATS} />
             </div>
           </div>
         </LucianGridBeamHero>
