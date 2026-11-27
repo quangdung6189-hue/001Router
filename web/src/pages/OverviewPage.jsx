@@ -115,6 +115,22 @@ export function OverviewPage() {
       setProviders(provRes?.providers || []);
       setCombos(combosRes?.combos || []);
 
+      if (keysRes?.initialRevealAvailable) {
+        keysApi
+          .revealInitial()
+          .then((res) => {
+            const revealedObj =
+              typeof res?.key === 'string'
+                ? { id: res.id, name: res.name, key: res.key, keyPreview: res.keyPreview }
+                : res?.key;
+            if (res?.revealed && revealedObj?.key) {
+              rememberRouterKey(revealedObj);
+              setInitialRevealedKey(revealedObj.key);
+            }
+          })
+          .catch(() => {});
+      }
+
       if (settingsRes) {
         const s = settingsRes.settings || {};
         setSettingsState({
@@ -134,15 +150,6 @@ export function OverviewPage() {
 
   useEffect(() => {
     loadAll();
-    keysApi
-      .revealInitial()
-      .then((res) => {
-        if (res?.revealed && res?.key?.key) {
-          rememberRouterKey(res.key);
-          setInitialRevealedKey(res.key.key);
-        }
-      })
-      .catch(() => {});
 
     return () => {
       if (pollTimerRef.current) clearInterval(pollTimerRef.current);

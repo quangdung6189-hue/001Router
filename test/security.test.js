@@ -258,6 +258,12 @@ describe("001Router Section 9.8 Security Hardening Test Suite", () => {
   });
 
   it("5. stores router keys as SHA-256 hashes, reveals initial key once, and shows new key once on creation", async () => {
+    // 0. GET /api/keys advertises initialRevealAvailable=true before consumption
+    const preListRes = await apiFetch("/api/keys");
+    assert.equal(preListRes.status, 200);
+    const preListData = await preListRes.json();
+    assert.equal(preListData.initialRevealAvailable, true);
+
     // 1. One-time initial key reveal succeeds on first call
     const reveal1 = await apiFetch("/api/keys/reveal-initial");
     assert.equal(reveal1.status, 200);
@@ -273,6 +279,12 @@ describe("001Router Section 9.8 Security Hardening Test Suite", () => {
     const reveal2Data = await reveal2.json();
     assert.equal(reveal2Data.revealed, false);
     assert.equal(reveal2Data.key, null);
+
+    // 2b. GET /api/keys now advertises initialRevealAvailable=false
+    const postListRes = await apiFetch("/api/keys");
+    assert.equal(postListRes.status, 200);
+    const postListData = await postListRes.json();
+    assert.equal(postListData.initialRevealAvailable, false);
 
     // 3. Create a new router key: full plaintext key returned ONCE on POST /api/keys
     const createKeyRes = await apiFetch("/api/keys", {

@@ -5117,7 +5117,10 @@ export function createDashboardRouter(storage, liveEvents = null) {
   // --- Router API Keys ---
 
   router.get("/keys", (_req, res) => {
-    return res.json({ keys: storage.getKeys().map(toPublicRouterKey) });
+    return res.json({
+      keys: storage.getKeys().map(toPublicRouterKey),
+      initialRevealAvailable: Boolean(storage.peekInitialRouterKey()?.key)
+    });
   });
 
   router.get("/keys/reveal-initial", (_req, res) => {
