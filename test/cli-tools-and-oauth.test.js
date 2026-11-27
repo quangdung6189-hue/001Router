@@ -668,8 +668,32 @@ describe("001Router CLI Tools 1-Click, OAuth 2.0 / Device Code Flows & /v1/respo
     );
     assert.equal(writtenCodexAuth.OPENAI_API_KEY, routerKey);
 
-    // Reset claude, codex, continue, and opencode; verify exact restoration & cleanup
-    for (const tool of ["claude", "codex", "continue", "opencode"]) {
+    // Verify Cline v4 globalState.json + secrets.json + settings/providers.json
+    const writtenClineState = JSON.parse(
+      await fs.readFile(path.join(cliHomeDir, ".cline", "data", "globalState.json"), "utf8")
+    );
+    assert.equal(writtenClineState.apiProvider, "openai");
+    assert.equal(writtenClineState.planModeApiProvider, "openai");
+    assert.equal(writtenClineState.actModeApiProvider, "openai");
+    assert.equal(writtenClineState.openAiBaseUrl, "http://127.0.0.1:20128/v1");
+    assert.equal(writtenClineState.planModeOpenAiModelId, "openai/gpt-5.4");
+    assert.equal(writtenClineState.actModeOpenAiModelId, "openai/gpt-5.4");
+
+    const writtenClineSecrets = JSON.parse(
+      await fs.readFile(path.join(cliHomeDir, ".cline", "data", "secrets.json"), "utf8")
+    );
+    assert.equal(writtenClineSecrets.openAiApiKey, routerKey);
+
+    const writtenClineProviders = JSON.parse(
+      await fs.readFile(path.join(cliHomeDir, ".cline", "data", "settings", "providers.json"), "utf8")
+    );
+    assert.equal(writtenClineProviders.lastUsedProvider, "openai-compatible");
+    assert.equal(writtenClineProviders.providers["openai-compatible"].settings.apiKey, routerKey);
+    assert.equal(writtenClineProviders.providers["openai-compatible"].settings.baseUrl, "http://127.0.0.1:20128/v1");
+    assert.equal(writtenClineProviders.providers["openai-compatible"].settings.model, "openai/gpt-5.4");
+
+    // Reset claude, codex, continue, opencode, and cline; verify exact restoration & cleanup
+    for (const tool of ["claude", "codex", "continue", "opencode", "cline"]) {
       const resetRes = await apiFetch(`/api/cli-tools/${tool}/reset`, { method: "DELETE" });
       assert.equal(resetRes.status, 200);
     }
@@ -677,6 +701,7 @@ describe("001Router CLI Tools 1-Click, OAuth 2.0 / Device Code Flows & /v1/respo
     assert.equal(await fs.readFile(path.join(cliHomeDir, ".codex", "config.toml"), "utf8"), origCodexText);
     assert.equal(await fs.readFile(path.join(cliHomeDir, ".continue", "config.yaml"), "utf8"), origContinueYaml);
     await assert.rejects(() => fs.stat(path.join(cliHomeDir, ".config", "opencode", "opencode.json")));
+    await assert.rejects(() => fs.stat(path.join(cliHomeDir, ".cline", "data", "settings", "providers.json")));
 
     // Security scan across temp dir & server modules passes completely
     const scanReport = await runSecurityScan({

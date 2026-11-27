@@ -2041,4 +2041,103 @@ describe("001Router Backend & Gateway Test Suite", () => {
     assert.equal(o2c.translated.tools[0].name, "ping");
     assert.deepEqual(o2c.translated.tool_choice, { type: "auto" });
   });
+
+  // Scenario 18: Package / Token-Plan 403 error ("không nằm trong gói token") triggers model-scoped cooldown + auto fallback
+  it("18. falls back automatically when a provider key rejects a model as not in its token package, while preserving disabled-model/ACL blocks", async () => {
+    const pkgProvRes = await apiFetch("/api/providers", {
+      method: "POST",
+      body: {
+        preset: "deepseek",
+        name: "Package DeepSeek",
+        slug: "pkg-deepseek",
+        baseUrl: `${mock.baseUrl}/pkg-ds/v1`,
+        formatType: "openai",
+        apiKeys: [
+          { label: "pkg-only-ds", key: "sk-pkg-ds-only-1111", enabled: true }
+        ],
+        models: ["claude-fable-5.1", "deepseek-v4.1-flash"],
+        autoSyncModels: true
+      }
+    });
+    assert.equal(pkgProvRes.status, 201);
+    const pkgProv = (await pkgProvRes.json()).provider;
+
+    mock.reset();
+    mock.setHandler(({ url, body, res }) => {
+      if (url.startsWith("/pkg-ds/") && body?.model === "claude-fable-5.1") {
+        res.writeHead(403, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({
+            error: {
+              message: "Model claude-fable-5.1 không nằm trong gói token của key này.",
+              type: "api_error"
+            }
+          })
+        );
+        return true;
+      }
+      return false;
+    });
+
+    const chatRes = await fetch(`${baseUrl}/v1/chat/completions`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${defaultRouterKey}`
+      },
+      body: JSON.stringify({
+        model: "pkg-deepseek/claude-fable-5.1",
+        messages: [{ role: "user", content: "Package fallback check" }]
+      })
+    });
+    assert.equal(chatRes.status, 200);
+    const chatJson = await chatRes.json();
+    assert.ok(chatJson.choices?.[0]?.message?.content);
+    assert.ok(
+      mock.requests.length >= 2,
+      `Expected upstream fallback attempt after package 403, got ${mock.requests.length}`
+    );
+
+    // Key itself must NOT be put in whole-key cooldown for package-model 403 (only model-scoped cooldown!)
+    const afterList = await (await apiFetch("/api/providers")).json();
+    const updatedPkg = afterList.providers.find((p) => p.id === pkgProv.id);
+    assert.equal(updatedPkg.apiKeys[0].cooldownUntil, null);
+
+    // A supported model in the same key's package STILL works immediately on pkg-deepseek
+    mock.reset();
+    const directPkgRes = await fetch(`${baseUrl}/v1/chat/completions`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${defaultRouterKey}`
+      },
+      body: JSON.stringify({
+        model: "pkg-deepseek/gpt-4o",
+        messages: [{ role: "user", content: "Supported package model check" }]
+      })
+    });
+    assert.equal(directPkgRes.status, 200);
+    assert.equal(mock.requests[0].headers.authorization, "Bearer sk-pkg-ds-only-1111");
+
+    // Disabled model check MUST remain strictly enforced (never bypassed by package fallback)
+    await apiFetch("/api/models/disabled", {
+      method: "POST",
+      body: { provider: "pkg-deepseek", ids: ["deepseek-v4.1-flash"] }
+    });
+    const disabledRes = await fetch(`${baseUrl}/v1/chat/completions`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${defaultRouterKey}`
+      },
+      body: JSON.stringify({
+        model: "pkg-deepseek/deepseek-v4.1-flash",
+        messages: [{ role: "user", content: "Should remain blocked" }]
+      })
+    });
+    assert.equal(disabledRes.status, 403);
+    await apiFetch("/api/models/disabled?provider=pkg-deepseek&id=deepseek-v4.1-flash", {
+      method: "DELETE"
+    });
+  });
 });

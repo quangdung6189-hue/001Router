@@ -294,6 +294,7 @@ function getToolPaths(toolId, homeDir) {
       return {
         configPath: path.join(homeDir, ".cline", "data", "globalState.json"),
         secretsPath: path.join(homeDir, ".cline", "data", "secrets.json"),
+        providersPath: path.join(homeDir, ".cline", "data", "settings", "providers.json"),
         backupPath: path.join(homeDir, ".cline", "data", ".001router-backup.json"),
         dirPath: path.join(homeDir, ".cline")
       };
@@ -541,35 +542,79 @@ function inspectClineTool(homeDir, opts) {
   const paths = getToolPaths("cline", homeDir);
   const globalState = readJsonSafe(paths.configPath);
   const secrets = readJsonSafe(paths.secretsPath);
+  const providersJson = paths.providersPath
+    ? readJsonSafe(paths.providersPath)
+    : { exists: false, data: {} };
   const backupExists = fs.existsSync(paths.backupPath);
   const dirExists = fs.existsSync(paths.dirPath);
   const binaryInstalled = hasBinaryOnPath("cline", opts.envPath);
-  const configuredBaseUrl =
+
+  const providersMap =
+    providersJson.data?.providers && typeof providersJson.data.providers === "object"
+      ? providersJson.data.providers
+      : {};
+  const rawActiveProvider =
+    (typeof globalState.data?.actModeApiProvider === "string" &&
+      globalState.data.actModeApiProvider) ||
+    (typeof globalState.data?.planModeApiProvider === "string" &&
+      globalState.data.planModeApiProvider) ||
+    (typeof globalState.data?.apiProvider === "string" && globalState.data.apiProvider) ||
+    (typeof providersJson.data?.lastUsedProvider === "string" &&
+      providersJson.data.lastUsedProvider) ||
+    "";
+  const v4ProviderKey = rawActiveProvider === "openai" ? "openai-compatible" : rawActiveProvider;
+  const v4Settings =
+    (v4ProviderKey && providersMap[v4ProviderKey]?.settings) ||
+    providersMap["openai-compatible"]?.settings ||
+    {};
+
+  const routerOrigins = buildRouterOrigins(opts.port, opts.baseUrl);
+  const stateBaseUrl =
     typeof globalState.data?.openAiBaseUrl === "string"
       ? globalState.data.openAiBaseUrl
       : "";
-  const rawKey =
-    typeof secrets.data?.openAiApiKey === "string" ? secrets.data.openAiApiKey : "";
-  const model =
-    typeof globalState.data?.openAiModelId === "string" ? globalState.data.openAiModelId : "";
-  const routerOrigins = buildRouterOrigins(opts.port, opts.baseUrl);
-  const connected =
-    globalState.data?.apiProvider === "openai" &&
-    isLikelyRouterUrl(configuredBaseUrl, routerOrigins);
+  const v4BaseUrl = typeof v4Settings?.baseUrl === "string" ? v4Settings.baseUrl : "";
+  const configuredBaseUrl =
+    (isLikelyRouterUrl(v4BaseUrl, routerOrigins) ? v4BaseUrl : "") ||
+    stateBaseUrl ||
+    v4BaseUrl;
 
+  const stateKey =
+    typeof secrets.data?.openAiApiKey === "string" ? secrets.data.openAiApiKey : "";
+  const v4Key = typeof v4Settings?.apiKey === "string" ? v4Settings.apiKey : "";
+  const rawKey = v4Key || stateKey;
+
+  const model =
+    (typeof v4Settings?.model === "string" && v4Settings.model) ||
+    (typeof globalState.data?.actModeOpenAiModelId === "string" &&
+      globalState.data.actModeOpenAiModelId) ||
+    (typeof globalState.data?.openAiModelId === "string" && globalState.data.openAiModelId) ||
+    (typeof globalState.data?.actModeApiModelId === "string" &&
+      globalState.data.actModeApiModelId) ||
+    "";
+
+  const usesCompatibleOrRouterProvider =
+    rawActiveProvider === "openai" ||
+    rawActiveProvider === "openai-compatible" ||
+    rawActiveProvider === "agentrouter" ||
+    globalState.data?.apiProvider === "openai";
+  const connected =
+    usesCompatibleOrRouterProvider && isLikelyRouterUrl(configuredBaseUrl, routerOrigins);
+
+  const hasAnyConfig = globalState.exists || providersJson.exists;
   const status = connected
     ? "configured"
-    : globalState.exists && globalState.data?.apiProvider
+    : hasAnyConfig && Boolean(rawActiveProvider)
       ? "other"
-      : binaryInstalled || globalState.exists || dirExists
+      : binaryInstalled || hasAnyConfig || dirExists
         ? "installed"
         : "not_detected";
 
   return {
     tool: "cline",
     status,
-    installed: binaryInstalled || globalState.exists || dirExists,
-    hasConfig: globalState.exists,
+    installed: binaryInstalled || hasAnyConfig || dirExists,
+    hasConfig: hasAnyConfig,
     hasBackup: backupExists,
     configPath: paths.configPath,
     summary: {
@@ -900,13 +945,19 @@ export function applyCliToolConfig(toolId, payload = {}, storage = null, opts = 
       writeFileEnsureDir(paths.authPath, JSON.stringify(nextAuth, null, 2) + "\n");
     }
   } else if (toolId === "cline") {
-    ensureBackup(paths.backupPath, [paths.configPath, paths.secretsPath]);
+    ensureBackup(paths.backupPath, [paths.configPath, paths.secretsPath, paths.providersPath]);
     const existingState = readJsonSafe(paths.configPath).data;
     const nextState = {
       ...existingState,
       apiProvider: "openai",
+      planModeApiProvider: "openai",
+      actModeApiProvider: "openai",
       openAiBaseUrl: v1BaseUrl,
-      openAiModelId: model
+      openAiModelId: model,
+      planModeOpenAiModelId: model,
+      actModeOpenAiModelId: model,
+      planModeApiModelId: model,
+      actModeApiModelId: model
     };
     writeFileEnsureDir(paths.configPath, JSON.stringify(nextState, null, 2) + "\n");
 
@@ -916,6 +967,62 @@ export function applyCliToolConfig(toolId, payload = {}, storage = null, opts = 
       openAiApiKey: effectiveKey
     };
     writeFileEnsureDir(paths.secretsPath, JSON.stringify(nextSecrets, null, 2) + "\n");
+
+    if (paths.providersPath) {
+      const existingProviders = readJsonSafe(paths.providersPath).data;
+      const providersMap =
+        existingProviders.providers && typeof existingProviders.providers === "object"
+          ? { ...existingProviders.providers }
+          : {};
+      const nowIso = new Date().toISOString();
+      const routerOrigins = buildRouterOrigins(opts.port, baseOrigin);
+
+      providersMap["openai-compatible"] = {
+        ...(providersMap["openai-compatible"] &&
+        typeof providersMap["openai-compatible"] === "object"
+          ? providersMap["openai-compatible"]
+          : {}),
+        settings: {
+          ...(providersMap["openai-compatible"]?.settings || {}),
+          provider: "openai-compatible",
+          apiKey: effectiveKey,
+          model,
+          baseUrl: v1BaseUrl,
+          headers: providersMap["openai-compatible"]?.settings?.headers || {}
+        },
+        updatedAt: nowIso,
+        tokenSource: "manual"
+      };
+
+      if (
+        providersMap.agentrouter &&
+        typeof providersMap.agentrouter === "object" &&
+        (isLikelyRouterUrl(providersMap.agentrouter?.settings?.baseUrl, routerOrigins) ||
+          existingProviders.lastUsedProvider === "agentrouter")
+      ) {
+        providersMap.agentrouter = {
+          ...providersMap.agentrouter,
+          settings: {
+            ...(providersMap.agentrouter.settings || {}),
+            provider: "agentrouter",
+            apiKey: effectiveKey,
+            model,
+            baseUrl: v1BaseUrl,
+            headers: providersMap.agentrouter.settings?.headers || {}
+          },
+          updatedAt: nowIso,
+          tokenSource: "manual"
+        };
+      }
+
+      const nextProviders = {
+        version: Number(existingProviders.version) || 1,
+        ...existingProviders,
+        lastUsedProvider: "openai-compatible",
+        providers: providersMap
+      };
+      writeFileEnsureDir(paths.providersPath, JSON.stringify(nextProviders, null, 2) + "\n");
+    }
   } else if (toolId === "droid") {
     ensureBackup(paths.backupPath, [paths.configPath]);
     const existing = readJsonSafe(paths.configPath).data;
@@ -1080,14 +1187,30 @@ export function resetCliToolConfig(toolId, opts = {}) {
       if (fs.existsSync(paths.configPath)) {
         const existing = readJsonSafe(paths.configPath).data;
         delete existing.apiProvider;
+        delete existing.planModeApiProvider;
+        delete existing.actModeApiProvider;
         delete existing.openAiBaseUrl;
         delete existing.openAiModelId;
+        delete existing.planModeOpenAiModelId;
+        delete existing.actModeOpenAiModelId;
+        delete existing.planModeApiModelId;
+        delete existing.actModeApiModelId;
         writeFileEnsureDir(paths.configPath, JSON.stringify(existing, null, 2) + "\n");
       }
       if (paths.secretsPath && fs.existsSync(paths.secretsPath)) {
         const sec = readJsonSafe(paths.secretsPath).data;
         delete sec.openAiApiKey;
         writeFileEnsureDir(paths.secretsPath, JSON.stringify(sec, null, 2) + "\n");
+      }
+      if (paths.providersPath && fs.existsSync(paths.providersPath)) {
+        const provData = readJsonSafe(paths.providersPath).data;
+        if (provData.providers && typeof provData.providers === "object") {
+          delete provData.providers["openai-compatible"];
+        }
+        if (provData.lastUsedProvider === "openai-compatible") {
+          delete provData.lastUsedProvider;
+        }
+        writeFileEnsureDir(paths.providersPath, JSON.stringify(provData, null, 2) + "\n");
       }
     }
   }

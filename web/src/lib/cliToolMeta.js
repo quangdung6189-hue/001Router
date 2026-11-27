@@ -405,6 +405,53 @@ export function buildManualConfigSnippets(
         },
       ];
 
+    case 'cline':
+      return [
+        {
+          title: '~/.cline/data/settings/providers.json',
+          lang: 'json',
+          content: JSON.stringify(
+            {
+              version: 1,
+              lastUsedProvider: 'openai-compatible',
+              providers: {
+                'openai-compatible': {
+                  settings: {
+                    provider: 'openai-compatible',
+                    apiKey: key,
+                    model: mdl,
+                    baseUrl: v1,
+                    headers: {},
+                  },
+                  tokenSource: 'manual',
+                },
+              },
+            },
+            null,
+            2
+          ),
+        },
+        {
+          title: '~/.cline/data/globalState.json (OpenAI Compatible fields)',
+          lang: 'json',
+          content: JSON.stringify(
+            {
+              apiProvider: 'openai',
+              planModeApiProvider: 'openai',
+              actModeApiProvider: 'openai',
+              openAiBaseUrl: v1,
+              openAiModelId: mdl,
+              planModeOpenAiModelId: mdl,
+              actModeOpenAiModelId: mdl,
+              planModeApiModelId: mdl,
+              actModeApiModelId: mdl,
+            },
+            null,
+            2
+          ),
+        },
+      ];
+
     case 'cursor':
     case 'windsurf':
     case 'roo-code':

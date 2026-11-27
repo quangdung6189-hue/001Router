@@ -79,7 +79,8 @@ import { buildAlternateAuthHeaders, buildUpstreamHeaders } from "../router.js";
 import {
   hasBaseUrlTemplatePlaceholder,
   parseProviderCredentialJson,
-  resolveAuthContextForKey
+  resolveAuthContextForKey,
+  resolveAuthSecretForKey
 } from "../serviceAccountAuth.js";
 import {
   exchangeOpenRouterPkce,
@@ -1049,6 +1050,166 @@ async function syncOAuthAccountPlanAndModels(provider, keyEntry, storage, option
   };
 }
 
+const NON_KEY_AUTO_SYNC_AUTH_METHODS = new Set([
+  "antigravity",
+  "gemini_cli",
+  "claude_oauth",
+  "codex_oauth",
+  "kimi_oauth",
+  "oauth2",
+  "service_account",
+  "google_oauth"
+]);
+
+/**
+ * Persist live models discovered from an upstream `/models` response onto the active key
+ * (`oauthMeta.packageModels` + `availableModels`) and prepend them to `provider.models`
+ * so package-scoped keys expose their supported models first without dropping custom models.
+ */
+async function persistDiscoveredPackageModels(
+  storage,
+  providerId,
+  keyId,
+  fetchedModels,
+  routerService = null
+) {
+  if (!providerId || !Array.isArray(fetchedModels) || fetchedModels.length === 0) {
+    return null;
+  }
+  const cleanIds = [...new Set(fetchedModels.map((id) => String(id || "").trim()).filter(Boolean))];
+  if (cleanIds.length === 0) return null;
+
+  const nowIso = new Date().toISOString();
+  const updated = await storage.update((data) => {
+    const target = data.providers.find((p) => p.id === providerId);
+    if (!target) return null;
+    target.models = [...new Set([...cleanIds, ...(target.models || [])])];
+    if (keyId) {
+      const targetKey = (target.apiKeys || []).find((k) => k.id === keyId);
+      if (targetKey) {
+        targetKey.oauthMeta = {
+          ...(targetKey.oauthMeta || {}),
+          packageModels: cleanIds,
+          availableModels: cleanIds.map((id) => ({
+            id,
+            label: id,
+            family: "claude_gpt",
+            kind: "chat",
+            isLive: true
+          })),
+          modelsCount: cleanIds.length,
+          checkedAt: nowIso
+        };
+      }
+    }
+    target.updatedAt = nowIso;
+    return target;
+  });
+
+  if (updated && routerService && keyId) {
+    routerService.clearProviderCooldowns(providerId, keyId);
+  }
+  return updated;
+}
+
+/**
+ * Best-effort background-free sync of a provider key's live `/models` list right after
+ * create / update / connect-json (4s timeout, fail-open). Skips unit-test synthetic calls
+ * unless explicitly requested via `forceSync` or custom `fetchImpl`.
+ */
+async function autoSyncProviderPackageModels(provider, storage, options = {}) {
+  if (!provider?.id || !provider.baseUrl) return null;
+  const hasCustomFetch = typeof options.fetchImpl === "function";
+  const forceSync = options.forceSync === true;
+  if (!forceSync && !hasCustomFetch) {
+    const isTestRunner =
+      Boolean(process.env.NODE_TEST_CONTEXT) ||
+      process.argv.some((a) => String(a).endsWith(".test.js"));
+    if (isTestRunner || isLocalUrl(provider.baseUrl)) {
+      return null;
+    }
+  }
+
+  const keyEntry = (provider.apiKeys || []).find(
+    (k) =>
+      k &&
+      k.enabled !== false &&
+      !NON_KEY_AUTO_SYNC_AUTH_METHODS.has(k.authMethod || "api_key") &&
+      !getCloudCodeFlavorForKey(k)
+  );
+  if (!keyEntry) return null;
+
+  const secret = resolveAuthSecretForKey(keyEntry);
+  if (!secret) return null;
+  if (
+    !forceSync &&
+    !hasCustomFetch &&
+    /^(?:sk-sweep-|sk-mock-|nvapi-good-|sn-bad-|test-)/i.test(secret)
+  ) {
+    return null;
+  }
+
+  const fetchImpl = options.fetchImpl || fetch;
+  const dispatcher = getProxyDispatcher(provider, storage);
+  const controller = new AbortController();
+  const timeoutMs = Math.min(Math.max(Number(options.timeoutMs) || 3500, 500), 6000);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const headers = buildUpstreamHeaders(provider, secret);
+    const modelsUrl = buildUpstreamUrl(provider.baseUrl, provider.formatType, "models");
+    let res = await fetchImpl(modelsUrl, {
+      method: "GET",
+      headers,
+      signal: controller.signal,
+      ...(dispatcher ? { dispatcher } : {})
+    });
+    if ((res.status === 401 || res.status === 403) && secret) {
+      const altHeaders = buildAlternateAuthHeaders(headers, secret);
+      if (altHeaders) {
+        const retryRes = await fetchImpl(modelsUrl, {
+          method: "GET",
+          headers: altHeaders,
+          signal: controller.signal,
+          ...(dispatcher ? { dispatcher } : {})
+        });
+        if (retryRes.ok) res = retryRes;
+      }
+    }
+    if (!res.ok) return null;
+
+    const json = await res.json().catch(() => null);
+    const rawList = Array.isArray(json?.data)
+      ? json.data
+      : Array.isArray(json?.models)
+        ? json.models
+        : [];
+    const fetchedModels = rawList
+      .map((m) => {
+        if (typeof m === "string") return m.trim();
+        const rawId = String(m?.id || m?.name || "").trim();
+        if (provider.preset === "gemini" && rawId.startsWith("models/")) {
+          return rawId.slice("models/".length);
+        }
+        return rawId;
+      })
+      .filter(Boolean);
+
+    if (fetchedModels.length === 0) return null;
+    return await persistDiscoveredPackageModels(
+      storage,
+      provider.id,
+      keyEntry.id,
+      fetchedModels,
+      options.routerService || null
+    );
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /**
  * Extract a short reply preview and token usage from an OpenAI- or Anthropic-formatted probe response.
  * @param {string} rawText
@@ -1505,6 +1666,21 @@ async function runProviderConnectionTest(
           : Array.isArray(data?.models)
             ? data.models
             : [];
+        const fetchedIds = list
+          .map((m) => {
+            if (typeof m === "string") return m.trim();
+            const rawId = String(m?.id || m?.name || "").trim();
+            if (provider.preset === "gemini" && rawId.startsWith("models/")) {
+              return rawId.slice("models/".length);
+            }
+            return rawId;
+          })
+          .filter(Boolean);
+        if (fetchedIds.length > 0 && !keyEntry.isAnonymous && keyEntry.id) {
+          await persistDiscoveredPackageModels(storage, provider.id, keyEntry.id, fetchedIds).catch(
+            () => {}
+          );
+        }
         return {
           ok: true,
           status: modelsRes.status,
@@ -2006,7 +2182,16 @@ export function createDashboardRouter(storage, liveEvents = null) {
       data.providers.push(provider);
     });
 
-    return res.status(201).json({ provider: toPublicProvider(provider) });
+    const syncedProvider =
+      body.autoSyncModels === false
+        ? provider
+        : (await autoSyncProviderPackageModels(provider, storage, {
+            forceSync: body.autoSyncModels === true || req.app?.locals?.autoSyncModels === true,
+            fetchImpl: req.app?.locals?.autoSyncFetchImpl,
+            routerService: req.app?.locals?.routerService || null
+          })) || provider;
+
+    return res.status(201).json({ provider: toPublicProvider(syncedProvider) });
   });
 
   router.post("/providers/test-all", heavyProbeRateLimit, async (req, res) => {
@@ -2340,10 +2525,19 @@ export function createDashboardRouter(storage, liveEvents = null) {
         .json({ error: savedProvider._error.message });
     }
 
+    const finalProvider =
+      body.autoSyncModels === false
+        ? savedProvider
+        : (await autoSyncProviderPackageModels(savedProvider, storage, {
+            forceSync: body.autoSyncModels === true || req.app?.locals?.autoSyncModels === true,
+            fetchImpl: req.app?.locals?.autoSyncFetchImpl,
+            routerService: req.app?.locals?.routerService || null
+          })) || savedProvider;
+
     return res.json({
       ok: true,
       mode: parsed.mode,
-      provider: toPublicProvider(savedProvider)
+      provider: toPublicProvider(finalProvider)
     });
   });
 
@@ -3793,7 +3987,19 @@ export function createDashboardRouter(storage, liveEvents = null) {
     if (!updated) {
       return res.status(404).json({ error: "Provider not found" });
     }
-    return res.json({ provider: toPublicProvider(updated) });
+    const shouldSyncOnUpdate =
+      body.autoSyncModels !== false &&
+      (Array.isArray(body.apiKeys) ||
+        body.baseUrl !== undefined ||
+        body.autoSyncModels === true);
+    const finalProvider = shouldSyncOnUpdate
+      ? (await autoSyncProviderPackageModels(updated, storage, {
+          forceSync: body.autoSyncModels === true || req.app?.locals?.autoSyncModels === true,
+          fetchImpl: req.app?.locals?.autoSyncFetchImpl,
+          routerService: req.app?.locals?.routerService || null
+        })) || updated
+      : updated;
+    return res.json({ provider: toPublicProvider(finalProvider) });
   });
 
   router.delete("/providers/:id", async (req, res) => {
@@ -4721,6 +4927,7 @@ export function createDashboardRouter(storage, liveEvents = null) {
             if (targetKey) {
               targetKey.oauthMeta = {
                 ...(targetKey.oauthMeta || {}),
+                packageModels: fetchedModels,
                 availableModels: fetchedModels.map((id) => ({
                   id,
                   label: id,

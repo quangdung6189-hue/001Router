@@ -1017,7 +1017,46 @@ describe("001Router Official Provider Connection Modes (API Key, JSON/Vertex SA,
     assert.equal(parsedAuthUrl.searchParams.get("code_challenge_method"), "S256");
     assert.ok(!JSON.stringify(oauthClientBody).includes(oauthClientSecret));
 
-    // 7. Verify all secrets stored during the full-catalog sweep are encrypted at rest and pass security scan
+    // 7. Verify Cline v4 providers.json import extracts lastUsedProvider cleanly + auto-syncs package models + Coding Plan bare tokens
+    const codingPlanBare = coerceFlexibleJsonInput("ak-codingplan-1234567890abcdef");
+    assert.equal(codingPlanBare.apiKey, "ak-codingplan-1234567890abcdef");
+    const jwtBare = coerceFlexibleJsonInput("Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyMTIzIn0.sig_123456");
+    assert.equal(jwtBare.apiKey, "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyMTIzIn0.sig_123456");
+
+    const clineAgentKey = "sk-cline-agentrouter-key-only-11223344";
+    const unrelatedOpenRouterKey = "sk-or-unrelated-key-must-not-mix-99887766";
+    const clineProvidersRes = await apiFetch("/api/providers/connect-json", {
+      method: "POST",
+      body: {
+        preset: "custom",
+        slug: "cline-v4-imported",
+        autoSyncModels: true,
+        jsonText: JSON.stringify({
+          version: 1,
+          lastUsedProvider: "agentrouter",
+          providers: {
+            sapaicore: { settings: { provider: "sapaicore", model: "anthropic--claude-3.5-sonnet" } },
+            openrouter: { settings: { provider: "openrouter", apiKey: unrelatedOpenRouterKey } },
+            agentrouter: {
+              settings: {
+                provider: "agentrouter",
+                apiKey: clineAgentKey,
+                model: "gpt-4o",
+                baseUrl: `${mockUpstream.baseUrl}/v1`
+              }
+            }
+          }
+        })
+      }
+    });
+    assert.equal(clineProvidersRes.status, 200);
+    const clineProvidersBody = await clineProvidersRes.json();
+    assert.equal(clineProvidersBody.provider.apiKeys.length, 1);
+    assert.equal(clineProvidersBody.provider.apiKeys[0].maskedKey, maskKey(clineAgentKey));
+    assert.equal(clineProvidersBody.provider.baseUrl, `${mockUpstream.baseUrl}/v1`);
+    assert.ok(clineProvidersBody.provider.apiKeys[0].oauthMeta.packageModels.includes("gpt-4o-mini"));
+
+    // 8. Verify all secrets stored during the full-catalog sweep are encrypted at rest and pass security scan
     const finalScanRes = await apiFetch("/api/security/scan", {
       method: "POST",
       body: {}

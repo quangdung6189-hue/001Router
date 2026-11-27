@@ -773,15 +773,23 @@ export function coerceFlexibleJsonInput(rawInput) {
       }
     }
 
-    // Check if input is a single bare API key token (no whitespace or braces)
-    if (
-      lines.length === 1 &&
-      !/[\s{}[\]",;]/.test(lines[0]) &&
-      /^(?:sk-[A-Za-z0-9_-]{8,}|AIza[A-Za-z0-9_-]{12,}|gsk_[A-Za-z0-9_-]{10,}|xai-[A-Za-z0-9_-]{10,}|hf_[A-Za-z0-9_-]{10,}|nvapi-[A-Za-z0-9_-]{10,}|csk-[A-Za-z0-9_-]{10,}|fw_[A-Za-z0-9_-]{10,}|pplx-[A-Za-z0-9_-]{10,}|tvly-[A-Za-z0-9_-]{8,}|fc-[A-Za-z0-9_-]{8,}|jina_[A-Za-z0-9_-]{8,}|r8_[A-Za-z0-9_-]{8,})$/.test(
-        lines[0]
-      )
-    ) {
-      return { apiKey: lines[0] };
+    // Check if input is a single bare API key token (no whitespace or braces), including
+    // Coding Plan / Token Plan / NewAPI keys, JWT keys, and dot-delimited tokens.
+    if (lines.length === 1) {
+      const bareCandidate = lines[0].replace(/^Bearer\s+/i, "").trim();
+      if (
+        bareCandidate &&
+        !/[\s{}[\]",;]/.test(bareCandidate) &&
+        (/^(?:sk-|ak-|pk-|vk-|tk-|key-|api-|cr_|cp_|glm-|ms-|AIza|gsk_|xai-|hf_|nvapi-|csk-|fw_|pplx-|tvly-|fc-|jina_|r8_)[A-Za-z0-9._-]{8,}$/.test(
+          bareCandidate
+        ) ||
+          /^eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{4,}$/.test(
+            bareCandidate
+          ) ||
+          /^[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{8,}$/.test(bareCandidate))
+      ) {
+        return { apiKey: bareCandidate };
+      }
     }
   }
 
@@ -1379,6 +1387,10 @@ export function parseProviderCredentialJson(rawInput, options = {}) {
       "auth",
       "config",
       "settings",
+      "data",
+      "package",
+      "plan",
+      "subscription",
       "provider",
       "providers",
       "models",
@@ -1408,13 +1420,69 @@ export function parseProviderCredentialJson(rawInput, options = {}) {
     }
   };
 
-  inspectNode(cleaned, 0);
+  const resolvePreferredProvidersMapKey = (providersMap) => {
+    if (!providersMap || typeof providersMap !== "object" || Array.isArray(providersMap)) {
+      return "";
+    }
+    const presetOpt =
+      typeof options.preset === "string" ? options.preset.trim().toLowerCase() : "";
+    const candidates = [];
+    if (presetOpt && presetOpt !== "custom" && presetOpt !== "custom-openai" && presetOpt !== "custom-anthropic") {
+      candidates.push(presetOpt);
+      if (presetOpt === "openai") candidates.push("openai-compatible", "agentrouter");
+    } else if (presetOpt === "custom-openai") {
+      candidates.push("openai-compatible", "agentrouter");
+    }
+    if (typeof cleaned.lastUsedProvider === "string" && cleaned.lastUsedProvider.trim()) {
+      candidates.push(cleaned.lastUsedProvider.trim());
+    }
+    candidates.push("openai-compatible", "agentrouter");
+    for (const c of candidates) {
+      if (c && Object.prototype.hasOwnProperty.call(providersMap, c) && providersMap[c] && typeof providersMap[c] === "object") {
+        return c;
+      }
+    }
+    return "";
+  };
 
-  const name = typeof cleaned.name === "string" ? cleaned.name.trim() : "";
-  const slug = typeof cleaned.slug === "string" ? cleaned.slug.trim() : "";
+  let preferredSubProviderNode = null;
+  if (cleaned.providers && typeof cleaned.providers === "object" && !Array.isArray(cleaned.providers)) {
+    const preferredKey = resolvePreferredProvidersMapKey(cleaned.providers);
+    if (preferredKey) {
+      preferredSubProviderNode = cleaned.providers[preferredKey];
+      inspectNode(preferredSubProviderNode, 1);
+    }
+  }
+
+  // Only inspect full object tree (or sibling providers) if selective sub-provider didn't yield usable config
+  const hasSelectiveResult = Boolean(preferredSubProviderNode && (apiKeys.length > 0 || rawBaseUrl));
+  if (!hasSelectiveResult) {
+    inspectNode(cleaned, 0);
+  } else {
+    // Still read top-level scalar fields / headers / env if present, without mixing unrelated `cleaned.providers` entries
+    const { providers: _ignoredProviders, ...topWithoutProviders } = cleaned;
+    inspectNode(topWithoutProviders, 0);
+  }
+
+  const subSettings =
+    preferredSubProviderNode?.settings && typeof preferredSubProviderNode.settings === "object"
+      ? preferredSubProviderNode.settings
+      : preferredSubProviderNode;
+  const name =
+    (typeof cleaned.name === "string" && cleaned.name.trim()) ||
+    (typeof subSettings?.name === "string" && subSettings.name.trim()) ||
+    "";
+  const slug =
+    (typeof cleaned.slug === "string" && cleaned.slug.trim()) ||
+    (typeof subSettings?.slug === "string" && subSettings.slug.trim()) ||
+    "";
   const formatType =
     (typeof cleaned.formatType === "string" && cleaned.formatType.trim()) ||
     (typeof cleaned.format_type === "string" && cleaned.format_type.trim()) ||
+    (typeof subSettings?.formatType === "string" && subSettings.formatType.trim()) ||
+    (typeof subSettings?.protocol === "string" && subSettings.protocol.trim()) ||
+    (typeof cleaned.protocol === "string" && cleaned.protocol.trim()) ||
+    (typeof cleaned.apiProtocol === "string" && cleaned.apiProtocol.trim()) ||
     "";
 
   // Smart Provider-Specific Base URL Resolution when rawBaseUrl is empty or has a template placeholder

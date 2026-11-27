@@ -153,18 +153,45 @@ export function shouldCooldownKey(status) {
 const ACCOUNT_LEVEL_429_RE =
   /quota|billing|insufficient|credit|balance|payment|account (is )?(not active|inactive|suspended|disabled)|top[- ]?up/i;
 
+// 403/400/404 bodies indicating the key itself may be valid, only this requested model is missing from its plan/package.
+const MODEL_IN_PACKAGE_ERROR_RE =
+  /không nằm trong gói token|not in (?:your|this|the) (?:plan|package|tier)|model_not_in_plan|model is not included|not allowed to access model|model_permission_error|model.*not (?:supported|enabled|included|available) (?:for|in|with)|no available channel for model/i;
+
+// Upstream failures specifically caused by package/plan/token-group/credit/oauth-token incompatibility.
+const PACKAGE_OR_PLAN_UNAVAILABLE_RE =
+  /không nằm trong gói token|所属分组已停用|group.*disabled|usage credits are required|encountered invalidated oauth token|not in (?:your|this|the) (?:plan|package|tier)|model_not_in_plan|model is not included|no available channel/i;
+
+/**
+ * Determine whether an upstream error reflects a package/plan/token-group/credit failure
+ * eligible for automatic package-model or healthy-provider fallback.
+ * @param {number} status
+ * @param {string} [message]
+ * @returns {boolean}
+ */
+export function isModelPackageUnavailableError(status, message = "") {
+  const msg = String(message || "");
+  if (PACKAGE_OR_PLAN_UNAVAILABLE_RE.test(msg)) return true;
+  if ((status === 403 || status === 400 || status === 404) && MODEL_IN_PACKAGE_ERROR_RE.test(msg)) {
+    return true;
+  }
+  return false;
+}
+
 /**
  * Decide how wide an upstream failure's cooldown should be.
- * - 401/402/403 and account-level 429 (billing, credits…): the whole key is unusable -> "key".
- * - Any other 429 (RPM/TPM or per-model capacity): only this key+model pair -> "model",
- *   so other models on the same key/account keep working.
+ * - 401/402 and account-wide 403: the whole key is unusable -> "key".
+ * - Package-specific 403 ("model not in your token plan"): only that key+model pair -> "model".
+ * - 429 with account/billing error -> "key"; otherwise per-model capacity -> "model".
  * - Everything else: no cooldown.
  * @param {number} status
  * @param {string} [message]
  * @returns {"key" | "model" | null}
  */
 export function getCooldownScope(status, message = "") {
-  if (status === 401 || status === 402 || status === 403) return "key";
+  if (status === 401 || status === 402) return "key";
+  if (status === 403) {
+    return MODEL_IN_PACKAGE_ERROR_RE.test(String(message || "")) ? "model" : "key";
+  }
   if (status === 429) return ACCOUNT_LEVEL_429_RE.test(String(message || "")) ? "key" : "model";
   return null;
 }
@@ -1016,7 +1043,179 @@ export class RouterService {
       return { keys: [], allInCooldown: true };
     }
 
+    // Prefer keys whose synced packageModels / availableModels explicitly contain the requested model.
+    if (model && active.length > 1) {
+      const targetLower = String(model).trim().toLowerCase();
+      const matchingPkg = [];
+      const unknownPkg = [];
+      const otherPkg = [];
+      for (const k of active) {
+        const pkgIds = Array.isArray(k.oauthMeta?.packageModels)
+          ? k.oauthMeta.packageModels
+          : Array.isArray(k.oauthMeta?.availableModels)
+            ? k.oauthMeta.availableModels
+                .map((m) => (typeof m === "string" ? m : m?.id))
+                .filter(Boolean)
+            : [];
+        if (pkgIds.length === 0) {
+          unknownPkg.push(k);
+        } else if (
+          pkgIds.some((id) => {
+            const clean = String(id).trim().toLowerCase();
+            return clean === targetLower || clean.endsWith(`/${targetLower}`);
+          })
+        ) {
+          matchingPkg.push(k);
+        } else {
+          otherPkg.push(k);
+        }
+      }
+      if (matchingPkg.length > 0) {
+        return { keys: [...matchingPkg, ...unknownPkg, ...otherPkg], allInCooldown: false };
+      }
+      if (unknownPkg.length > 0 && otherPkg.length > 0) {
+        return { keys: [...unknownPkg, ...otherPkg], allInCooldown: false };
+      }
+    }
+
     return { keys: active, allInCooldown: false };
+  }
+
+  /**
+   * Build safe fallback targets when a provider fails with a package/plan/credit/token-group error.
+   * Respects disabled models, Router API key ACLs, active cooldowns, and service-kind compatibility.
+   */
+  _buildPackageFallbackTargets(
+    failedProviderSlug,
+    failedUpstreamModel,
+    errMessage,
+    routerKey,
+    adaptedTargets,
+    isEmbeddings
+  ) {
+    const settings = this.storage.getSettings?.() || {};
+    if (settings.autoPackageFallback === false || settings.fallbackEnabled === false) {
+      return [];
+    }
+
+    const providers = this.storage.getProviders?.() || [];
+    const seenRaw = new Set((adaptedTargets || []).map((t) => t.raw));
+    const candidates = [];
+
+    const addCandidate = (providerSlug, upstreamModel) => {
+      if (!providerSlug || !upstreamModel) return false;
+      const raw = `${providerSlug}/${upstreamModel}`;
+      if (seenRaw.has(raw)) return false;
+      if (this.storage.isModelDisabled?.(providerSlug, upstreamModel)) return false;
+      if (routerKey && !isRouterKeyModelAllowed(routerKey, raw)) return false;
+      seenRaw.add(raw);
+      candidates.push({ raw, providerSlug, upstreamModel });
+      return true;
+    };
+
+    const isCompatibleProvider = (p) => {
+      if (!p || p.enabled === false) return false;
+      if (isEmbeddings && p.formatType === "anthropic") return false;
+      const presetKinds = getPreset(p.preset)?.serviceKinds;
+      if (Array.isArray(presetKinds) && presetKinds.length > 0) {
+        return isEmbeddings
+          ? presetKinds.includes("embedding")
+          : presetKinds.some((k) => k === "chat" || k === "vision");
+      }
+      return true;
+    };
+
+    const getKeyPackageModels = (k) => {
+      if (!k) return [];
+      if (Array.isArray(k.oauthMeta?.packageModels)) {
+        return k.oauthMeta.packageModels.map((id) => String(id || "").trim()).filter(Boolean);
+      }
+      if (Array.isArray(k.oauthMeta?.availableModels)) {
+        return k.oauthMeta.availableModels
+          .map((m) => String(typeof m === "string" ? m : m?.id || "").trim())
+          .filter(Boolean);
+      }
+      return [];
+    };
+
+    const requestedLower = String(failedUpstreamModel || "").trim().toLowerCase();
+    const requestedTail = requestedLower.includes("/")
+      ? requestedLower.split("/").pop()
+      : requestedLower;
+
+    // Tier 1: Other healthy enabled providers offering the same requested model
+    for (const p of providers) {
+      if (!isCompatibleProvider(p) || p.slug === failedProviderSlug) continue;
+      const keyIds = (p.apiKeys || [])
+        .filter((k) => k.enabled !== false)
+        .flatMap(getKeyPackageModels);
+      const allModels = [...new Set([...keyIds, ...(p.models || [])])];
+      const matched = allModels.find((m) => {
+        const lower = String(m).trim().toLowerCase();
+        return (
+          lower === requestedLower ||
+          lower === requestedTail ||
+          (lower.includes("/") && lower.split("/").pop() === requestedTail)
+        );
+      });
+      if (matched && this.getOrderedActiveKeys(p, matched).keys.length > 0) {
+        addCandidate(p.slug, matched);
+      }
+    }
+
+    // Tier 2: Synced live package models on the SAME provider (when only that model wasn't in plan)
+    if (MODEL_IN_PACKAGE_ERROR_RE.test(String(errMessage || ""))) {
+      const sameProvider = providers.find((p) => p.slug === failedProviderSlug);
+      if (sameProvider && isCompatibleProvider(sameProvider)) {
+        const samePkgModels = [
+          ...new Set(
+            (sameProvider.apiKeys || [])
+              .filter((k) => k.enabled !== false)
+              .flatMap(getKeyPackageModels)
+          )
+        ];
+        let sameAdded = 0;
+        for (const m of samePkgModels) {
+          if (sameAdded >= 2) break;
+          if (this.getOrderedActiveKeys(sameProvider, m).keys.length > 0) {
+            if (addCandidate(sameProvider.slug, m)) sameAdded += 1;
+          }
+        }
+      }
+    }
+
+    // Tier 3: Other healthy enabled providers with active keys (prioritizing Antigravity / package-verified providers)
+    const otherHealthy = providers
+      .filter((p) => isCompatibleProvider(p) && p.slug !== failedProviderSlug)
+      .sort((a, b) => {
+        const score = (p) => {
+          let s = 0;
+          if (p.preset === "antigravity" || p.slug === "antigravity") s += 4;
+          if ((p.apiKeys || []).some((k) => k.enabled !== false && getKeyPackageModels(k).length > 0)) {
+            s += 2;
+          }
+          return s;
+        };
+        return score(b) - score(a);
+      });
+
+    for (const p of otherHealthy) {
+      if (candidates.length >= 4) break;
+      const enabledKeys = (p.apiKeys || []).filter((k) => k.enabled !== false);
+      const preferredIds = [
+        ...enabledKeys.map((k) => k.oauthMeta?.defaultModelId).filter(Boolean),
+        ...enabledKeys.flatMap(getKeyPackageModels),
+        ...(Array.isArray(p.models) ? p.models : [])
+      ];
+      const uniqueIds = [...new Set(preferredIds.map((m) => String(m || "").trim()).filter(Boolean))];
+      for (const candModel of uniqueIds) {
+        if (this.getOrderedActiveKeys(p, candModel).keys.length > 0) {
+          if (addCandidate(p.slug, candModel)) break;
+        }
+      }
+    }
+
+    return candidates.slice(0, 4);
   }
 
   /**
@@ -1255,6 +1454,35 @@ export class RouterService {
         ? req.headers["anthropic-version"]
         : undefined;
 
+    let dynamicFallbackAdded = 0;
+    const MAX_DYNAMIC_FALLBACK = 4;
+    const tryAppendPackageFallback = (failedSlug, failedModel, errMsg) => {
+      if (
+        clientAborted ||
+        hasSentBytesToClient ||
+        dynamicFallbackAdded >= MAX_DYNAMIC_FALLBACK ||
+        !isModelPackageUnavailableError(lastErrorStatus || 403, errMsg)
+      ) {
+        return false;
+      }
+      const extra = this._buildPackageFallbackTargets(
+        failedSlug,
+        failedModel,
+        errMsg,
+        routerKey,
+        adaptedTargets,
+        isEmbeddings
+      );
+      let pushed = false;
+      for (const cand of extra) {
+        if (dynamicFallbackAdded >= MAX_DYNAMIC_FALLBACK) break;
+        adaptedTargets.push(cand);
+        dynamicFallbackAdded += 1;
+        pushed = true;
+      }
+      return pushed;
+    };
+
     try {
       outerLoop: for (let targetIdx = 0; targetIdx < adaptedTargets.length; targetIdx++) {
         const target = adaptedTargets[targetIdx];
@@ -1333,6 +1561,9 @@ export class RouterService {
           });
           lastErrorStatus = keySelection.allInCooldown ? 429 : 503;
           lastErrorMessage = msg;
+          if (keySelection.allInCooldown && !resolution.isCombo && targetIdx + 1 >= adaptedTargets.length) {
+            tryAppendPackageFallback(provider.slug, target.upstreamModel, cooldownInfo.note);
+          }
           continue;
         }
 
@@ -2061,6 +2292,18 @@ export class RouterService {
                 if (isRetryableStatus(upstreamRes.status)) {
                   break;
                 }
+                if (
+                  isModelPackageUnavailableError(upstreamRes.status, cleanMsg) &&
+                  !hasSentBytesToClient
+                ) {
+                  if (keyIdx + 1 >= keySelection.keys.length && targetIdx + 1 >= adaptedTargets.length) {
+                    if (tryAppendPackageFallback(provider.slug, target.upstreamModel, cleanMsg)) {
+                      break;
+                    }
+                  } else if (keyIdx + 1 < keySelection.keys.length || targetIdx + 1 < adaptedTargets.length) {
+                    break;
+                  }
+                }
                 // Non-retryable client error (e.g. 400 invalid schema / 404 model)
                 finalTarget = target;
                 finalStatus = upstreamRes.status;
@@ -2574,6 +2817,14 @@ export class RouterService {
               activeController = null;
             }
           }
+        }
+        if (
+          targetIdx + 1 >= adaptedTargets.length &&
+          !clientAborted &&
+          !hasSentBytesToClient &&
+          !resolution.isCombo
+        ) {
+          tryAppendPackageFallback(provider.slug, target.upstreamModel, lastErrorMessage);
         }
       }
 
