@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import {
   Activity,
   ArrowRight,
+  ArrowUpRight,
   Cpu,
   Flame,
   Globe,
@@ -12,6 +13,9 @@ import {
   MessageSquare,
   Mic,
   Moon,
+  Pause,
+  Play,
+  RefreshCw,
   Repeat,
   Scissors,
   Search,
@@ -40,6 +44,15 @@ import { LucianLogoMarquee } from '../components/lucian/LucianLogoMarquee';
 import { LucianSpotlightCta } from '../components/lucian/LucianSpotlightCta';
 import './LandingPage.css';
 
+const NAV_SECTIONS = [
+  { id: 'service-kinds', label: 'Service Kinds' },
+  { id: 'how-it-works', label: '3-Tier Routing' },
+  { id: 'providers', label: 'Providers' },
+  { id: 'integrations', label: 'CLI / IDE' },
+  { id: 'token-saver', label: 'Token Saver' },
+  { id: 'get-started', label: 'Quick Start' },
+];
+
 const MARQUEE_PROVIDERS = [
   { preset: 'openai', name: 'OpenAI' },
   { preset: 'anthropic', name: 'Anthropic' },
@@ -66,6 +79,36 @@ const HERO_STATS = [
   { value: '9', label: 'Unified Service Kinds' },
   { value: '470+', label: 'Cataloged AI Models' },
   { value: '3-Tier', label: 'Smart Auto Failover' },
+];
+
+const PRISM_TIERS = [
+  {
+    id: 0,
+    tier: 'Tier 1 · Flagship',
+    model: 'Claude Sonnet / GPT-4.1',
+    latency: '11ms',
+    cost: 'Primary',
+    color: '#E56A4A',
+    statusNote: 'Primary stream active · Zero translation overhead',
+  },
+  {
+    id: 1,
+    tier: 'Tier 2 · Cheap Coding',
+    model: 'DeepSeek V3 / GLM / MiniMax',
+    latency: '14ms',
+    cost: '$0.20–$0.60/1M',
+    color: '#F59E0B',
+    statusNote: 'HTTP 429 on Tier 1 → Seamless failover in 14ms',
+  },
+  {
+    id: 2,
+    tier: 'Tier 3 · Free & Local',
+    model: 'Gemini Flash / Groq / Ollama',
+    latency: '9ms',
+    cost: '$0 / month',
+    color: '#34D399',
+    statusNote: 'Tier 1–2 cooling down → Zero-cost fallback active',
+  },
 ];
 
 const SERVICE_KINDS = [
@@ -274,29 +317,58 @@ export function LandingPage() {
   const { resolvedTheme, toggleTheme } = useTheme();
   const [providerTab, setProviderTab] = useState('all');
   const [snippetTab, setSnippetTab] = useState('claude');
+  const [activeTier, setActiveTier] = useState(0);
+  const [activeSection, setActiveSection] = useState('');
+  const [headerScrolled, setHeaderScrolled] = useState(false);
+  const [ambientPaused, setAmbientPaused] = useState(() =>
+    typeof window !== 'undefined' &&
+    window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches
+      ? true
+      : false
+  );
+
   const progressRef = useRef(null);
   const pageRef = useRef(null);
 
   const origin = typeof window !== 'undefined' ? window.location.origin : 'http://localhost';
   const v1Endpoint = `${origin}/v1`;
 
-  // Fallback scroll progress bar when native CSS animation-timeline: scroll() is unsupported
+  // Auto-cycle the live 3-tier neural prism demonstration unless paused or reduced-motion
+  useEffect(() => {
+    if (ambientPaused) return undefined;
+    if (window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches) return undefined;
+    const id = setInterval(() => {
+      setActiveTier((prev) => (prev + 1) % PRISM_TIERS.length);
+    }, 4600);
+    return () => clearInterval(id);
+  }, [ambientPaused]);
+
+  // Fallback scroll progress bar + header elevation when native CSS scroll-timeline is unsupported
   useEffect(() => {
     const bar = progressRef.current;
-    if (!bar) return undefined;
-    if (window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches) return undefined;
-    if (window.CSS?.supports?.('animation-timeline', 'scroll()')) return undefined;
+    const supportsScrollTimeline = window.CSS?.supports?.('animation-timeline', 'scroll()');
+    const supportsHeaderTimeline = window.CSS?.supports?.(
+      '(animation-timeline: scroll()) and (animation-range: 0% 100%)'
+    );
+    const reduced = window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches;
 
     let raf = 0;
     const update = () => {
       raf = 0;
-      const maxScroll = Math.max(1, document.documentElement.scrollHeight - window.innerHeight);
-      const ratio = Math.min(1, Math.max(0, window.scrollY / maxScroll));
-      bar.style.transform = `scaleX(${ratio.toFixed(4)})`;
+      if (!supportsHeaderTimeline) {
+        setHeaderScrolled(window.scrollY > 28);
+      }
+      if (bar && !reduced && !supportsScrollTimeline) {
+        const maxScroll = Math.max(1, document.documentElement.scrollHeight - window.innerHeight);
+        const ratio = Math.min(1, Math.max(0, window.scrollY / maxScroll));
+        bar.style.transform = `scaleX(${ratio.toFixed(4)})`;
+      }
     };
+
     const onScroll = () => {
       if (!raf) raf = requestAnimationFrame(update);
     };
+
     update();
     window.addEventListener('scroll', onScroll, { passive: true });
     window.addEventListener('resize', onScroll, { passive: true });
@@ -307,7 +379,29 @@ export function LandingPage() {
     };
   }, []);
 
-  // Lucian #251: IntersectionObserver staggered scroll-in reveals
+  // Scroll-spy active nav pill highlight
+  useEffect(() => {
+    if (typeof IntersectionObserver === 'undefined') return undefined;
+    const sections = NAV_SECTIONS.map((s) => document.getElementById(s.id)).filter(Boolean);
+    if (sections.length === 0) return undefined;
+
+    const spy = new IntersectionObserver(
+      (entries) => {
+        const visible = entries
+          .filter((e) => e.isIntersecting)
+          .sort((a, b) => b.intersectionRatio - a.intersectionRatio);
+        if (visible[0]?.target?.id) {
+          setActiveSection(visible[0].target.id);
+        }
+      },
+      { rootMargin: '-28% 0px -56% 0px', threshold: [0, 0.25, 0.5] }
+    );
+
+    sections.forEach((sec) => spy.observe(sec));
+    return () => spy.disconnect();
+  }, []);
+
+  // One-shot IntersectionObserver scroll-in reveals (low threshold so tall cards never stick hidden)
   useEffect(() => {
     const root = pageRef.current;
     if (!root) return undefined;
@@ -329,12 +423,16 @@ export function LandingPage() {
           }
         });
       },
-      { threshold: 0.12, rootMargin: '0px 0px -36px 0px' }
+      { threshold: 0.05, rootMargin: '0px 0px -20px 0px' }
     );
 
-    targets.forEach((el) => io.observe(el));
+    targets.forEach((el) => {
+      if (el.getAttribute('data-reveal') !== 'in') {
+        io.observe(el);
+      }
+    });
     return () => io.disconnect();
-  }, [providerTab]);
+  }, []);
 
   const visibleProviderGroups = useMemo(() => {
     if (providerTab === 'all') return SHOWCASE_GROUPS;
@@ -382,21 +480,47 @@ claude`,
     };
   }, [origin, v1Endpoint, snippetTab]);
 
+  const activePrismTier = PRISM_TIERS[activeTier];
+
+  const handleBrandClick = () => {
+    window.scrollTo({
+      top: 0,
+      behavior: window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches
+        ? 'auto'
+        : 'smooth',
+    });
+  };
+
   return (
-    <div ref={pageRef} className="landing-grid min-h-dvh text-[var(--text-primary)]">
-      {/* Scroll progress bar (native CSS scroll-timeline with fallback) */}
+    <div
+      ref={pageRef}
+      data-ambient-paused={ambientPaused ? 'true' : 'false'}
+      className="landing-page-root landing-grid min-h-dvh text-[var(--text-primary)]"
+    >
+      {/* Fixed ethereal nebula depth layer behind architectural grid */}
+      <div className="landing-ambient-layer" aria-hidden="true">
+        <div className="landing-ambient-orb landing-ambient-orb-1" />
+        <div className="landing-ambient-orb landing-ambient-orb-2" />
+        <div className="landing-ambient-orb landing-ambient-orb-3" />
+      </div>
+
+      {/* Luminous scroll progress bar (native CSS scroll-timeline with rAF fallback) */}
       <div ref={progressRef} className="landing-scroll-progress" aria-hidden="true" />
 
-      {/* Sticky Top Navbar */}
-      <header className="sticky top-0 z-30 border-b border-[var(--border-subtle)] bg-[var(--bg-main)]/88 backdrop-blur-md">
-        <div className="mx-auto flex max-w-7xl items-center justify-between gap-4 px-4 py-3.5 sm:px-6 lg:px-8">
-          <Link to="/landing" className="flex items-center gap-2.5">
-            <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-[#E56A4A] to-[#cc5236] text-white shadow-sm">
+      {/* Scroll-reactive glass navbar */}
+      <header className="landing-header" data-scrolled={headerScrolled ? 'true' : 'false'}>
+        <div className="landing-header-inner mx-auto flex max-w-7xl items-center justify-between gap-4 px-4 sm:px-6 lg:px-8">
+          <Link
+            to="/landing"
+            onClick={handleBrandClick}
+            className="group flex items-center gap-2.5 focus-visible:rounded-lg"
+          >
+            <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-[#E56A4A] via-[#f59e0b] to-[#cc5236] text-white shadow-sm transition-transform duration-300 group-hover:scale-105">
               <Waypoints className="h-5 w-5" aria-hidden="true" />
             </div>
             <div className="flex items-center gap-2">
               <span className="text-base font-bold tracking-tight">001Router</span>
-              <span className="hidden rounded-full bg-[#E56A4A]/14 px-2 py-0.5 font-mono text-[10px] font-semibold text-[#E56A4A] sm:inline">
+              <span className="hidden rounded-full border border-[#E56A4A]/30 bg-[#E56A4A]/12 px-2 py-0.5 font-mono text-[10px] font-semibold text-[#E56A4A] sm:inline">
                 v2.0
               </span>
             </div>
@@ -404,29 +528,40 @@ claude`,
 
           <nav
             aria-label="Landing sections"
-            className="hidden items-center gap-6 text-xs font-medium text-[var(--text-secondary)] md:flex"
+            className="hidden items-center gap-1 text-xs font-medium md:flex"
           >
-            <a href="#service-kinds" className="transition-colors hover:text-[var(--text-primary)]">
-              Service Kinds
-            </a>
-            <a href="#how-it-works" className="transition-colors hover:text-[var(--text-primary)]">
-              3-Tier Routing
-            </a>
-            <a href="#providers" className="transition-colors hover:text-[var(--text-primary)]">
-              Providers
-            </a>
-            <a href="#integrations" className="transition-colors hover:text-[var(--text-primary)]">
-              CLI / IDE
-            </a>
-            <a href="#token-saver" className="transition-colors hover:text-[var(--text-primary)]">
-              Token Saver
-            </a>
-            <a href="#get-started" className="transition-colors hover:text-[var(--text-primary)]">
-              Quick Start
-            </a>
+            {NAV_SECTIONS.map((sec) => (
+              <a
+                key={sec.id}
+                href={`#${sec.id}`}
+                data-active={activeSection === sec.id ? 'true' : 'false'}
+                className="landing-nav-link"
+              >
+                {sec.label}
+              </a>
+            ))}
           </nav>
 
           <div className="flex items-center gap-2">
+            {/* WCAG 2.2.2 Pause/Play control for ambient persistent motion */}
+            <button
+              type="button"
+              onClick={() => setAmbientPaused((p) => !p)}
+              title={ambientPaused ? 'Resume ambient effects' : 'Pause ambient effects'}
+              className="r-btn-secondary inline-flex h-8 items-center gap-1.5 px-2.5 text-[11px]"
+            >
+              {ambientPaused ? (
+                <>
+                  <Play className="h-3.5 w-3.5 text-[#E56A4A]" aria-hidden="true" />
+                  <span className="hidden sm:inline">Play FX</span>
+                </>
+              ) : (
+                <>
+                  <Pause className="h-3.5 w-3.5 text-[var(--text-secondary)]" aria-hidden="true" />
+                  <span className="hidden sm:inline">Pause FX</span>
+                </>
+              )}
+            </button>
             <button
               type="button"
               onClick={toggleTheme}
@@ -450,11 +585,13 @@ claude`,
         </div>
       </header>
 
-      <main className="mx-auto max-w-7xl space-y-20 px-4 py-8 sm:px-6 sm:py-12 lg:px-8">
-        {/* 1. HERO SECTION WITH LUCIAN #226 GRID-BEAM STAGE & #216 STAGGERED ENTRANCE */}
-        <LucianGridBeamHero aurora className="landing-hero-shell px-5 py-14 text-center sm:px-10 sm:py-20">
+      <main className="mx-auto max-w-7xl space-y-24 px-4 py-8 sm:px-6 sm:py-12 lg:px-8">
+        {/* 1. CELESTIAL CONSTELLATION & PHOTONIC BEAM HERO */}
+        <LucianGridBeamHero
+          paused={ambientPaused}
+          className="landing-hero-shell px-5 py-12 text-center sm:px-10 sm:py-16 lg:py-20"
+        >
           <div className="mx-auto max-w-4xl">
-            {/* Lucian #419: release pill + word-by-word rising headline */}
             <LucianReleasePill tag="v2.0">
               Smart AI Router · OpenAI &amp; Anthropic Compatible
             </LucianReleasePill>
@@ -469,7 +606,7 @@ claude`,
 
             <p
               className="landing-hero-stagger landing-copy mx-auto mt-6 text-base text-[var(--text-secondary)] sm:text-lg"
-              style={{ '--stagger': 7 }}
+              style={{ '--stagger': 5 }}
             >
               Connect Claude Code, Codex, Cursor, Cline, Roo Code, and Windsurf to 47+ AI
               providers and 470+ models through a single unified endpoint. Smart 3-tier failover
@@ -478,10 +615,10 @@ claude`,
               20–65% tokens automatically.
             </p>
 
-            {/* Quick Endpoint & Action Bar */}
+            {/* Quick Endpoint & Magnetic CTA Bar */}
             <div
-              className="landing-hero-stagger mx-auto mt-9 flex max-w-xl flex-wrap items-center justify-center gap-3"
-              style={{ '--stagger': 8 }}
+              className="landing-hero-stagger mx-auto mt-8 flex max-w-xl flex-wrap items-center justify-center gap-3"
+              style={{ '--stagger': 6 }}
             >
               <div className="landing-endpoint-bar flex min-w-[260px] flex-1 items-center justify-between gap-2 rounded-xl px-4 py-2.5 backdrop-blur-md">
                 <span className="landing-live-dot" aria-hidden="true" />
@@ -491,31 +628,181 @@ claude`,
                     {v1Endpoint}
                   </code>
                 </div>
-                <CopyButton value={v1Endpoint} size="xs" toastMessage="Copied Unified Endpoint URL" />
+                <CopyButton
+                  value={v1Endpoint}
+                  size="xs"
+                  toastMessage="Copied Unified Endpoint URL"
+                />
               </div>
 
               <LucianMagneticButton to="/" label="Open Dashboard" activeLabel="Launching…" />
             </div>
 
-            {/* 4 Hero Stat Counters — Lucian #426 odometer */}
-            <div className="landing-hero-stagger mt-12" style={{ '--stagger': 9 }}>
+            {/* Interactive Live 3-Tier Neural Router Prism */}
+            <div
+              className="landing-hero-stagger landing-prism-stage mx-auto mt-10 max-w-3xl p-4 sm:p-5"
+              style={{ '--stagger': 7 }}
+            >
+              <div className="mb-4 flex flex-wrap items-center justify-between gap-2 text-left">
+                <div className="flex items-center gap-2">
+                  <span
+                    className="h-2 w-2 rounded-full"
+                    style={{
+                      backgroundColor: activePrismTier.color,
+                      boxShadow: `0 0 10px ${activePrismTier.color}`,
+                    }}
+                    aria-hidden="true"
+                  />
+                  <span className="font-mono text-[11px] font-semibold text-[var(--text-primary)]">
+                    LIVE NEURAL ROUTING PRISM
+                  </span>
+                  <span className="hidden rounded-full bg-[var(--bg-subtle)] px-2 py-0.5 font-mono text-[10px] text-[var(--text-secondary)] sm:inline">
+                    {activePrismTier.latency} loopback
+                  </span>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setActiveTier((prev) => (prev + 1) % PRISM_TIERS.length)}
+                  className="r-btn-secondary inline-flex items-center gap-1.5 px-2.5 py-1 font-mono text-[11px]"
+                >
+                  <RefreshCw className="h-3 w-3 text-[#E56A4A]" aria-hidden="true" />
+                  Simulate 429 Failover
+                </button>
+              </div>
+
+              <div className="grid items-center gap-4 md:grid-cols-12">
+                {/* Left: Client Node */}
+                <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-card)]/85 p-3 text-left md:col-span-3">
+                  <div className="font-mono text-[10px] font-semibold tracking-wide text-[var(--text-muted)] uppercase">
+                    Client Request
+                  </div>
+                  <div className="mt-1 text-xs font-bold text-[var(--text-primary)]">
+                    Claude / Cursor / SDK
+                  </div>
+                  <code className="mt-1.5 block truncate rounded bg-[var(--bg-subtle)] px-2 py-0.5 font-mono text-[10px] text-[#E56A4A]">
+                    model: &quot;3-tier-auto&quot;
+                  </code>
+                </div>
+
+                {/* Center: Animated Conduit + Prism Core */}
+                <div className="relative flex items-center justify-center py-2 md:col-span-4">
+                  <svg
+                    viewBox="0 0 240 120"
+                    className="pointer-events-none absolute inset-0 hidden h-full w-full md:block"
+                    aria-hidden="true"
+                  >
+                    <defs>
+                      <linearGradient id="prism-in-grad" x1="0" y1="0" x2="1" y2="0">
+                        <stop offset="0%" stopColor="#E56A4A" stopOpacity="0.25" />
+                        <stop offset="100%" stopColor="#A78BFA" stopOpacity="0.95" />
+                      </linearGradient>
+                    </defs>
+                    {/* Inbound stream */}
+                    <path
+                      d="M 8 60 L 92 60"
+                      fill="none"
+                      stroke="url(#prism-in-grad)"
+                      strokeWidth="2.2"
+                      strokeLinecap="round"
+                      className="landing-prism-beam-active"
+                    />
+                    {/* Outbound tier branches */}
+                    {PRISM_TIERS.map((tier, idx) => {
+                      const targetY = idx === 0 ? 20 : idx === 1 ? 60 : 100;
+                      const isActive = idx === activeTier;
+                      return (
+                        <g key={tier.id}>
+                          <path
+                            d={`M 148 60 C 185 60, 195 ${targetY}, 234 ${targetY}`}
+                            fill="none"
+                            stroke={tier.color}
+                            strokeOpacity={isActive ? 0.35 : 0.14}
+                            strokeWidth={isActive ? 3.5 : 1.4}
+                          />
+                          {isActive ? (
+                            <path
+                              d={`M 148 60 C 185 60, 195 ${targetY}, 234 ${targetY}`}
+                              fill="none"
+                              stroke={tier.color}
+                              strokeWidth="2.4"
+                              strokeLinecap="round"
+                              className="landing-prism-beam-active"
+                            />
+                          ) : null}
+                        </g>
+                      );
+                    })}
+                  </svg>
+
+                  <div className="landing-prism-core">
+                    <span className="landing-prism-ring" aria-hidden="true" />
+                    <span className="landing-prism-ring landing-prism-ring-b" aria-hidden="true" />
+                    <Waypoints className="h-7 w-7" aria-hidden="true" />
+                  </div>
+                </div>
+
+                {/* Right: Interactive 3-Tier Output Nodes */}
+                <div className="space-y-2 md:col-span-5">
+                  {PRISM_TIERS.map((tier, idx) => {
+                    const isActive = idx === activeTier;
+                    const isCooling = idx < activeTier;
+                    return (
+                      <button
+                        key={tier.id}
+                        type="button"
+                        onClick={() => setActiveTier(idx)}
+                        data-active={isActive ? 'true' : 'false'}
+                        data-cooldown={isCooling ? 'true' : 'false'}
+                        style={{ '--tier-color': tier.color }}
+                        className="landing-prism-tier"
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span
+                            className="text-[11px] font-bold"
+                            style={{ color: isActive ? tier.color : 'var(--text-primary)' }}
+                          >
+                            {tier.tier}
+                          </span>
+                          <span className="font-mono text-[10px] text-[var(--text-muted)]">
+                            {isCooling ? '429 · 60s cooldown' : isActive ? 'ACTIVE' : tier.cost}
+                          </span>
+                        </div>
+                        <div className="mt-0.5 truncate text-[11px] text-[var(--text-secondary)]">
+                          {tier.model}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-[var(--border-subtle)]/70 pt-2.5 font-mono text-[11px] text-[var(--text-secondary)]">
+                <span>→ {activePrismTier.statusNote}</span>
+                <span className="text-[var(--text-muted)]">Click any tier to inspect path</span>
+              </div>
+            </div>
+
+            {/* 4 Hero Stat Counters — Odometer */}
+            <div className="landing-hero-stagger mt-10" style={{ '--stagger': 8 }}>
               <LucianOdometerStats items={HERO_STATS} />
             </div>
           </div>
         </LucianGridBeamHero>
 
-        {/* LUCIAN #421 INTERACTIVE LOGO MARQUEE STRIP */}
+        {/* DUAL-TRACK COUNTER-FLOWING LOGO MARQUEE STRIP */}
         <section aria-label="Supported providers strip">
           <LucianLogoMarquee
             items={MARQUEE_PROVIDERS}
             caption="Seamless routing across leading models & coding tools"
+            externalPaused={ambientPaused}
           />
         </section>
 
-        {/* 2. 9 SERVICE KINDS SECTION */}
-        <section id="service-kinds" className="scroll-mt-20 space-y-8">
+        {/* 2. 9 SERVICE KINDS — FIXED & UPGRADED IRIDESCENT GLOW GRID */}
+        <section id="service-kinds" className="scroll-mt-24 space-y-8">
           <div className="text-center" data-reveal="">
-            <span className="rounded-full border border-[#E56A4A]/30 bg-[#E56A4A]/10 px-3 py-1 text-xs font-semibold text-[#E56A4A]">
+            <span className="landing-scroll-pill rounded-full border border-[#E56A4A]/30 bg-[#E56A4A]/10 px-3 py-1 text-xs font-semibold text-[#E56A4A]">
               Unified Multimodal Gateway
             </span>
             <div className="mt-3">
@@ -543,14 +830,14 @@ claude`,
                         <div className="landing-reveal-icon flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#E56A4A]/15 text-[#E56A4A]">
                           <Icon className="h-5 w-5" aria-hidden="true" />
                         </div>
-                        <code className="truncate rounded bg-[var(--bg-subtle)] px-2 py-0.5 font-mono text-[10.5px] text-[#E56A4A]">
+                        <code className="truncate rounded-md border border-[var(--border-subtle)] bg-[var(--bg-subtle)] px-2 py-0.5 font-mono text-[10.5px] text-[#E56A4A]">
                           {kind.endpoint}
                         </code>
                       </div>
                       <h3 className="mt-3.5 text-base font-semibold text-[var(--text-primary)]">
                         {kind.title}
                       </h3>
-                      <p className="mt-1 text-xs leading-relaxed text-[var(--text-secondary)]">
+                      <p className="mt-1.5 text-xs leading-relaxed text-[var(--text-secondary)]">
                         {kind.desc}
                       </p>
                     </div>
@@ -561,10 +848,10 @@ claude`,
           </LucianGlowGrid>
         </section>
 
-        {/* 3. HOW 001ROUTER WORKS — SMART 3-TIER ROUTING */}
-        <section id="how-it-works" className="scroll-mt-20 space-y-8">
+        {/* 3. HOW 001ROUTER WORKS — LUMINOUS 3-TIER PIPELINE CONDUIT */}
+        <section id="how-it-works" className="scroll-mt-24 space-y-8">
           <div className="text-center" data-reveal="">
-            <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-xs font-semibold text-[var(--ux-mint)]">
+            <span className="landing-scroll-pill rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-xs font-semibold text-[var(--ux-mint)]">
               Resilient Pipeline Architecture
             </span>
             <div className="mt-3">
@@ -578,95 +865,113 @@ claude`,
             </p>
           </div>
 
-          <div className="grid gap-6 lg:grid-cols-3">
-            {/* Step 1 */}
-            <div className="r-card space-y-4 p-6" data-reveal="" style={{ '--rv-delay': 0 }}>
-              <div className="flex items-center justify-between">
-                <span className="landing-reveal-icon flex h-8 w-8 items-center justify-center rounded-full bg-[#E56A4A] text-xs font-bold text-white">
-                  1
-                </span>
-                <span className="font-mono text-xs text-[var(--text-muted)]">Multi-Provider</span>
-              </div>
-              <h3 className="text-lg font-bold">Connect Your Providers</h3>
-              <p className="text-xs leading-relaxed text-[var(--text-secondary)]">
-                Add API keys, OAuth accounts, or local LLM servers in the dashboard with multi-key
-                round-robin pools and automatic cooldown recovery.
-              </p>
-              <div className="code-surface rounded-lg border p-3 font-mono text-xs">
-                <div className="text-emerald-400">✓ Multi-key &amp; OAuth provider pools</div>
-                <div className="mt-1 text-sky-400">✓ Unified OpenAI &amp; Anthropic endpoints</div>
-                <div className="mt-1 text-neutral-300">✓ Cloud APIs &amp; Local GPUs</div>
-              </div>
+          <div className="landing-pipeline-wrap space-y-4">
+            <div className="landing-pipeline-rail hidden lg:block" aria-hidden="true">
+              <span className="landing-pipeline-spark" />
             </div>
 
-            {/* Step 2 */}
-            <div
-              className="r-card space-y-3 border-[#E56A4A]/50 p-6"
-              data-reveal=""
-              style={{ '--rv-delay': 1 }}
-            >
-              <div className="flex items-center justify-between">
-                <span className="landing-reveal-icon flex h-8 w-8 items-center justify-center rounded-full bg-[#E56A4A] text-xs font-bold text-white">
-                  2
-                </span>
-                <span className="rounded-full bg-[#E56A4A]/15 px-2.5 py-0.5 text-[11px] font-semibold text-[#E56A4A]">
-                  Auto Failover
-                </span>
-              </div>
-              <h3 className="text-lg font-bold">Smart 3-Tier Routing</h3>
-              <div className="space-y-2 pt-1 text-xs">
-                <div className="rounded-lg border border-[#E56A4A]/35 bg-[#E56A4A]/10 p-2.5">
-                  <div className="font-bold text-[#E56A4A]">Tier 1 — Flagship Models</div>
-                  <div className="mt-0.5 text-[11px] text-[var(--text-secondary)]">
-                    Claude Sonnet/Opus · GPT-6.2 / 4.1 · Gemini Pro · Grok 3
-                  </div>
+            <div className="grid gap-6 lg:grid-cols-3">
+              {/* Step 1 */}
+              <div
+                className="landing-ethereal-card space-y-4 p-6"
+                data-reveal=""
+                style={{ '--rv-delay': 0 }}
+              >
+                <div className="flex items-center justify-between">
+                  <span className="landing-reveal-icon flex h-8 w-8 items-center justify-center rounded-full bg-gradient-to-br from-[#E56A4A] to-[#f59e0b] text-xs font-bold text-white shadow-sm">
+                    1
+                  </span>
+                  <span className="font-mono text-xs text-[var(--text-muted)]">Multi-Provider</span>
                 </div>
-                <div className="rounded-lg border border-amber-500/35 bg-amber-500/10 p-2.5">
-                  <div className="font-bold text-[var(--ux-warn)]">
-                    Tier 2 — Cheap Coding ($0.20–$0.60/1M)
-                  </div>
-                  <div className="mt-0.5 text-[11px] text-[var(--text-secondary)]">
-                    DeepSeek V3/R1 $0.27 · GLM $0.60 · MiniMax $0.20 · Kimi K2 · Qwen3
-                  </div>
-                </div>
-                <div className="rounded-lg border border-emerald-500/35 bg-emerald-500/10 p-2.5">
-                  <div className="font-bold text-[var(--ux-mint)]">
-                    Tier 3 — Free Tier &amp; Local
-                  </div>
-                  <div className="mt-0.5 text-[11px] text-[var(--text-secondary)]">
-                    Gemini Flash · Groq · Cerebras · OpenRouter Free · Ollama
-                  </div>
+                <h3 className="text-lg font-bold">Connect Your Providers</h3>
+                <p className="text-xs leading-relaxed text-[var(--text-secondary)]">
+                  Add API keys, OAuth accounts, or local LLM servers in the dashboard with multi-key
+                  round-robin pools and automatic cooldown recovery.
+                </p>
+                <div className="code-surface rounded-lg border p-3 font-mono text-xs">
+                  <div className="text-emerald-400">✓ Multi-key &amp; OAuth provider pools</div>
+                  <div className="mt-1 text-sky-400">✓ Unified OpenAI &amp; Anthropic endpoints</div>
+                  <div className="mt-1 text-neutral-300">✓ Cloud APIs &amp; Local GPUs</div>
                 </div>
               </div>
-            </div>
 
-            {/* Step 3 */}
-            <div className="r-card space-y-4 p-6" data-reveal="" style={{ '--rv-delay': 2 }}>
-              <div className="flex items-center justify-between">
-                <span className="landing-reveal-icon flex h-8 w-8 items-center justify-center rounded-full bg-[#E56A4A] text-xs font-bold text-white">
-                  3
-                </span>
-                <span className="font-mono text-xs text-[var(--ux-mint)]">Streaming Fast Path</span>
+              {/* Step 2 */}
+              <div
+                className="landing-ethereal-card space-y-3 border-[#E56A4A]/45 p-6"
+                data-reveal=""
+                style={{ '--rv-delay': 1 }}
+              >
+                <div className="flex items-center justify-between">
+                  <span className="landing-reveal-icon flex h-8 w-8 items-center justify-center rounded-full bg-gradient-to-br from-[#E56A4A] to-[#a78bfa] text-xs font-bold text-white shadow-sm">
+                    2
+                  </span>
+                  <span className="rounded-full bg-[#E56A4A]/15 px-2.5 py-0.5 text-[11px] font-semibold text-[#E56A4A]">
+                    Auto Failover
+                  </span>
+                </div>
+                <h3 className="text-lg font-bold">Smart 3-Tier Routing</h3>
+                <div className="space-y-2 pt-1 text-xs">
+                  <div className="rounded-lg border border-[#E56A4A]/35 bg-[#E56A4A]/10 p-2.5">
+                    <div className="font-bold text-[#E56A4A]">Tier 1 — Flagship Models</div>
+                    <div className="mt-0.5 text-[11px] text-[var(--text-secondary)]">
+                      Claude Sonnet/Opus · GPT-6.2 / 4.1 · Gemini Pro · Grok 3
+                    </div>
+                  </div>
+                  <div className="rounded-lg border border-amber-500/35 bg-amber-500/10 p-2.5">
+                    <div className="font-bold text-[var(--ux-warn)]">
+                      Tier 2 — Cheap Coding ($0.20–$0.60/1M)
+                    </div>
+                    <div className="mt-0.5 text-[11px] text-[var(--text-secondary)]">
+                      DeepSeek V3/R1 $0.27 · GLM $0.60 · MiniMax $0.20 · Kimi K2 · Qwen3
+                    </div>
+                  </div>
+                  <div className="rounded-lg border border-emerald-500/35 bg-emerald-500/10 p-2.5">
+                    <div className="font-bold text-[var(--ux-mint)]">
+                      Tier 3 — Free Tier &amp; Local
+                    </div>
+                    <div className="mt-0.5 text-[11px] text-[var(--text-secondary)]">
+                      Gemini Flash · Groq · Cerebras · OpenRouter Free · Ollama
+                    </div>
+                  </div>
+                </div>
               </div>
-              <h3 className="text-lg font-bold">Code Non-Stop</h3>
-              <p className="text-xs leading-relaxed text-[var(--text-secondary)]">
-                Point Claude Code, Cursor, Codex CLI, or Cline to one base URL. When a key hits
-                HTTP 429 or quota limits, 001Router cools it down and transparently switches to the
-                next key or tier.
-              </p>
-              <div className="code-surface rounded-lg border p-3 font-mono text-xs">
-                <div>POST /v1/chat/completions</div>
-                <div>POST /v1/messages</div>
-                <div className="mt-1 text-emerald-400">→ Sub-15ms loopback · Live attemptTrail</div>
+
+              {/* Step 3 */}
+              <div
+                className="landing-ethereal-card space-y-4 p-6"
+                data-reveal=""
+                style={{ '--rv-delay': 2 }}
+              >
+                <div className="flex items-center justify-between">
+                  <span className="landing-reveal-icon flex h-8 w-8 items-center justify-center rounded-full bg-gradient-to-br from-[#34d399] to-[#059669] text-xs font-bold text-white shadow-sm">
+                    3
+                  </span>
+                  <span className="font-mono text-xs text-[var(--ux-mint)]">
+                    Streaming Fast Path
+                  </span>
+                </div>
+                <h3 className="text-lg font-bold">Code Non-Stop</h3>
+                <p className="text-xs leading-relaxed text-[var(--text-secondary)]">
+                  Point Claude Code, Cursor, Codex CLI, or Cline to one base URL. When a key hits
+                  HTTP 429 or quota limits, 001Router cools it down and transparently switches to
+                  the next key or tier.
+                </p>
+                <div className="code-surface rounded-lg border p-3 font-mono text-xs">
+                  <div>POST /v1/chat/completions</div>
+                  <div>POST /v1/messages</div>
+                  <div className="mt-1 text-emerald-400">
+                    → Sub-15ms loopback · Live attemptTrail
+                  </div>
+                </div>
               </div>
             </div>
           </div>
         </section>
 
-        {/* 4. 47+ PROVIDERS SHOWCASE WITH INTERACTIVE SLIDING TABS & FULL-BLEED LOGOS */}
-        <section id="providers" className="scroll-mt-20 space-y-7">
+        {/* 4. 47+ PROVIDERS SHOWCASE WITH INSTANT SILKY TAB TRANSITIONS */}
+        <section id="providers" className="scroll-mt-24 space-y-7">
           <div className="text-center" data-reveal="">
-            <span className="rounded-full border border-[#E56A4A]/30 bg-[#E56A4A]/10 px-3 py-1 text-xs font-semibold text-[#E56A4A]">
+            <span className="landing-scroll-pill rounded-full border border-[#E56A4A]/30 bg-[#E56A4A]/10 px-3 py-1 text-xs font-semibold text-[#E56A4A]">
               47+ Providers · 470+ Models
             </span>
             <div className="mt-3">
@@ -689,9 +994,9 @@ claude`,
             />
           </div>
 
-          <div className="space-y-6">
+          <div key={providerTab} className="landing-tab-panel space-y-6">
             {visibleProviderGroups.map((grp) => (
-              <div key={grp.title} className="r-card space-y-4 p-5" data-reveal="">
+              <div key={grp.title} className="landing-ethereal-card space-y-4 p-5">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <h3 className="text-base font-semibold text-[var(--text-primary)]">
                     {grp.title}
@@ -707,14 +1012,16 @@ claude`,
                   {grp.items.map((item, idx) => (
                     <div
                       key={item.preset}
-                      className="r-card-subtle flex items-center gap-3 p-3 transition-transform duration-200 hover:-translate-y-0.5"
+                      className="landing-provider-tile r-card-subtle group flex items-center gap-3 p-3"
                     >
-                      <ProviderLogo
-                        preset={item.preset}
-                        name={item.name}
-                        size="md"
-                        priority={idx < 3}
-                      />
+                      <div className="transition-transform duration-300 group-hover:scale-105">
+                        <ProviderLogo
+                          preset={item.preset}
+                          name={item.name}
+                          size="md"
+                          priority={idx < 3}
+                        />
+                      </div>
                       <div className="min-w-0">
                         <div className="truncate text-xs font-semibold text-[var(--text-primary)]">
                           {item.name}
@@ -731,10 +1038,10 @@ claude`,
           </div>
         </section>
 
-        {/* 5. 12+ CLI / IDE INTEGRATIONS WITH REAL TOOL LOGOS */}
-        <section id="integrations" className="scroll-mt-20 space-y-8">
+        {/* 5. 12+ CLI / IDE INTEGRATIONS WITH DIRECTIONAL SHEEN SWEEP */}
+        <section id="integrations" className="scroll-mt-24 space-y-8">
           <div className="text-center" data-reveal="">
-            <span className="rounded-full border border-sky-500/30 bg-sky-500/10 px-3 py-1 text-xs font-semibold text-sky-400">
+            <span className="landing-scroll-pill rounded-full border border-sky-500/30 bg-sky-500/10 px-3 py-1 text-xs font-semibold text-sky-400">
               Drop-In Tool Compatibility
             </span>
             <div className="mt-3">
@@ -755,26 +1062,34 @@ claude`,
                 to="/cli-tools"
                 data-reveal=""
                 style={{ '--rv-delay': idx % 4 }}
-                className="r-card flex items-center gap-3 p-3.5 transition-colors hover:border-[#E56A4A]/60"
+                className="landing-cli-tile r-card group flex items-center justify-between gap-3 p-3.5"
               >
-                <ProviderLogo preset={tool.id} name={tool.name} size="md" />
-                <div className="min-w-0">
-                  <div className="truncate text-sm font-semibold text-[var(--text-primary)]">
-                    {tool.name}
+                <div className="flex min-w-0 items-center gap-3">
+                  <div className="transition-transform duration-300 group-hover:scale-105">
+                    <ProviderLogo preset={tool.id} name={tool.name} size="md" />
                   </div>
-                  <div className="truncate text-[11px] text-[var(--text-secondary)]">
-                    {tool.desc}
+                  <div className="min-w-0">
+                    <div className="truncate text-sm font-semibold text-[var(--text-primary)]">
+                      {tool.name}
+                    </div>
+                    <div className="truncate text-[11px] text-[var(--text-secondary)]">
+                      {tool.desc}
+                    </div>
                   </div>
                 </div>
+                <ArrowUpRight
+                  className="h-4 w-4 shrink-0 text-[var(--text-muted)] opacity-0 transition-all duration-200 group-hover:translate-x-0.5 group-hover:-translate-y-0.5 group-hover:text-[#E56A4A] group-hover:opacity-100"
+                  aria-hidden="true"
+                />
               </Link>
             ))}
           </div>
         </section>
 
         {/* 6. BUILT-IN BONUS: RTK INPUT TOKEN SAVER + CAVEMAN OUTPUT MODE */}
-        <section id="token-saver" className="scroll-mt-20 space-y-8">
+        <section id="token-saver" className="scroll-mt-24 space-y-8">
           <div className="text-center" data-reveal="">
-            <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-xs font-semibold text-[var(--ux-mint)]">
+            <span className="landing-scroll-pill rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-xs font-semibold text-[var(--ux-mint)]">
               Built-in Bonus · Token Optimization
             </span>
             <div className="mt-3">
@@ -791,7 +1106,7 @@ claude`,
           <div className="grid gap-6 lg:grid-cols-2">
             {/* RTK Input Card */}
             <div
-              className="r-card flex flex-col justify-between space-y-4 p-6"
+              className="landing-ethereal-card flex flex-col justify-between space-y-5 p-6"
               data-reveal=""
               style={{ '--rv-delay': 0 }}
             >
@@ -815,23 +1130,33 @@ claude`,
                 </p>
               </div>
 
-              <div className="grid grid-cols-2 gap-3 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-subtle)] p-3.5 font-mono text-xs">
-                <div>
-                  <div className="text-[10px] text-[var(--text-muted)] uppercase">Before RTK</div>
-                  <div className="mt-1 text-base font-bold text-[var(--ux-danger)]">
-                    47,200 tokens
+              <div className="space-y-3 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-subtle)]/80 p-4 font-mono text-xs">
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] text-[var(--text-muted)] uppercase">
+                      Before RTK · Raw git diff / logs
+                    </span>
+                    <span className="font-bold text-[var(--ux-danger)]">47,200 tokens</span>
                   </div>
-                  <div className="text-[11px] text-[var(--text-secondary)]">
-                    Raw git diff / logs
+                  <div className="landing-meter-track">
+                    <div
+                      className="landing-meter-fill bg-gradient-to-r from-rose-500/85 to-red-400"
+                      style={{ '--meter': 1 }}
+                    />
                   </div>
                 </div>
-                <div>
-                  <div className="text-[10px] text-[var(--text-muted)] uppercase">After RTK</div>
-                  <div className="mt-1 text-base font-bold text-[var(--ux-mint)]">
-                    28,100 tokens
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] text-[var(--text-muted)] uppercase">
+                      After RTK · Same context · Same answer
+                    </span>
+                    <span className="font-bold text-[var(--ux-mint)]">28,100 tokens</span>
                   </div>
-                  <div className="text-[11px] text-[var(--text-secondary)]">
-                    Same context · Same answer
+                  <div className="landing-meter-track">
+                    <div
+                      className="landing-meter-fill bg-gradient-to-r from-emerald-500 to-teal-300"
+                      style={{ '--meter': 0.595 }}
+                    />
                   </div>
                 </div>
               </div>
@@ -839,7 +1164,7 @@ claude`,
 
             {/* Caveman Output Card */}
             <div
-              className="r-card flex flex-col justify-between space-y-4 p-6"
+              className="landing-ethereal-card flex flex-col justify-between space-y-5 p-6"
               data-reveal=""
               style={{ '--rv-delay': 1 }}
             >
@@ -861,23 +1186,33 @@ claude`,
                 </p>
               </div>
 
-              <div className="grid grid-cols-2 gap-3 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-subtle)] p-3.5 font-mono text-xs">
-                <div>
-                  <div className="text-[10px] text-[var(--text-muted)] uppercase">
-                    Verbose Reply
+              <div className="space-y-3 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-subtle)]/80 p-4 font-mono text-xs">
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] text-[var(--text-muted)] uppercase">
+                      Verbose Reply · 3 paragraphs of prose
+                    </span>
+                    <span className="font-bold text-[var(--ux-danger)]">148 tokens</span>
                   </div>
-                  <div className="mt-1 text-base font-bold text-[var(--ux-danger)]">148 tokens</div>
-                  <div className="text-[11px] text-[var(--text-secondary)]">
-                    3 paragraphs of prose
+                  <div className="landing-meter-track">
+                    <div
+                      className="landing-meter-fill bg-gradient-to-r from-rose-500/85 to-orange-400"
+                      style={{ '--meter': 1 }}
+                    />
                   </div>
                 </div>
-                <div>
-                  <div className="text-[10px] text-[var(--text-muted)] uppercase">
-                    Caveman Reply
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] text-[var(--text-muted)] uppercase">
+                      Caveman Reply · Root cause + exact fix
+                    </span>
+                    <span className="font-bold text-[var(--ux-mint)]">32 tokens</span>
                   </div>
-                  <div className="mt-1 text-base font-bold text-[var(--ux-mint)]">32 tokens</div>
-                  <div className="text-[11px] text-[var(--text-secondary)]">
-                    Root cause + exact fix
+                  <div className="landing-meter-track">
+                    <div
+                      className="landing-meter-fill bg-gradient-to-r from-[#E56A4A] via-amber-400 to-emerald-400"
+                      style={{ '--meter': 0.216 }}
+                    />
                   </div>
                 </div>
               </div>
@@ -885,7 +1220,7 @@ claude`,
           </div>
         </section>
 
-        {/* 7. ADVANCED FEATURES GRID */}
+        {/* 7. ADVANCED FEATURES — SYNCHRONIZED HOLOGRAPHIC GLOW GRID */}
         <section className="space-y-8">
           <div className="text-center" data-reveal="">
             <h2 className="landing-heading landing-reveal-title text-2xl font-bold tracking-tight sm:text-3xl">
@@ -897,33 +1232,37 @@ claude`,
             </p>
           </div>
 
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          <LucianGlowGrid
+            className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3"
+            ariaLabel="Advanced Features"
+          >
             {ADVANCED_FEATURES.map((feat, idx) => {
               const Icon = feat.icon;
               return (
-                <div
-                  key={feat.title}
-                  className="r-card p-5"
-                  data-reveal=""
-                  style={{ '--rv-delay': idx % 3 }}
-                >
-                  <div className="landing-reveal-icon flex h-9 w-9 items-center justify-center rounded-lg bg-[#E56A4A]/15 text-[#E56A4A]">
-                    <Icon className="h-5 w-5" aria-hidden="true" />
-                  </div>
-                  <h3 className="mt-3 text-sm font-semibold text-[var(--text-primary)]">
-                    {feat.title}
-                  </h3>
-                  <p className="mt-1 text-xs leading-relaxed text-[var(--text-secondary)]">
-                    {feat.desc}
-                  </p>
+                <div key={feat.title} data-reveal="" style={{ '--rv-delay': idx % 3 }}>
+                  <LucianGlowCard innerClassName="flex h-full flex-col p-5">
+                    <div className="landing-reveal-icon flex h-9 w-9 items-center justify-center rounded-lg bg-[#E56A4A]/15 text-[#E56A4A]">
+                      <Icon className="h-5 w-5" aria-hidden="true" />
+                    </div>
+                    <h3 className="mt-3 text-sm font-semibold text-[var(--text-primary)]">
+                      {feat.title}
+                    </h3>
+                    <p className="mt-1 text-xs leading-relaxed text-[var(--text-secondary)]">
+                      {feat.desc}
+                    </p>
+                  </LucianGlowCard>
                 </div>
               );
             })}
-          </div>
+          </LucianGlowGrid>
         </section>
 
-        {/* 8. GET STARTED IN 3 STEPS (#get-started) WITH INTERACTIVE CODE TABS */}
-        <section id="get-started" className="r-card scroll-mt-20 p-6 sm:p-8" data-reveal="">
+        {/* 8. GET STARTED IN 3 STEPS WITH HOLOGRAPHIC CODE TERMINAL */}
+        <section
+          id="get-started"
+          className="landing-ethereal-card scroll-mt-24 p-6 sm:p-8"
+          data-reveal=""
+        >
           <div className="grid gap-8 lg:grid-cols-12 lg:items-center">
             <div className="space-y-4 lg:col-span-6">
               <span className="rounded-full border border-[#E56A4A]/35 bg-[#E56A4A]/12 px-3 py-1 text-xs font-semibold text-[#E56A4A]">
@@ -934,7 +1273,7 @@ claude`,
               </h2>
               <ol className="space-y-3 text-xs text-[var(--text-secondary)] sm:text-sm">
                 <li className="flex items-start gap-3">
-                  <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[#E56A4A] text-xs font-bold text-white">
+                  <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-[#E56A4A] to-[#f59e0b] text-xs font-bold text-white">
                     1
                   </span>
                   <div>
@@ -946,7 +1285,7 @@ claude`,
                   </div>
                 </li>
                 <li className="flex items-start gap-3">
-                  <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[#E56A4A] text-xs font-bold text-white">
+                  <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-[#E56A4A] to-[#a78bfa] text-xs font-bold text-white">
                     2
                   </span>
                   <div>
@@ -960,7 +1299,7 @@ claude`,
                   </div>
                 </li>
                 <li className="flex items-start gap-3">
-                  <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[#E56A4A] text-xs font-bold text-white">
+                  <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-[#34d399] to-[#059669] text-xs font-bold text-white">
                     3
                   </span>
                   <div>
@@ -1000,7 +1339,7 @@ claude`,
                   ariaLabel="Quick start code snippets"
                 />
               </div>
-              <div className="code-surface overflow-hidden rounded-xl border shadow-xl">
+              <div className="landing-terminal-shell code-surface overflow-hidden">
                 <div className="flex items-center justify-between border-b border-white/10 bg-white/[0.03] px-4 py-2.5">
                   <div className="flex items-center gap-1.5">
                     <span className="h-2.5 w-2.5 rounded-full bg-[#FF5F56]" />
@@ -1012,7 +1351,10 @@ claude`,
                   </div>
                   <CopyButton value={activeSnippet.code} size="xs" />
                 </div>
-                <pre className="overflow-x-auto p-4 font-mono text-xs leading-relaxed">
+                <pre
+                  key={snippetTab}
+                  className="landing-tab-panel overflow-x-auto p-4 font-mono text-xs leading-relaxed"
+                >
                   <code>{activeSnippet.code}</code>
                 </pre>
               </div>
@@ -1020,17 +1362,17 @@ claude`,
           </div>
         </section>
 
-        {/* 9. LUCIAN #425 SPOTLIGHT CTA BANNER */}
+        {/* 9. ETHEREAL ASTRAL SPOTLIGHT CTA BANNER */}
         <div data-reveal="">
           <LucianSpotlightCta />
         </div>
       </main>
 
       {/* Footer */}
-      <footer className="border-t border-[var(--border-subtle)] bg-[var(--bg-sidebar)] py-8 text-xs text-[var(--text-secondary)]">
+      <footer className="mt-12 border-t border-[var(--border-subtle)] bg-[var(--bg-sidebar)]/90 py-8 text-xs text-[var(--text-secondary)] backdrop-blur-sm">
         <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-4 px-4 sm:px-6 lg:px-8">
           <div className="flex items-center gap-2.5">
-            <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-[#E56A4A] text-white">
+            <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-[#E56A4A] to-[#cc5236] text-white">
               <Waypoints className="h-4 w-4" aria-hidden="true" />
             </div>
             <span className="font-semibold text-[var(--text-primary)]">001Router v2.0</span>

@@ -1,42 +1,76 @@
 /* Lucian UX/UI Prompt #228 · MIT License (c) 2026 Seokwoooo · https://lucianlabs.dev/uxui-prompt/#228 */
+/* Upgraded with iridescent astral rim + smooth spring hover lift for 001Router */
 .u228 {
   position: relative;
-  --x: -500px;
-  --y: -500px;
   --o: 0;
 }
 
 .u228-c {
   position: relative;
-  border-radius: 13px;
+  height: 100%;
+  border-radius: 15px;
   padding: 1px;
   background:
     radial-gradient(
-      220px circle at var(--cx, -500px) var(--cy, -500px),
-      color-mix(in srgb, var(--ux-accent) calc(var(--o, 0) * 90%), transparent),
-      color-mix(in srgb, var(--ux-accent-2) calc(var(--o, 0) * 45%), transparent) 42%,
-      transparent 72%
+      260px circle at var(--cx, -500px) var(--cy, -500px),
+      color-mix(in srgb, var(--ux-accent) calc(var(--o, 0) * 95%), transparent),
+      color-mix(in srgb, #a78bfa calc(var(--o, 0) * 65%), transparent) 38%,
+      color-mix(in srgb, #34d399 calc(var(--o, 0) * 35%), transparent) 62%,
+      transparent 78%
     ),
     var(--ux-line);
+  transition: transform 0.48s ease-out, box-shadow 0.32s ease;
+  transition-timing-function: linear(0, 0.38 16%, 1.08 44%, 0.98 70%, 1), ease;
+}
+
+.u228-c:hover {
+  transform: translate3d(0, -3px, 0);
+  box-shadow: 0 22px 42px -26px color-mix(in srgb, var(--ux-accent) 44%, var(--ux-shadow-strong));
 }
 
 .u228-in {
   position: relative;
   height: 100%;
-  border-radius: 12px;
+  border-radius: 14px;
   background:
     radial-gradient(
-      260px circle at var(--cx, -500px) var(--cy, -500px),
-      color-mix(in srgb, var(--ux-accent) calc(var(--o, 0) * 11%), transparent),
-      transparent 62%
+      300px circle at var(--cx, -500px) var(--cy, -500px),
+      color-mix(in srgb, var(--ux-accent) calc(var(--o, 0) * 14%), transparent),
+      color-mix(in srgb, #a78bfa calc(var(--o, 0) * 8%), transparent) 46%,
+      transparent 70%
     ),
     var(--ux-surface);
   overflow: hidden;
 }
 
+.u228-in::after {
+  content: '';
+  position: absolute;
+  inset-inline: 18%;
+  top: 0;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in srgb, var(--ux-accent) 55%, rgba(255, 255, 255, 0.3)),
+    transparent
+  );
+  opacity: 0;
+  transition: opacity 0.3s ease;
+  pointer-events: none;
+}
+
+.u228-c:hover .u228-in::after {
+  opacity: 1;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .u228-c {
     background: var(--ux-line);
+    transition: box-shadow 0.2s ease;
+  }
+  .u228-c:hover {
+    transform: none;
   }
   .u228-in {
     background: var(--ux-surface);

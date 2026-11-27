@@ -1,41 +1,80 @@
-/* Ported & adapted from Lucian UX/UI #425 (CTA card) for 001Router */
+/* Ethereal Astral Spotlight CTA Banner for 001Router */
 .lucian-cta-card {
   position: relative;
   isolation: isolate;
   overflow: hidden;
-  border-radius: 26px;
-  background: linear-gradient(135deg, #e56a4a 0%, #c84b2d 52%, #7c2416 100%);
+  border-radius: 28px;
+  background:
+    radial-gradient(90% 80% at 15% 10%, rgba(229, 106, 74, 0.92), transparent 62%),
+    radial-gradient(75% 75% at 88% 85%, rgba(124, 58, 237, 0.72), transparent 62%),
+    linear-gradient(135deg, #c94c2c 0%, #7d2536 48%, #211635 100%);
   box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.22),
     inset 0 0 0 1px rgba(255, 255, 255, 0.14),
-    0 28px 60px -28px rgba(229, 106, 74, 0.55);
+    0 34px 74px -32px rgba(229, 106, 74, 0.55);
   color: #ffffff;
+}
+
+.lucian-cta-stars {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background-image:
+    radial-gradient(1.5px 1.5px at 14% 28%, rgba(255, 255, 255, 0.75), transparent),
+    radial-gradient(1px 1px at 32% 72%, rgba(255, 255, 255, 0.6), transparent),
+    radial-gradient(1.5px 1.5px at 58% 22%, rgba(253, 230, 138, 0.8), transparent),
+    radial-gradient(1px 1px at 78% 36%, rgba(196, 181, 253, 0.75), transparent),
+    radial-gradient(1.5px 1.5px at 86% 74%, rgba(110, 231, 183, 0.75), transparent),
+    radial-gradient(1px 1px at 44% 84%, rgba(255, 255, 255, 0.5), transparent);
+  opacity: 0.65;
+  pointer-events: none;
 }
 
 .lucian-cta-blob {
   position: absolute;
   z-index: -2;
   border-radius: 50%;
-  filter: blur(36px);
+  filter: blur(42px);
   pointer-events: none;
 }
 
 .lucian-cta-blob-1 {
-  width: 280px;
-  height: 280px;
-  left: -70px;
-  top: -100px;
-  background: rgba(253, 186, 116, 0.45);
+  width: 310px;
+  height: 310px;
+  left: -80px;
+  top: -110px;
+  background: rgba(251, 191, 36, 0.45);
 }
 
 .lucian-cta-blob-2 {
-  width: 260px;
-  height: 260px;
-  right: -60px;
+  width: 280px;
+  height: 280px;
+  right: -70px;
   bottom: -110px;
-  background: rgba(52, 211, 153, 0.3);
+  background: rgba(52, 211, 153, 0.36);
+}
+
+.lucian-cta-blob-3 {
+  width: 240px;
+  height: 240px;
+  left: 48%;
+  top: -90px;
+  background: rgba(167, 139, 250, 0.42);
 }
 
 @media (prefers-reduced-motion: no-preference) {
+  @keyframes lucian-cta-drift {
+    0% {
+      transform: translate3d(0, 0, 0) scale(1);
+    }
+    50% {
+      transform: translate3d(30px, 18px, 0) scale(1.1);
+    }
+    100% {
+      transform: translate3d(-18px, 26px, 0) scale(0.94);
+    }
+  }
+
   .lucian-cta-blob-1 {
     animation: lucian-cta-drift 13s ease-in-out infinite alternate;
   }
@@ -43,17 +82,9 @@
   .lucian-cta-blob-2 {
     animation: lucian-cta-drift 16s ease-in-out -6s infinite alternate;
   }
-}
 
-@keyframes lucian-cta-drift {
-  0% {
-    transform: translate3d(0, 0, 0) scale(1);
-  }
-  50% {
-    transform: translate3d(28px, 16px, 0) scale(1.08);
-  }
-  100% {
-    transform: translate3d(-14px, 24px, 0) scale(0.95);
+  .lucian-cta-blob-3 {
+    animation: lucian-cta-drift 19s ease-in-out -3s infinite alternate;
   }
 }
 
@@ -62,12 +93,13 @@
   inset: 0;
   z-index: -1;
   background: radial-gradient(
-    220px circle at var(--mx, 50%) var(--my, 40%),
+    260px circle at var(--mx, 50%) var(--my, 40%),
     rgba(255, 255, 255, 0.28),
-    transparent 70%
+    rgba(251, 191, 36, 0.12) 45%,
+    transparent 72%
   );
   opacity: 0;
-  transition: opacity 0.38s ease;
+  transition: opacity 0.36s ease;
   pointer-events: none;
 }
 
@@ -81,7 +113,7 @@
   inset: 0;
   z-index: -1;
   border-radius: inherit;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.12), transparent 45%);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.14), transparent 46%);
   pointer-events: none;
 }
 
@@ -92,57 +124,55 @@
   justify-content: center;
   gap: 8px;
   min-block-size: 44px;
-  padding: 10px 22px;
+  padding: 10px 24px;
   border-radius: 999px;
   background: #ffffff;
-  color: #9a2f18;
+  color: #8f2714;
   font-size: 0.875rem;
   font-weight: 800;
   overflow: hidden;
   box-shadow:
-    0 10px 24px -10px rgba(30, 8, 2, 0.6),
-    inset 0 -2px 0 rgba(154, 47, 24, 0.1);
-  transition:
-    transform 0.35s ease-out,
-    box-shadow 0.25s ease;
-  transition-timing-function: linear(0, 0.45 18%, 1.07 42%, 0.98 68%, 1), ease;
+    0 14px 30px -10px rgba(18, 6, 20, 0.65),
+    inset 0 -2px 0 rgba(143, 39, 20, 0.12);
+  transition: transform 0.4s ease-out, box-shadow 0.25s ease;
+  transition-timing-function: linear(0, 0.45 18%, 1.08 42%, 0.98 68%, 1), ease;
 }
 
+/* Compositor-only transform shine sweep (replaces layout-triggering left animation) */
 .lucian-cta-btn::before {
   content: '';
   position: absolute;
-  top: 0;
-  bottom: 0;
-  left: -65%;
-  width: 50%;
-  background: linear-gradient(100deg, transparent, rgba(229, 106, 74, 0.32), transparent);
-  transform: skewX(-20deg);
+  inset-block: 0;
+  left: 0;
+  width: 55%;
+  background: linear-gradient(100deg, transparent, rgba(229, 106, 74, 0.34), transparent);
+  transform: translate3d(-150%, 0, 0) skewX(-20deg);
   pointer-events: none;
 }
 
 @media (prefers-reduced-motion: no-preference) {
-  .lucian-cta-btn::before {
-    animation: lucian-cta-shine 3.6s ease-in-out infinite;
+  @keyframes lucian-cta-shine {
+    0%,
+    62% {
+      transform: translate3d(-150%, 0, 0) skewX(-20deg);
+    }
+    100% {
+      transform: translate3d(290%, 0, 0) skewX(-20deg);
+    }
   }
-}
 
-@keyframes lucian-cta-shine {
-  0%,
-  64% {
-    left: -65%;
-  }
-  100% {
-    left: 135%;
+  .lucian-cta-btn::before {
+    animation: lucian-cta-shine 3.8s ease-in-out infinite;
   }
 }
 
 .lucian-cta-btn:hover {
-  transform: translateY(-2px) scale(1.03);
-  box-shadow: 0 16px 30px -12px rgba(30, 8, 2, 0.65);
+  transform: translate3d(0, -2px, 0) scale(1.03);
+  box-shadow: 0 20px 36px -12px rgba(18, 6, 20, 0.72);
 }
 
 .lucian-cta-btn:active {
-  transform: scale(0.95);
+  transform: scale(0.96);
   transition-duration: 0.1s;
 }
 
@@ -152,6 +182,12 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .lucian-cta-btn {
+    transition: box-shadow 0.2s ease;
+  }
+  .lucian-cta-btn:hover {
+    transform: none;
+  }
   .lucian-cta-btn::before {
     display: none;
   }

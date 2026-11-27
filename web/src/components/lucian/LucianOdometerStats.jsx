@@ -6,7 +6,7 @@ const DIGITS = '01234567890123456789'.split('');
 
 /**
  * Odometer stats (Lucian #426): digits roll into place when visible; hover a cell to roll again.
- * items: Array<{ value: string, label: string }>
+ * Uses a low threshold (0.15) so mobile viewports never leave counters stuck at zero.
  */
 export function LucianOdometerStats({ items, className = '' }) {
   const rootRef = useRef(null);
@@ -14,7 +14,7 @@ export function LucianOdometerStats({ items, className = '' }) {
   useEffect(() => {
     const root = rootRef.current;
     if (!root) return undefined;
-    const rm = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const rm = window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches;
     const cells = Array.from(root.querySelectorAll('.u426-c'));
     const stats = cells.map((li) => Array.from(li.querySelectorAll('.u426-col > span')));
 
@@ -64,10 +64,12 @@ export function LucianOdometerStats({ items, className = '' }) {
             io?.disconnect();
           }
         },
-        { threshold: 0.5 }
+        { threshold: 0.15 }
       );
       io.observe(root);
-    } else reveal();
+    } else {
+      reveal();
+    }
 
     return () => {
       io?.disconnect();
@@ -85,7 +87,7 @@ export function LucianOdometerStats({ items, className = '' }) {
               {st.value.split('').map((ch, ci) =>
                 /\d/.test(ch) ? (
                   <span key={ci} className="u426-col">
-                    <span data-d={ch} style={{ '--k': k++ }}>
+                    <span data-d={ch} style={{ '--k': k++, '--d': ch }}>
                       {DIGITS.map((d, di) => (
                         <b key={di}>{d}</b>
                       ))}

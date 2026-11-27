@@ -2,7 +2,7 @@
 import './lucian-419.css';
 
 /**
- * Word-by-word rising headline from Lucian #419 (SaaS hero).
+ * Word-by-word rising headline with iridescent aurora gradient segments.
  * lines: Array<Array<{ text: string, gradient?: boolean }>> — each inner array is one visual line.
  */
 export function LucianWordRiseHeadline({ lines, className = '', as: Tag = 'h1' }) {
@@ -34,11 +34,14 @@ export function LucianWordRiseHeadline({ lines, className = '', as: Tag = 'h1' }
   );
 }
 
-/** #419 release pill badge */
+/** #419 luminous release pill badge */
 export function LucianReleasePill({ tag, children, href = '#how-it-works', delay = '0.05s' }) {
   return (
     <a className="ux u419 u419-pill rv" href={href} style={{ '--d': delay }}>
-      <b>{tag}</b>
+      <b>
+        <span className="u419-dot" aria-hidden="true" />
+        {tag}
+      </b>
       <span>{children}</span>
       <svg viewBox="0 0 10 10" aria-hidden="true">
         <path d="M3.5 2 6.5 5l-3 3" />

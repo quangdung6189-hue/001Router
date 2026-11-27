@@ -1,6 +1,5 @@
 /* Lucian UX/UI Prompt #426 · MIT License (c) 2026 Seokwoooo · https://lucianlabs.dev/uxui-prompt/#426 */
-/* Adapted: responsive 2/4-column grid of glass cells instead of a fixed 324px card; digit row height
-   is a variable (30px → 36px on wider screens). Odometer roll curve, duration and stagger unchanged. */
+/* Upgraded for 001Router with prismatic glass tiles and physics-based spring elevation. */
 .u426 {
   --h: 30px;
   --fs: 24px;
@@ -12,6 +11,7 @@
   list-style: none;
   color: var(--ux-ink);
 }
+
 @media (min-width: 640px) {
   .u426 {
     --h: 36px;
@@ -26,43 +26,62 @@
   flex-direction: column;
   align-items: center;
   gap: 6px;
-  padding: 18px 8px 16px;
+  padding: 18px 10px 16px;
   border-radius: 18px;
-  background: color-mix(in srgb, var(--ux-surface) 72%, transparent);
-  box-shadow: 0 0 0 1px var(--ux-line), 0 1px 2px var(--ux-shadow), 0 20px 40px -26px var(--ux-shadow-strong);
-  -webkit-backdrop-filter: blur(10px);
-  backdrop-filter: blur(10px);
+  background:
+    radial-gradient(110% 80% at 50% 0%, color-mix(in srgb, var(--ux-accent) 10%, transparent), transparent 65%),
+    color-mix(in srgb, var(--ux-surface) 74%, transparent);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    0 0 0 1px var(--ux-line),
+    0 20px 40px -26px var(--ux-shadow-strong);
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
   cursor: default;
   overflow: hidden;
-  transition: transform 0.45s var(--ux-spring), box-shadow 0.3s;
+  transition: transform 0.55s ease-out, box-shadow 0.3s ease;
+  transition-timing-function: linear(0, 0.38 15%, 1.09 42%, 0.97 68%, 1), ease;
 }
+
 .u426-c::after {
   content: '';
   position: absolute;
-  left: 20%;
-  right: 20%;
+  left: 16%;
+  right: 16%;
   top: 0;
-  height: 1px;
-  background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--ux-accent) 70%, transparent), transparent);
+  height: 1.5px;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in srgb, var(--ux-accent) 80%, transparent),
+    rgba(167, 139, 250, 0.7),
+    transparent
+  );
+  opacity: 0.85;
 }
+
 .u426-c:hover {
-  transform: translateY(-3px);
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--ux-accent) 40%, transparent), 0 1px 2px var(--ux-shadow),
-    0 24px 44px -24px color-mix(in srgb, var(--ux-accent) 45%, transparent);
+  transform: translate3d(0, -4px, 0) scale(1.015);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.14),
+    0 0 0 1px color-mix(in srgb, var(--ux-accent) 46%, transparent),
+    0 26px 46px -22px color-mix(in srgb, var(--ux-accent) 52%, transparent);
 }
 
 .u426-n {
   display: flex;
   align-items: center;
   height: var(--h);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: var(--fs);
   line-height: var(--h);
   font-weight: 850;
   letter-spacing: -0.02em;
   font-variant-numeric: tabular-nums;
   color: var(--ux-accent);
+  text-shadow: 0 0 24px color-mix(in srgb, var(--ux-accent) 32%, transparent);
 }
+
 .u426-n i {
   font-style: normal;
 }
@@ -72,13 +91,20 @@
   height: var(--h);
   overflow: hidden;
 }
+
 .u426-col > span {
   display: flex;
   flex-direction: column;
-  transform: translateY(calc(var(--d, 0) * -1 * var(--h)));
-  transition: transform 1.3s cubic-bezier(0.25, 1.12, 0.4, 1);
-  transition-delay: calc(var(--k, 0) * 70ms);
+  transform: translate3d(0, calc(var(--d, 0) * -1 * var(--h)), 0);
 }
+
+@media (prefers-reduced-motion: no-preference) {
+  .u426-col > span {
+    transition: transform 1.25s cubic-bezier(0.25, 1.12, 0.4, 1);
+    transition-delay: calc(var(--k, 0) * 70ms);
+  }
+}
+
 .u426-col b {
   display: block;
   height: var(--h);
@@ -86,17 +112,19 @@
   font-weight: inherit;
   text-align: center;
 }
+
 .u426-c small {
   font-size: 11.5px;
-  font-weight: 500;
+  font-weight: 550;
   color: var(--ux-ink-2);
   text-align: center;
 }
+
 @media (prefers-reduced-motion: reduce) {
-  .u426-col > span {
-    transition: none !important;
-  }
   .u426-c {
-    transition: none;
+    transition: box-shadow 0.2s ease;
+  }
+  .u426-c:hover {
+    transform: none;
   }
 }

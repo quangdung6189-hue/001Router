@@ -1,54 +1,57 @@
 /* Lucian UX/UI Prompt #419 · MIT License (c) 2026 Seokwoooo · https://lucianlabs.dev/uxui-prompt/#419 */
-/* Adapted: headline size inherits from .landing-hero-title, pill badge uses 001Router gradient.
-   Word-rise motion, easing and stagger values unchanged. */
-.u419.rv,
-.u419 .rv {
-  animation: u419-up 0.8s cubic-bezier(0.2, 0.8, 0.2, 1) both;
-  animation-delay: var(--d, 0s);
-}
-@keyframes u419-up {
-  from {
-    opacity: 0;
-    transform: translateY(10px);
-  }
-  to {
-    opacity: 1;
-    transform: none;
-  }
-}
+/* Upgraded for 001Router with opt-in reduced-motion safety and ethereal aurora gradient shimmer. */
 
 .u419-pill {
   display: inline-flex;
   align-items: center;
-  gap: 7px;
-  height: 28px;
-  padding: 0 10px 0 3px;
-  border-radius: 99px;
-  background: var(--ux-surface);
-  box-shadow: 0 0 0 1px var(--ux-line-2), 0 1px 2px var(--ux-shadow);
+  gap: 8px;
+  min-height: 30px;
+  padding: 3px 12px 3px 4px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--ux-surface) 84%, transparent);
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--ux-accent) 26%, var(--ux-line-2)),
+    0 8px 24px -14px color-mix(in srgb, var(--ux-accent) 45%, transparent);
   font-size: 11.5px;
   font-weight: 600;
   color: var(--ux-ink-2);
   text-decoration: none;
-  transition: box-shadow 0.25s, color 0.2s, transform 0.4s var(--ux-spring);
+  transition: box-shadow 0.28s ease, color 0.2s ease, transform 0.4s ease-out;
+  transition-timing-function: ease, ease, linear(0, 0.42 16%, 1.08 44%, 0.98 70%, 1);
 }
+
 .u419-pill:hover {
   color: var(--ux-ink);
-  transform: translateY(-1px);
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--ux-accent) 45%, transparent),
-    0 6px 16px -6px color-mix(in srgb, var(--ux-accent) 45%, transparent);
+  transform: translateY(-2px);
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--ux-accent) 58%, transparent),
+    0 12px 28px -10px color-mix(in srgb, var(--ux-accent) 55%, transparent);
 }
+
 .u419-pill b {
-  display: flex;
+  display: inline-flex;
   align-items: center;
+  gap: 5px;
   height: 22px;
-  padding: 0 8px;
-  border-radius: 99px;
-  background: linear-gradient(135deg, #e56a4a, #f59e0b);
-  color: #fff;
+  padding: 0 9px;
+  border-radius: 999px;
+  background: linear-gradient(125deg, #e56a4a 0%, #f59e0b 55%, #a78bfa 100%);
+  color: #ffffff;
   font-size: 10.5px;
   font-weight: 750;
+  letter-spacing: 0.01em;
 }
+
+.u419-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 0 8px rgba(255, 255, 255, 0.9);
+}
+
 .u419-pill svg {
   width: 10px;
   height: 10px;
@@ -59,9 +62,11 @@
   stroke-linejoin: round;
   transition: transform 0.35s var(--ux-spring);
 }
+
 .u419-pill:hover svg {
   transform: translateX(3px);
 }
+
 .u419-pill:focus-visible {
   outline: 2px solid var(--ux-accent);
   outline-offset: 2px;
@@ -70,41 +75,88 @@
 .u419-h1 {
   letter-spacing: -0.045em;
 }
+
 .u419-h1 .ln {
   display: block;
 }
+
 .u419-w {
   display: inline-block;
   overflow: hidden;
-  padding: 0 0.02em 0.08em;
-  margin-bottom: -0.08em;
+  padding: 0 0.03em 0.1em;
+  margin-bottom: -0.1em;
   vertical-align: top;
 }
+
 .u419-w > span {
   display: inline-block;
-  transform: translateY(105%) rotate(4deg);
-  transform-origin: 0 100%;
-  animation: u419-word 0.9s cubic-bezier(0.25, 1.35, 0.45, 1) forwards;
-  animation-delay: calc(0.15s + var(--i) * 80ms);
 }
-@keyframes u419-word {
-  to {
-    transform: none;
-  }
-}
+
 .u419-w.gr > span {
-  background: linear-gradient(100deg, var(--ux-accent), var(--ux-accent-2), #fb7185);
+  background: linear-gradient(
+    110deg,
+    #e56a4a 0%,
+    #f59e0b 28%,
+    #f472b6 52%,
+    #a78bfa 74%,
+    #34d399 100%
+  );
+  background-size: 220% 100%;
+  background-position: 0% 50%;
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
 }
 
-@media (prefers-reduced-motion: reduce) {
+@media (prefers-reduced-motion: no-preference) {
+  @keyframes u419-up {
+    from {
+      opacity: 0;
+      transform: translate3d(0, 12px, 0);
+    }
+    to {
+      opacity: 1;
+      transform: translate3d(0, 0, 0);
+    }
+  }
+
+  @keyframes u419-word {
+    from {
+      transform: translate3d(0, 108%, 0) rotate(3.5deg);
+    }
+    to {
+      transform: translate3d(0, 0, 0) rotate(0deg);
+    }
+  }
+
+  @keyframes u419-aurora-flow {
+    0% {
+      background-position: 0% 50%;
+    }
+    50% {
+      background-position: 100% 50%;
+    }
+    100% {
+      background-position: 0% 50%;
+    }
+  }
+
   .u419.rv,
-  .u419 .rv,
+  .u419 .rv {
+    animation: u419-up 0.78s cubic-bezier(0.22, 1, 0.36, 1) both;
+    animation-delay: var(--d, 0s);
+  }
+
   .u419-w > span {
-    animation: none !important;
-    transform: none !important;
-    opacity: 1 !important;
+    transform-origin: 0 100%;
+    animation: u419-word 0.88s cubic-bezier(0.22, 1.24, 0.42, 1) both;
+    animation-delay: calc(0.14s + var(--i) * 78ms);
+  }
+
+  .u419-w.gr > span {
+    animation:
+      u419-word 0.88s cubic-bezier(0.22, 1.24, 0.42, 1) both,
+      u419-aurora-flow 7.5s ease-in-out 1.1s infinite;
+    animation-delay: calc(0.14s + var(--i) * 78ms), 1.1s;
   }
 }

@@ -2,6 +2,11 @@
 import { useEffect, useRef } from 'react';
 import './lucian-228.css';
 
+/**
+ * Cursor-reactive holographic glow grid.
+ * Matches all `.u228-c` cards inside the grid (even when wrapped in reveal containers)
+ * and caches bounding metrics between pointer frames to prevent layout thrashing.
+ */
 export function LucianGlowGrid({
   children,
   className = '',
@@ -15,32 +20,52 @@ export function LucianGlowGrid({
     const root = rootRef.current;
     if (!root) return undefined;
 
-    const mq = window.matchMedia('(prefers-reduced-motion: reduce)');
-    let reduced = mq.matches;
+    const mq = window.matchMedia?.('(prefers-reduced-motion: reduce)');
+    let reduced = Boolean(mq?.matches);
     let p = { x: -500, y: -500 };
     let o = 0;
     let oT = 0;
     let raf = 0;
     let last = 0;
 
-    const apply = () => {
-      const cards = root.querySelectorAll(':scope > .u228-c');
-      const rb = root.getBoundingClientRect();
-      const k = root.offsetWidth / (rb.width || 1);
-      cards.forEach((el) => {
+    // Cached card offsets relative to grid root (refreshed on resize / scroll / DOM change)
+    let rootRect = root.getBoundingClientRect();
+    let cardCache = [];
+    let metricsDirty = true;
+
+    const measure = () => {
+      rootRect = root.getBoundingClientRect();
+      const k = root.offsetWidth / (rootRect.width || 1);
+      const cards = Array.from(root.querySelectorAll('.u228-c'));
+      cardCache = cards.map((el) => {
         const r = el.getBoundingClientRect();
-        const lx = p.x - (r.left - rb.left) * k;
-        const ly = p.y - (r.top - rb.top) * k;
-        el.style.setProperty('--cx', `${lx.toFixed(1)}px`);
-        el.style.setProperty('--cy', `${ly.toFixed(1)}px`);
-        el.style.setProperty('--o', o.toFixed(3));
-        const inner = el.firstElementChild;
-        if (inner) {
-          inner.style.setProperty('--cx', `${(lx - 1).toFixed(1)}px`);
-          inner.style.setProperty('--cy', `${(ly - 1).toFixed(1)}px`);
-          inner.style.setProperty('--o', o.toFixed(3));
-        }
+        return {
+          el,
+          inner: el.firstElementChild,
+          dx: (r.left - rootRect.left) * k,
+          dy: (r.top - rootRect.top) * k,
+          w: r.width * k,
+          h: r.height * k,
+        };
       });
+      metricsDirty = false;
+    };
+
+    const apply = () => {
+      if (metricsDirty) measure();
+      for (let i = 0; i < cardCache.length; i++) {
+        const c = cardCache[i];
+        const lx = p.x - c.dx;
+        const ly = p.y - c.dy;
+        c.el.style.setProperty('--cx', `${lx.toFixed(1)}px`);
+        c.el.style.setProperty('--cy', `${ly.toFixed(1)}px`);
+        c.el.style.setProperty('--o', o.toFixed(3));
+        if (c.inner) {
+          c.inner.style.setProperty('--cx', `${(lx - 1).toFixed(1)}px`);
+          c.inner.style.setProperty('--cy', `${(ly - 1).toFixed(1)}px`);
+          c.inner.style.setProperty('--o', o.toFixed(3));
+        }
+      }
     };
 
     const frame = (now) => {
@@ -48,7 +73,7 @@ export function LucianGlowGrid({
       if (!root.isConnected) return;
       const dt = Math.min(0.05, Math.max(0, (now - last) / 1000));
       last = now;
-      o += (oT - o) * (reduced ? 1 : Math.min(1, dt * (oT ? 8 : 2.5)));
+      o += (oT - o) * (reduced ? 1 : Math.min(1, dt * (oT ? 9.5 : 3.2)));
       apply();
       if (Math.abs(oT - o) > 0.005) {
         raf = requestAnimationFrame(frame);
@@ -64,9 +89,9 @@ export function LucianGlowGrid({
 
     const onPointerMove = (e) => {
       if (reduced) return;
-      const b = root.getBoundingClientRect();
-      const k = root.offsetWidth / (b.width || 1);
-      p = { x: (e.clientX - b.left) * k, y: (e.clientY - b.top) * k };
+      if (metricsDirty) measure();
+      const k = root.offsetWidth / (rootRect.width || 1);
+      p = { x: (e.clientX - rootRect.left) * k, y: (e.clientY - rootRect.top) * k };
       oT = 1;
       apply();
       kick();
@@ -75,6 +100,10 @@ export function LucianGlowGrid({
     const onPointerLeave = () => {
       oT = 0;
       kick();
+    };
+
+    const markDirty = () => {
+      metricsDirty = true;
     };
 
     const onMediaChange = (e) => {
@@ -86,15 +115,23 @@ export function LucianGlowGrid({
       }
     };
 
-    root.addEventListener('pointermove', onPointerMove);
-    root.addEventListener('pointerleave', onPointerLeave);
-    mq.addEventListener?.('change', onMediaChange);
+    const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(markDirty) : null;
+    ro?.observe(root);
+
+    root.addEventListener('pointerenter', markDirty, { passive: true });
+    root.addEventListener('pointermove', onPointerMove, { passive: true });
+    root.addEventListener('pointerleave', onPointerLeave, { passive: true });
+    window.addEventListener('scroll', markDirty, { passive: true });
+    mq?.addEventListener?.('change', onMediaChange);
     apply();
 
     return () => {
+      ro?.disconnect();
+      root.removeEventListener('pointerenter', markDirty);
       root.removeEventListener('pointermove', onPointerMove);
       root.removeEventListener('pointerleave', onPointerLeave);
-      mq.removeEventListener?.('change', onMediaChange);
+      window.removeEventListener('scroll', markDirty);
+      mq?.removeEventListener?.('change', onMediaChange);
       if (raf) cancelAnimationFrame(raf);
     };
   }, []);
