@@ -266,10 +266,10 @@ describe("001Router IDE Extension API & VSIX Packaging", () => {
     assert.equal(payload.catalog.providers.length, 4);
   });
 
-  it("4. packages a valid v1.3.0 .vsix archive with OPC manifests and brand assets", async () => {
+  it("4. packages a valid v1.4.0 .vsix archive with modular agent engine, Grok 3D core, and brand assets", async () => {
     const packed = packVsix();
     assert.ok(packed.bytes > 5000);
-    assert.ok(packed.outPath.endsWith("001router-code-1.3.0.vsix"));
+    assert.ok(packed.outPath.endsWith("001router-code-1.4.0.vsix"));
     const vsixBuf = await fs.readFile(packed.outPath);
     // ZIP PK\x03\x04 signature + required OPC entries inside archive
     assert.equal(vsixBuf[0], 0x50);
@@ -278,8 +278,14 @@ describe("001Router IDE Extension API & VSIX Packaging", () => {
     assert.ok(asLatin1.includes("[Content_Types].xml"));
     assert.ok(asLatin1.includes("extension.vsixmanifest"));
     assert.ok(asLatin1.includes("extension/extension.js"));
+    assert.ok(asLatin1.includes("extension/src/controller.js"));
+    assert.ok(asLatin1.includes("extension/src/agent/agentLoop.js"));
+    assert.ok(asLatin1.includes("extension/src/stream/sseParser.js"));
+    assert.ok(asLatin1.includes("extension/src/permissions/permissionManager.js"));
+    assert.ok(asLatin1.includes("extension/src/tools/toolExecutor.js"));
     assert.ok(asLatin1.includes("extension/media/icon.png"));
     assert.ok(asLatin1.includes("extension/media/icon-activity.svg"));
+    assert.ok(asLatin1.includes("extension/media/grok3d.js"));
     assert.ok(asLatin1.includes("extension/media/webview.js"));
     assert.ok(asLatin1.includes("extension/media/webview.css"));
     assert.ok(asLatin1.includes("extension/media/providers/claude.png"));

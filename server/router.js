@@ -64,6 +64,7 @@ import {
   createClaudeToOpenAIStreamTransformer,
   createOpenAIToClaudeStreamTransformer,
   createOpenAIToResponsesStreamTransformer,
+  createOpenAIToolCallIndexNormalizer,
   createSSEParser,
   openaiToClaudeRequest,
   openaiToClaudeResponse,
@@ -3050,17 +3051,31 @@ export class RouterService {
       }
     };
 
-    const resetIdleTimer = () => {
+    let lastActivityAt = Date.now();
+    const scheduleIdleTimer = (delayMs) => {
       if (idleTimer) {
         clearTimeout(idleTimer);
         idleTimer = null;
       }
       if (streamIdleTimeoutMs > 0) {
         idleTimer = setTimeout(() => {
+          idleTimer = null;
+          const remaining = streamIdleTimeoutMs - (Date.now() - lastActivityAt);
+          if (remaining > 5) {
+            scheduleIdleTimer(remaining);
+            return;
+          }
           idleTimedOut = true;
           abortUpstream?.();
-        }, streamIdleTimeoutMs);
+        }, Math.max(1, delayMs));
         idleTimer.unref?.();
+      }
+    };
+
+    const resetIdleTimer = () => {
+      lastActivityAt = Date.now();
+      if (!idleTimer && streamIdleTimeoutMs > 0) {
+        scheduleIdleTimer(streamIdleTimeoutMs);
       }
     };
 
@@ -3160,9 +3175,12 @@ export class RouterService {
             : createStreamTransformer(clientFormat, "openai", requestedModel);
         let roleSent = false;
         let sawToolCalls = false;
+        let nextToolCallIndex = 0;
         let finishReasonSent = false;
+        let usageSent = false;
         let streamFailure = "";
         let lastUsage = null;
+        const cloudToolNormalizer = createOpenAIToolCallIndexNormalizer();
 
         const parser = createSSEParser(({ event, data }) => {
           if (streamFailure || !data || data === "[DONE]") return;
@@ -3190,21 +3208,47 @@ export class RouterService {
             lastUsage = {
               prompt_tokens: promptTokens,
               completion_tokens: completionTokens,
-              total_tokens: promptTokens + completionTokens
+              total_tokens: promptTokens + completionTokens,
+              ...(cachedTokens > 0
+                ? { prompt_tokens_details: { cached_tokens: cachedTokens } }
+                : {})
             };
           }
 
           const chunk = cloudCodeChunkToOpenAI(parsed, requestedModel, chunkId, {
-            hasPriorToolCalls: sawToolCalls
+            hasPriorToolCalls: sawToolCalls,
+            toolCallIndexOffset: nextToolCallIndex,
+            usage: lastUsage
           });
           if (!chunk) return;
           upstreamDataSeen = true;
 
-          if (chunk.choices?.[0]?.delta?.tool_calls?.length) {
-            sawToolCalls = true;
+          const emittedTools = chunk.choices?.[0]?.delta?.tool_calls;
+          if (Array.isArray(emittedTools) && emittedTools.length > 0) {
+            const norm = cloudToolNormalizer.normalize(emittedTools);
+            if (norm.toolCalls.length === 0) {
+              delete chunk.choices[0].delta.tool_calls;
+              if (
+                Object.keys(chunk.choices[0].delta).length === 0 &&
+                !chunk.choices[0].finish_reason
+              ) {
+                return;
+              }
+            } else {
+              chunk.choices[0].delta.tool_calls = norm.toolCalls;
+              sawToolCalls = true;
+              const maxIdx = norm.toolCalls.reduce(
+                (acc, tc) => (typeof tc.index === "number" && tc.index > acc ? tc.index : acc),
+                nextToolCallIndex - 1
+              );
+              nextToolCallIndex = Math.max(nextToolCallIndex, maxIdx + 1);
+            }
           }
           if (chunk.choices?.[0]?.finish_reason) {
             finishReasonSent = true;
+          }
+          if (chunk.usage) {
+            usageSent = true;
           }
           if (!roleSent) {
             roleSent = true;
@@ -3261,6 +3305,17 @@ export class RouterService {
           }
 
           if (tx) {
+            if (lastUsage && !usageSent) {
+              const uOut = tx.pushChunk({
+                id: chunkId,
+                object: "chat.completion.chunk",
+                created: Math.floor(Date.now() / 1000),
+                model: requestedModel,
+                choices: [],
+                usage: lastUsage
+              });
+              if (uOut) writeToClient(uOut);
+            }
             const tail = tx.finalize();
             if (tail) writeToClient(tail);
           } else if (clientFormat === "openai") {
@@ -3279,6 +3334,18 @@ export class RouterService {
                     }
                   ],
                   ...(lastUsage ? { usage: lastUsage } : {})
+                })}\n\n`
+              );
+              usageSent = Boolean(lastUsage);
+            } else if (lastUsage && !usageSent) {
+              writeToClient(
+                `data: ${JSON.stringify({
+                  id: chunkId,
+                  object: "chat.completion.chunk",
+                  created: Math.floor(Date.now() / 1000),
+                  model: requestedModel,
+                  choices: [],
+                  usage: lastUsage
                 })}\n\n`
               );
             }
@@ -3460,6 +3527,8 @@ export class RouterService {
         let sawStopReason = false;
         let streamFailure = "";
         let rawPreFrameBuf = "";
+        const passthroughToolNormalizer =
+          upstreamFormat === "openai" ? createOpenAIToolCallIndexNormalizer() : null;
 
         const passthroughParser = createSSEParser(({ event, data }) => {
           if (streamFailure || !data) return;
@@ -3494,20 +3563,25 @@ export class RouterService {
             data.includes('"error"') ||
             data.includes('"type":"error"') ||
             data.includes('"type": "error"');
+          const hasNonNullOpenAIFinish = /"finish_reason"\s*:\s*"/.test(data);
+          const hasNonNullUsage = /"usage"\s*:\s*\{/.test(data);
+          const hasOpenAIToolCalls =
+            /"tool_calls"\s*:\s*\[/.test(data) && !/"tool_calls"\s*:\s*\[\s*\]/.test(data);
           const needsMetaParse =
             mayHaveError ||
             (upstreamFormat === "anthropic"
               ? event === "message_start" ||
                 event === "message_delta" ||
                 event === "message_stop" ||
-                data.includes('"usage"') ||
+                hasNonNullUsage ||
                 data.includes('"stop_reason"') ||
                 data.includes('"tool_use"')
               : !lastChunkId ||
-                data.includes('"usage"') ||
-                data.includes('"finish_reason"') ||
-                data.includes('"tool_calls"'));
+                hasNonNullUsage ||
+                hasNonNullOpenAIFinish ||
+                hasOpenAIToolCalls);
 
+          let outData = data;
           if (needsMetaParse) {
             try {
               const parsed = JSON.parse(data);
@@ -3539,8 +3613,29 @@ export class RouterService {
                 if (parsed.model) lastChunkModel = String(parsed.model);
                 if (typeof parsed.created === "number") lastChunkCreated = parsed.created;
                 const c0 = parsed.choices?.[0];
-                if (c0?.delta?.tool_calls?.length) sawToolCalls = true;
-                if (c0?.finish_reason) sawFinishReason = true;
+                let mutated = false;
+                if (c0?.delta?.tool_calls?.length) {
+                  sawToolCalls = true;
+                  const norm = passthroughToolNormalizer.normalize(c0.delta.tool_calls);
+                  if (norm.changed) {
+                    if (norm.toolCalls.length === 0) {
+                      delete c0.delta.tool_calls;
+                      if (Object.keys(c0.delta).length === 0 && !c0.finish_reason && !parsed.usage) {
+                        return;
+                      }
+                    } else {
+                      c0.delta.tool_calls = norm.toolCalls;
+                    }
+                    mutated = true;
+                  }
+                }
+                if (c0?.finish_reason) {
+                  if (sawToolCalls && c0.finish_reason === "stop") {
+                    c0.finish_reason = "tool_calls";
+                    mutated = true;
+                  }
+                  sawFinishReason = true;
+                }
                 if (parsed.usage) {
                   promptTokens = parsed.usage.prompt_tokens ?? promptTokens;
                   completionTokens = parsed.usage.completion_tokens ?? completionTokens;
@@ -3548,6 +3643,9 @@ export class RouterService {
                     parsed.usage.prompt_tokens_details?.cached_tokens ??
                     parsed.usage.cached_tokens ??
                     cachedTokens;
+                }
+                if (mutated) {
+                  outData = JSON.stringify(parsed);
                 }
               }
             } catch {
@@ -3561,8 +3659,8 @@ export class RouterService {
           upstreamDataSeen = true;
           const frame =
             event && event !== "message"
-              ? `event: ${event}\ndata: ${data}\n\n`
-              : `data: ${data}\n\n`;
+              ? `event: ${event}\ndata: ${outData}\n\n`
+              : `data: ${outData}\n\n`;
           writeToClient(frame);
         });
 

@@ -1,5 +1,148 @@
 import { nanoid } from "nanoid";
 
+function isCompleteJsonObjectString(str) {
+  if (typeof str !== "string") return false;
+  const trimmed = str.trim();
+  if (trimmed.length < 2 || trimmed[0] !== "{" || trimmed[trimmed.length - 1] !== "}") {
+    return false;
+  }
+  try {
+    const parsed = JSON.parse(trimmed);
+    return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Stateful OpenAI `delta.tool_calls` index normalizer.
+ *
+ * Prevents tool-call argument concatenation (`{"a":1}{"b":2}` -> JSON parse error)
+ * when upstreams (Gemini OpenAI-compat, Cloud Code, NewAPI/OneAPI relays) emit
+ * multiple parallel tool calls all using `index: 0` or omitting `index`.
+ * For spec-compliant streams, returns `changed: false` with zero re-serialization.
+ */
+export function createOpenAIToolCallIndexNormalizer() {
+  let nextIndex = 0;
+  /** @type {Map<string, number>} */
+  const idToNormIdx = new Map();
+  /** @type {Map<number, { normIdx: number, id: string, name: string, args: string }>} */
+  const rawToActive = new Map();
+  /** @type {Map<number, { normIdx: number, id: string, name: string, args: string }>} */
+  const entriesByNormIdx = new Map();
+
+  const allocateIndex = (preferredRawIdx, hasRawIdx) => {
+    if (hasRawIdx && !entriesByNormIdx.has(preferredRawIdx)) {
+      if (preferredRawIdx >= nextIndex) nextIndex = preferredRawIdx + 1;
+      return preferredRawIdx;
+    }
+    while (entriesByNormIdx.has(nextIndex)) {
+      nextIndex++;
+    }
+    return nextIndex++;
+  };
+
+  return {
+    /**
+     * Normalize a `delta.tool_calls` array in-place or into a new array.
+     * @param {any[]} toolCalls
+     * @returns {{ toolCalls: any[], changed: boolean }}
+     */
+    normalize(toolCalls) {
+      if (!Array.isArray(toolCalls) || toolCalls.length === 0) {
+        return { toolCalls, changed: false };
+      }
+
+      let changed = false;
+      const out = [];
+
+      for (const tc of toolCalls) {
+        if (!tc || typeof tc !== "object") continue;
+        const hasRawIdx =
+          typeof tc.index === "number" && Number.isFinite(tc.index) && tc.index >= 0;
+        const rawIdx = hasRawIdx ? tc.index : 0;
+        const incomingId = typeof tc.id === "string" ? tc.id.trim() : "";
+        const incomingName = typeof tc.function?.name === "string" ? tc.function.name : "";
+        const incomingArgs =
+          typeof tc.function?.arguments === "string" ? tc.function.arguments : "";
+
+        let entry = null;
+
+        if (incomingId && idToNormIdx.has(incomingId)) {
+          const normIdx = idToNormIdx.get(incomingId);
+          entry = entriesByNormIdx.get(normIdx);
+          rawToActive.set(rawIdx, entry);
+        } else if (incomingId) {
+          const normIdx = allocateIndex(rawIdx, hasRawIdx);
+          entry = { normIdx, id: incomingId, name: "", args: "" };
+          idToNormIdx.set(incomingId, normIdx);
+          entriesByNormIdx.set(normIdx, entry);
+          rawToActive.set(rawIdx, entry);
+        } else {
+          const active = rawToActive.get(rawIdx);
+          if (!active) {
+            const normIdx = allocateIndex(rawIdx, hasRawIdx);
+            entry = { normIdx, id: "", name: "", args: "" };
+            entriesByNormIdx.set(normIdx, entry);
+            rawToActive.set(rawIdx, entry);
+          } else {
+            const looksLikeNewIdlessCall =
+              Boolean(incomingName) &&
+              Boolean(active.name) &&
+              isCompleteJsonObjectString(active.args);
+            if (looksLikeNewIdlessCall) {
+              const normIdx = allocateIndex(rawIdx, false);
+              entry = { normIdx, id: "", name: "", args: "" };
+              entriesByNormIdx.set(normIdx, entry);
+              rawToActive.set(rawIdx, entry);
+            } else {
+              entry = active;
+            }
+          }
+        }
+
+        // Guard against duplicate full-JSON re-emission for the same tool call ID
+        if (
+          incomingId &&
+          incomingArgs &&
+          entry.args &&
+          entry.args === incomingArgs &&
+          isCompleteJsonObjectString(incomingArgs)
+        ) {
+          changed = true;
+          continue;
+        }
+
+        let item = tc;
+        if (!hasRawIdx || tc.index !== entry.normIdx) {
+          changed = true;
+          item = { ...tc, index: entry.normIdx };
+        }
+
+        if (incomingName) {
+          if (entry.name && entry.name === incomingName && item.function) {
+            // Avoid repeating full function name on continuation deltas of same call ID
+            if (incomingId && entry.args) {
+              changed = true;
+              const { name: _dropName, ...restFn } = item.function;
+              item = { ...item, function: restFn };
+            }
+          } else {
+            entry.name += incomingName;
+          }
+        }
+        if (incomingArgs) {
+          entry.args += incomingArgs;
+        }
+
+        out.push(item);
+      }
+
+      return { toolCalls: changed ? out : toolCalls, changed };
+    }
+  };
+}
+
 /**
  * Safely parse JSON tool arguments into an object.
  * @param {unknown} raw
@@ -437,10 +580,11 @@ export function createOpenAIToClaudeStreamTransformer(requestedModel) {
   let finished = false;
   let msgId = `msg_${nanoid(16)}`;
   let nextBlockIndex = 0;
-  /** @type {{ index: number, type: "thinking" | "text" | "tool_use", toolIndex?: number } | null} */
-  let activeBlock = null;
-  /** @type {Map<number, { index: number, type: "tool_use", toolIndex: number }>} */
+  /** @type {{ index: number, type: "thinking" | "text" } | null} */
+  let activeNonToolBlock = null;
+  /** @type {Map<number, { index: number, type: "tool_use", toolIndex: number, args: string, closed: boolean }>} */
   const toolCallMap = new Map();
+  const toolNormalizer = createOpenAIToolCallIndexNormalizer();
   let finishReason = null;
   let inputTokens = 0;
   let outputTokens = 0;
@@ -468,15 +612,30 @@ export function createOpenAIToClaudeStreamTransformer(requestedModel) {
     );
   };
 
-  const closeActiveBlock = (out) => {
-    if (!activeBlock) return;
+  const closeActiveNonToolBlock = (out) => {
+    if (!activeNonToolBlock) return;
     out.push(
       formatAnthropicSSE("content_block_stop", {
         type: "content_block_stop",
-        index: activeBlock.index
+        index: activeNonToolBlock.index
       })
     );
-    activeBlock = null;
+    activeNonToolBlock = null;
+  };
+
+  const closeCompletedToolBlocks = (out, forceAll = false) => {
+    for (const entry of toolCallMap.values()) {
+      if (entry.closed) continue;
+      if (forceAll || isCompleteJsonObjectString(entry.args)) {
+        entry.closed = true;
+        out.push(
+          formatAnthropicSSE("content_block_stop", {
+            type: "content_block_stop",
+            index: entry.index
+          })
+        );
+      }
+    }
   };
 
   return {
@@ -514,10 +673,11 @@ export function createOpenAIToClaudeStreamTransformer(requestedModel) {
         // 1. Thinking / reasoning delta
         const reasoning = delta.reasoning_content ?? delta.reasoning;
         if (typeof reasoning === "string" && reasoning.length > 0) {
-          if (!activeBlock || activeBlock.type !== "thinking") {
-            closeActiveBlock(out);
+          if (!activeNonToolBlock || activeNonToolBlock.type !== "thinking") {
+            closeActiveNonToolBlock(out);
+            closeCompletedToolBlocks(out, true);
             const idx = nextBlockIndex++;
-            activeBlock = { index: idx, type: "thinking" };
+            activeNonToolBlock = { index: idx, type: "thinking" };
             out.push(
               formatAnthropicSSE("content_block_start", {
                 type: "content_block_start",
@@ -529,7 +689,7 @@ export function createOpenAIToClaudeStreamTransformer(requestedModel) {
           out.push(
             formatAnthropicSSE("content_block_delta", {
               type: "content_block_delta",
-              index: activeBlock.index,
+              index: activeNonToolBlock.index,
               delta: { type: "thinking_delta", thinking: reasoning }
             })
           );
@@ -537,10 +697,11 @@ export function createOpenAIToClaudeStreamTransformer(requestedModel) {
 
         // 2. Text delta
         if (typeof delta.content === "string" && delta.content.length > 0) {
-          if (!activeBlock || activeBlock.type !== "text") {
-            closeActiveBlock(out);
+          if (!activeNonToolBlock || activeNonToolBlock.type !== "text") {
+            closeActiveNonToolBlock(out);
+            closeCompletedToolBlocks(out, true);
             const idx = nextBlockIndex++;
-            activeBlock = { index: idx, type: "text" };
+            activeNonToolBlock = { index: idx, type: "text" };
             out.push(
               formatAnthropicSSE("content_block_start", {
                 type: "content_block_start",
@@ -552,25 +713,28 @@ export function createOpenAIToClaudeStreamTransformer(requestedModel) {
           out.push(
             formatAnthropicSSE("content_block_delta", {
               type: "content_block_delta",
-              index: activeBlock.index,
+              index: activeNonToolBlock.index,
               delta: { type: "text_delta", text: delta.content }
             })
           );
         }
 
-        // 3. Tool call deltas
-        if (Array.isArray(delta.tool_calls)) {
-          for (const tc of delta.tool_calls) {
+        // 3. Tool call deltas (index-normalized to prevent colliding index:0 concatenation)
+        if (Array.isArray(delta.tool_calls) && delta.tool_calls.length > 0) {
+          const { toolCalls: normalizedCalls } = toolNormalizer.normalize(delta.tool_calls);
+          for (const tc of normalizedCalls) {
             const tcIdx = tc.index ?? 0;
             let entry = toolCallMap.get(tcIdx);
             if (!entry) {
-              closeActiveBlock(out);
+              closeActiveNonToolBlock(out);
+              // Close any prior tool_use blocks whose JSON arguments are already complete,
+              // while leaving still-streaming interleaved blocks open so no delta fires post-stop.
+              closeCompletedToolBlocks(out, false);
               const idx = nextBlockIndex++;
               const toolId = tc.id || `toolu_${nanoid(12)}`;
               const toolName = tc.function?.name || "tool";
-              entry = { index: idx, type: "tool_use", toolIndex: tcIdx };
+              entry = { index: idx, type: "tool_use", toolIndex: tcIdx, args: "", closed: false };
               toolCallMap.set(tcIdx, entry);
-              activeBlock = entry;
               out.push(
                 formatAnthropicSSE("content_block_start", {
                   type: "content_block_start",
@@ -585,19 +749,18 @@ export function createOpenAIToClaudeStreamTransformer(requestedModel) {
               );
             }
             const argsPart = tc.function?.arguments;
-            if (typeof argsPart === "string" && argsPart.length > 0) {
-              if (entry) {
-                out.push(
-                  formatAnthropicSSE("content_block_delta", {
-                    type: "content_block_delta",
-                    index: entry.index,
-                    delta: {
-                      type: "input_json_delta",
-                      partial_json: argsPart
-                    }
-                  })
-                );
-              }
+            if (typeof argsPart === "string" && argsPart.length > 0 && !entry.closed) {
+              entry.args += argsPart;
+              out.push(
+                formatAnthropicSSE("content_block_delta", {
+                  type: "content_block_delta",
+                  index: entry.index,
+                  delta: {
+                    type: "input_json_delta",
+                    partial_json: argsPart
+                  }
+                })
+              );
             }
           }
         }
@@ -619,7 +782,8 @@ export function createOpenAIToClaudeStreamTransformer(requestedModel) {
       finished = true;
       const out = [];
       ensureStarted(out);
-      closeActiveBlock(out);
+      closeActiveNonToolBlock(out);
+      closeCompletedToolBlocks(out, true);
 
       const finalStop =
         finishReason || (toolCallMap.size > 0 ? "tool_use" : "end_turn");
@@ -1379,6 +1543,7 @@ export function createOpenAIToResponsesStreamTransformer(requestedModel) {
   let completionTokens = 0;
   /** @type {Map<number, { itemId: string, callId: string, name: string, arguments: string, outputIndex: number }>} */
   const toolItems = new Map();
+  const toolNormalizer = createOpenAIToolCallIndexNormalizer();
   let nextOutputIndex = 0;
 
   const emit = (eventType, payload) => {
@@ -1540,10 +1705,11 @@ export function createOpenAIToResponsesStreamTransformer(requestedModel) {
         });
       }
 
-      if (Array.isArray(delta.tool_calls)) {
+      if (Array.isArray(delta.tool_calls) && delta.tool_calls.length > 0) {
         out += closeReasoningIfOpen();
         out += closeMsgIfOpen();
-        for (const tc of delta.tool_calls) {
+        const { toolCalls: normalizedCalls } = toolNormalizer.normalize(delta.tool_calls);
+        for (const tc of normalizedCalls) {
           const tIdx = tc.index ?? 0;
           let entry = toolItems.get(tIdx);
           if (!entry) {
@@ -1567,8 +1733,8 @@ export function createOpenAIToResponsesStreamTransformer(requestedModel) {
               }
             });
           } else {
-            if (tc.id) entry.callId = tc.id;
-            if (tc.function?.name) entry.name = tc.function.name;
+            if (tc.id && !entry.callId) entry.callId = tc.id;
+            if (tc.function?.name && !entry.name) entry.name = tc.function.name;
           }
           if (typeof tc.function?.arguments === "string" && tc.function.arguments.length > 0) {
             entry.arguments += tc.function.arguments;

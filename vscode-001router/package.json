@@ -1,8 +1,8 @@
 {
   "name": "001router-code",
   "displayName": "001Router",
-  "description": "AI Coding Assistant powered by 001Router — Axiom Expressive Architect Bot, Full Project Folder Awareness & Workspace Tool Calling, Unified Multi-Provider Model & Ethereal Effort Engine.",
-  "version": "1.3.0",
+  "description": "Autonomous AI Coding Agent powered by 001Router — Grok 3D Singularity Core, Cline-Grade Live Task Timeline, Full Terminal & File Permissions, Unified Multi-Provider Model & Ethereal Effort Engine.",
+  "version": "1.4.0",
   "publisher": "001router",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -27,12 +27,13 @@
     "001router",
     "ai",
     "coding-assistant",
+    "autonomous-agent",
     "claude",
     "openai",
     "gemini",
     "antigravity",
     "deepseek",
-    "multi-provider",
+    "grok",
     "openrouter"
   ],
   "activationEvents": [
@@ -138,7 +139,7 @@
   },
   "scripts": {
     "package:vsix": "node ./scripts/pack-vsix.js",
-    "publish:ovsx": "npx ovsx publish ./001router-code-1.3.0.vsix",
+    "publish:ovsx": "npx ovsx publish ./001router-code-1.4.0.vsix",
     "publish:vsce": "npx @vscode/vsce publish"
   }
 }

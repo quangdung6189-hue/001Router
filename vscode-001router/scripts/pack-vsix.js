@@ -350,15 +350,34 @@ function packVsix() {
 </PackageManifest>
 `;
 
+  const collectDirFiles = (subDir) => {
+    const out = [];
+    const baseAbs = path.join(EXT_DIR, subDir);
+    if (!fs.existsSync(baseAbs)) return out;
+    const walk = (absDir, relDir) => {
+      for (const entry of fs.readdirSync(absDir, { withFileTypes: true })) {
+        const nextAbs = path.join(absDir, entry.name);
+        const nextRel = `${relDir}/${entry.name}`;
+        if (entry.isDirectory()) walk(nextAbs, nextRel);
+        else if (entry.isFile()) out.push(nextRel);
+      }
+    };
+    walk(baseAbs, subDir);
+    return out.sort();
+  };
+
+  const srcFiles = collectDirFiles("src");
+
   const includeFiles = [
     "package.json",
     "extension.js",
     "README.md",
     "LICENSE",
+    ...srcFiles,
     "media/icon.svg",
     "media/icon-activity.svg",
     "media/icon.png",
-    "media/ai-face-3d.jpg",
+    "media/grok3d.js",
     "media/webview.css",
     "media/webview.js",
     ...bundledLogos

@@ -532,11 +532,12 @@ export function openAIToGeminiContents(body, options = {}) {
           if (!tc?.function) continue;
           const name = sanitizeFunctionName(tc.function.name);
           const id = nextCallId(tc.id ? String(tc.id) : "");
+          const parsedArgs = tryParseJSON(tc.function.arguments || "{}");
           const part = {
             functionCall: {
               ...(id ? { id } : {}),
               name,
-              args: tryParseJSON(tc.function.arguments || "{}") || {}
+              args: isPlainObject(parsedArgs) ? parsedArgs : {}
             }
           };
           // Only the first call of a parallel batch carries the signature (as Gemini emits it).
@@ -877,12 +878,12 @@ export function mapFinishReason(reason) {
  * @param {any} candidate
  * @returns {{ text: string, reasoning: string, toolCalls: any[], finishReason: string }}
  */
-export function candidateToOpenAIParts(candidate) {
+export function candidateToOpenAIParts(candidate, toolCallStartIndex = 0) {
   const parts = Array.isArray(candidate?.content?.parts) ? candidate.content.parts : [];
   let text = "";
   let reasoning = "";
   const toolCalls = [];
-  let index = 0;
+  let index = Math.max(0, Number(toolCallStartIndex) || 0);
 
   for (const part of parts) {
     if (!part || typeof part !== "object") continue;
@@ -893,13 +894,18 @@ export function candidateToOpenAIParts(candidate) {
     if (part.functionCall?.name) {
       // Keep Google's id when it sends one, so the result pairs with the same call next turn.
       const upstreamId = typeof part.functionCall.id === "string" ? part.functionCall.id.trim() : "";
+      const rawArgs = part.functionCall.args;
+      const serializedArgs =
+        typeof rawArgs === "string"
+          ? rawArgs.trim() || "{}"
+          : JSON.stringify(isPlainObject(rawArgs) ? rawArgs : {});
       toolCalls.push({
         index: index++,
         id: upstreamId || `call_${crypto.randomBytes(8).toString("hex")}`,
         type: "function",
         function: {
           name: part.functionCall.name,
-          arguments: JSON.stringify(part.functionCall.args || {})
+          arguments: serializedArgs
         }
       });
     }
@@ -1050,7 +1056,7 @@ export function cloudCodeToOpenAIResponse(data, model) {
  * @param {any} data
  * @param {string} model
  * @param {string} id
- * @param {{ hasPriorToolCalls?: boolean }} [opts]
+ * @param {{ hasPriorToolCalls?: boolean, toolCallIndexOffset?: number }} [opts]
  * @returns {any | null}
  */
 export function cloudCodeChunkToOpenAI(data, model, id, opts = {}) {
@@ -1058,7 +1064,10 @@ export function cloudCodeChunkToOpenAI(data, model, id, opts = {}) {
   const candidate = Array.isArray(payload?.candidates) ? payload.candidates[0] : null;
   if (!candidate) return null;
 
-  const { text, reasoning, toolCalls, finishReason } = candidateToOpenAIParts(candidate);
+  const { text, reasoning, toolCalls, finishReason } = candidateToOpenAIParts(
+    candidate,
+    opts?.toolCallIndexOffset || 0
+  );
   const delta = {};
   if (reasoning) delta.reasoning_content = reasoning;
   if (text) delta.content = text;
@@ -1066,6 +1075,7 @@ export function cloudCodeChunkToOpenAI(data, model, id, opts = {}) {
   if (!Object.keys(delta).length && !candidate.finishReason) return null;
 
   const hasTools = toolCalls.length > 0 || Boolean(opts?.hasPriorToolCalls);
+  const finalReason = candidate.finishReason ? (hasTools ? "tool_calls" : finishReason) : null;
   return {
     id,
     object: "chat.completion.chunk",
@@ -1075,8 +1085,9 @@ export function cloudCodeChunkToOpenAI(data, model, id, opts = {}) {
       {
         index: 0,
         delta,
-        finish_reason: candidate.finishReason ? (hasTools ? "tool_calls" : finishReason) : null
+        finish_reason: finalReason
       }
-    ]
+    ],
+    ...(finalReason && opts?.usage ? { usage: opts.usage } : {})
   };
 }

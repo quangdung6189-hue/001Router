@@ -2457,6 +2457,9 @@ export function codexSseEventToOpenAIChunk(eventType, parsed, state) {
     if (idx === undefined) {
       idx = state.nextToolIdx++;
       if (itemKey) state.toolIdxMap.set(itemKey, idx);
+      if (item.call_id && item.call_id !== itemKey) {
+        state.toolIdxMap.set(item.call_id, idx);
+      }
     }
     return makeChunk({
       tool_calls: [

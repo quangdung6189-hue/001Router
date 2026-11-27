@@ -9,8 +9,10 @@ import { buildUpstreamHeaders } from "../server/router.js";
 import { PRESETS } from "../server/presets.js";
 import {
   createOpenAIToClaudeStreamTransformer,
+  createOpenAIToResponsesStreamTransformer,
   createSSEParser
 } from "../server/translator.js";
+import { openAIToGeminiContents } from "../server/geminiCliTranslator.js";
 
 function parseSSE(rawText) {
   const frames = [];
@@ -77,12 +79,15 @@ describe("Streaming I/O, Fail-Fast Errors, Disconnect Logging & Cross-Provider V
                 projectId: "proj-ag-1",
                 tier: "pro",
                 tierLabel: "Pro",
-                availableModels: [{ id: "gemini-4-neon-xhigh", kind: "chat" }]
+                availableModels: [
+                  { id: "gemini-4-neon-xhigh", kind: "chat" },
+                  { id: "gemini-4-hydrogen-high", kind: "chat" }
+                ]
               },
               enabled: true
             }
           ],
-          models: ["gemini-4-neon-xhigh"],
+          models: ["gemini-4-neon-xhigh", "gemini-4-hydrogen-high"],
           enabled: true
         },
         {
@@ -917,5 +922,325 @@ describe("Streaming I/O, Fail-Fast Errors, Disconnect Logging & Cross-Provider V
     });
     assert.equal(dgRes.status, 200);
     assert.equal(mock.requests.at(-1).headers.authorization, "Token dg-secret-123");
+  });
+
+  it("11. Cloud Code SSE streams 7 parallel tool calls across separate frames with distinct indices (0..6), valid JSON args, and usage", async () => {
+    const parallelCalls = [
+      { id: "fc_p0", name: "pwsh", args: { description: "Check git", command: "git status --short" } },
+      { id: "fc_p1", name: "pwsh", args: { description: "List root", command: "Get-ChildItem -Force" } },
+      { id: "fc_p2", name: "glob", args: { pattern: "core/**/*.py" } },
+      { id: "fc_p3", name: "glob", args: { pattern: "utils/**/*" } },
+      { id: "fc_p4", name: "glob", args: { pattern: "website/**/*" } },
+      { id: "fc_p5", name: "glob", args: { pattern: "tests/**/*" } },
+      { id: "fc_p6", name: "read_file", args: { file_path: "requirements.txt" } }
+    ];
+
+    const makeCloudStream = () => {
+      const enc = new TextEncoder();
+      const lines = [
+        `data: ${JSON.stringify({
+          response: { candidates: [{ content: { parts: [{ text: "Inspecting workspace...", thought: true }] } }] }
+        })}\n\n`,
+        ...parallelCalls.map(
+          (fc) =>
+            `data: ${JSON.stringify({
+              response: { candidates: [{ content: { parts: [{ functionCall: fc }] } }] }
+            })}\n\n`
+        ),
+        `data: ${JSON.stringify({
+          response: {
+            candidates: [{ content: { parts: [] }, finishReason: "STOP" }],
+            usageMetadata: { promptTokenCount: 120, candidatesTokenCount: 85, cachedContentTokenCount: 10 }
+          }
+        })}\n\n`
+      ];
+      return new Response(
+        new ReadableStream({
+          start(controller) {
+            for (const l of lines) controller.enqueue(enc.encode(l));
+            controller.close();
+          }
+        }),
+        { status: 200, headers: { "content-type": "text/event-stream" } }
+      );
+    };
+
+    // 11a: OpenAI /v1/chat/completions client accumulates by tc.index -> 7 valid JSON tool calls, never concatenated
+    app.locals.cloudCodeFetchImpl = async () => makeCloudStream();
+    const oaiRes = await postV1("/v1/chat/completions", {
+      model: "test-ag/gemini-4-hydrogen-high",
+      stream: true,
+      messages: [{ role: "user", content: "audit workspace" }]
+    });
+    assert.equal(oaiRes.status, 200);
+    const oaiFrames = parseSSE(await oaiRes.text());
+    assert.equal(oaiFrames.at(-1)?.data, "[DONE]");
+    const oaiChunks = oaiFrames.slice(0, -1).map((f) => JSON.parse(f.data));
+
+    const accByIndex = new Map();
+    let finalUsage = null;
+    for (const c of oaiChunks) {
+      if (c.usage) finalUsage = c.usage;
+      for (const tc of c.choices?.[0]?.delta?.tool_calls || []) {
+        assert.equal(typeof tc.index, "number");
+        const cur = accByIndex.get(tc.index) || { id: "", name: "", arguments: "" };
+        if (tc.id) cur.id += tc.id;
+        if (tc.function?.name) cur.name += tc.function.name;
+        if (tc.function?.arguments) cur.arguments += tc.function.arguments;
+        accByIndex.set(tc.index, cur);
+      }
+    }
+    assert.equal(accByIndex.size, 7);
+    assert.deepEqual([...accByIndex.keys()], [0, 1, 2, 3, 4, 5, 6]);
+    for (let i = 0; i < parallelCalls.length; i++) {
+      const got = accByIndex.get(i);
+      assert.equal(got.id, parallelCalls[i].id);
+      assert.equal(got.name, parallelCalls[i].name);
+      assert.deepEqual(JSON.parse(got.arguments), parallelCalls[i].args);
+    }
+    assert.equal(oaiChunks.at(-1).choices[0].finish_reason, "tool_calls");
+    assert.equal(finalUsage?.prompt_tokens, 120);
+    assert.equal(finalUsage?.completion_tokens, 85);
+
+    // 11b: Anthropic /v1/messages client receives 7 distinct tool_use blocks with valid JSON + usage
+    app.locals.cloudCodeFetchImpl = async () => makeCloudStream();
+    const antRes = await postV1("/v1/messages", {
+      model: "test-ag/gemini-4-hydrogen-high",
+      max_tokens: 1024,
+      stream: true,
+      messages: [{ role: "user", content: "audit workspace" }]
+    });
+    assert.equal(antRes.status, 200);
+    const antEvents = parseSSE(await antRes.text()).map((f) => ({
+      event: f.event,
+      data: JSON.parse(f.data)
+    }));
+    const stoppedBlocks = new Set();
+    const toolBlocks = new Map();
+    for (const ev of antEvents) {
+      if (ev.event === "content_block_start" && ev.data.content_block?.type === "tool_use") {
+        toolBlocks.set(ev.data.index, { name: ev.data.content_block.name, id: ev.data.content_block.id, json: "" });
+      } else if (ev.event === "content_block_delta") {
+        assert.equal(
+          stoppedBlocks.has(ev.data.index),
+          false,
+          `content_block_delta emitted after content_block_stop for block ${ev.data.index}`
+        );
+        if (ev.data.delta?.type === "input_json_delta") {
+          toolBlocks.get(ev.data.index).json += ev.data.delta.partial_json;
+        }
+      } else if (ev.event === "content_block_stop") {
+        stoppedBlocks.add(ev.data.index);
+      }
+    }
+    assert.equal(toolBlocks.size, 7);
+    let idx = 0;
+    for (const tb of toolBlocks.values()) {
+      assert.equal(tb.name, parallelCalls[idx].name);
+      assert.deepEqual(JSON.parse(tb.json), parallelCalls[idx].args);
+      idx++;
+    }
+    const msgDelta = antEvents.find((e) => e.event === "message_delta");
+    assert.equal(msgDelta?.data?.delta?.stop_reason, "tool_use");
+    assert.equal(msgDelta?.data?.usage?.output_tokens, 85);
+
+    // 11c: OpenAI /v1/responses client receives 7 distinct function_call output items
+    app.locals.cloudCodeFetchImpl = async () => makeCloudStream();
+    const respApiRes = await postV1("/v1/responses", {
+      model: "test-ag/gemini-4-hydrogen-high",
+      stream: true,
+      input: "audit workspace"
+    });
+    assert.equal(respApiRes.status, 200);
+    const respEvents = parseSSE(await respApiRes.text()).map((f) => ({
+      event: f.event,
+      data: JSON.parse(f.data)
+    }));
+    const completedEv = respEvents.find((e) => e.event === "response.completed");
+    const fcOutputs = (completedEv?.data?.response?.output || []).filter((o) => o.type === "function_call");
+    assert.equal(fcOutputs.length, 7);
+    for (let i = 0; i < parallelCalls.length; i++) {
+      assert.equal(fcOutputs[i].name, parallelCalls[i].name);
+      assert.deepEqual(JSON.parse(fcOutputs[i].arguments), parallelCalls[i].args);
+    }
+    assert.equal(completedEv?.data?.response?.usage?.total_tokens, 205);
+  });
+
+  it("12. OpenAI passthrough, Anthropic & Responses transformers normalize colliding index:0 parallel tool calls and interleaved blocks", async () => {
+    // 12a: Buggy OpenAI-compat upstream (like Gemini OpenAI-compat / relays) sending colliding index:0 + duplicate full args + stop finish_reason
+    mock.setHandler(({ url, res }) => {
+      if (!url.endsWith("/chat/completions")) return false;
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      const frames = [
+        {
+          id: "chatcmpl-collide",
+          object: "chat.completion.chunk",
+          model: "gpt-4o",
+          choices: [
+            {
+              index: 0,
+              delta: {
+                role: "assistant",
+                tool_calls: [{ index: 0, id: "call_1", type: "function", function: { name: "pwsh", arguments: '{"cmd":"git status"}' } }]
+              },
+              finish_reason: null
+            }
+          ]
+        },
+        // Duplicate full JSON re-emission on same id must be suppressed
+        {
+          id: "chatcmpl-collide",
+          object: "chat.completion.chunk",
+          model: "gpt-4o",
+          choices: [
+            {
+              index: 0,
+              delta: {
+                tool_calls: [{ index: 0, id: "call_1", type: "function", function: { name: "pwsh", arguments: '{"cmd":"git status"}' } }]
+              },
+              finish_reason: null
+            }
+          ]
+        },
+        // Second parallel call colliding at index: 0 with new id
+        {
+          id: "chatcmpl-collide",
+          object: "chat.completion.chunk",
+          model: "gpt-4o",
+          choices: [
+            {
+              index: 0,
+              delta: {
+                tool_calls: [{ index: 0, id: "call_2", type: "function", function: { name: "glob", arguments: '{"pattern":"*.js"}' } }]
+              },
+              finish_reason: null
+            }
+          ]
+        },
+        // Third parallel call with missing index & id-less complete JSON
+        {
+          id: "chatcmpl-collide",
+          object: "chat.completion.chunk",
+          model: "gpt-4o",
+          choices: [
+            {
+              index: 0,
+              delta: {
+                tool_calls: [{ type: "function", function: { name: "read_file", arguments: '{"file_path":"README.md"}' } }]
+              },
+              finish_reason: null
+            }
+          ]
+        },
+        // Relay wrongly sends finish_reason: "stop" after tool_calls -> normalized to "tool_calls"
+        {
+          id: "chatcmpl-collide",
+          object: "chat.completion.chunk",
+          model: "gpt-4o",
+          choices: [{ index: 0, delta: {}, finish_reason: "stop" }]
+        }
+      ];
+      for (const f of frames) res.write(`data: ${JSON.stringify(f)}\n\n`);
+      res.write("data: [DONE]\n\n");
+      res.end();
+      return true;
+    });
+
+    const pRes = await postV1("/v1/chat/completions", {
+      model: "test-oai/gpt-4o",
+      stream: true,
+      messages: [{ role: "user", content: "parallel collide" }]
+    });
+    assert.equal(pRes.status, 200);
+    const pFrames = parseSSE(await pRes.text());
+    assert.equal(pFrames.at(-1)?.data, "[DONE]");
+    const pObjs = pFrames.slice(0, -1).map((f) => JSON.parse(f.data));
+
+    const acc = new Map();
+    for (const c of pObjs) {
+      for (const tc of c.choices?.[0]?.delta?.tool_calls || []) {
+        const cur = acc.get(tc.index) || { name: "", args: "" };
+        if (tc.function?.name) cur.name += tc.function.name;
+        if (tc.function?.arguments) cur.args += tc.function.arguments;
+        acc.set(tc.index, cur);
+      }
+    }
+    assert.equal(acc.size, 3);
+    assert.deepEqual([...acc.keys()], [0, 1, 2]);
+    assert.deepEqual(JSON.parse(acc.get(0).args), { cmd: "git status" });
+    assert.deepEqual(JSON.parse(acc.get(1).args), { pattern: "*.js" });
+    assert.deepEqual(JSON.parse(acc.get(2).args), { file_path: "README.md" });
+    assert.equal(pObjs.at(-1).choices[0].finish_reason, "tool_calls");
+
+    // 12b: Interleaved OpenAI tool calls -> Anthropic SSE never emits delta after content_block_stop
+    const o2c = createOpenAIToClaudeStreamTransformer("claude-sonnet");
+    const rawAnt =
+      o2c.pushChunk({
+        choices: [{ delta: { tool_calls: [{ index: 0, id: "c1", function: { name: "subagent", arguments: '{"a":' } }] } }]
+      }) +
+      o2c.pushChunk({
+        choices: [{ delta: { tool_calls: [{ index: 1, id: "c2", function: { name: "subagent", arguments: '{"b":' } }] } }]
+      }) +
+      o2c.pushChunk({
+        choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: "1}" } }] } }]
+      }) +
+      o2c.pushChunk({
+        choices: [{ delta: { tool_calls: [{ index: 1, function: { arguments: "2}" } }] }, finish_reason: "tool_calls" }]
+      }) +
+      o2c.finalize();
+
+    const parsedAnt = parseSSE(rawAnt).map((f) => ({ event: f.event, data: JSON.parse(f.data) }));
+    const closed = new Set();
+    const byBlock = new Map();
+    for (const ev of parsedAnt) {
+      if (ev.event === "content_block_start" && ev.data.content_block?.type === "tool_use") {
+        byBlock.set(ev.data.index, "");
+      } else if (ev.event === "content_block_delta") {
+        assert.equal(closed.has(ev.data.index), false, `delta after stop on block ${ev.data.index}`);
+        byBlock.set(ev.data.index, byBlock.get(ev.data.index) + ev.data.delta.partial_json);
+      } else if (ev.event === "content_block_stop") {
+        closed.add(ev.data.index);
+      }
+    }
+    assert.deepEqual(JSON.parse(byBlock.get(0)), { a: 1 });
+    assert.deepEqual(JSON.parse(byBlock.get(1)), { b: 2 });
+
+    // 12c: Colliding index:0 parallel calls -> Responses API transformer keeps them separate
+    const o2r = createOpenAIToResponsesStreamTransformer("gpt-5");
+    const rawResp =
+      o2r.pushChunk({
+        choices: [{ delta: { tool_calls: [{ index: 0, id: "r1", function: { name: "subagent", arguments: '{"name":"core"}' } }] } }]
+      }) +
+      o2r.pushChunk({
+        choices: [{ delta: { tool_calls: [{ index: 0, id: "r2", function: { name: "subagent", arguments: '{"name":"web"}' } }] } }]
+      }) +
+      o2r.finalize();
+    const parsedResp = parseSSE(rawResp).map((f) => ({ event: f.event, data: JSON.parse(f.data) }));
+    const doneResp = parsedResp.find((e) => e.event === "response.completed");
+    const respTools = doneResp.data.response.output.filter((o) => o.type === "function_call");
+    assert.equal(respTools.length, 2);
+    assert.deepEqual(JSON.parse(respTools[0].arguments), { name: "core" });
+    assert.deepEqual(JSON.parse(respTools[1].arguments), { name: "web" });
+
+    // 12d: openAIToGeminiContents safely sanitizes malformed/non-object replayed tool arguments to {}
+    const geminiConv = openAIToGeminiContents({
+      model: "gemini-4-hydrogen-high",
+      messages: [
+        { role: "user", content: "retry" },
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            { id: "bad_1", type: "function", function: { name: "pwsh", arguments: '{"a":1}{"b":2}' } },
+            { id: "bad_2", type: "function", function: { name: "glob", arguments: '["not","an","object"]' } }
+          ]
+        },
+        { role: "tool", tool_call_id: "bad_1", content: "err" },
+        { role: "tool", tool_call_id: "bad_2", content: "err" }
+      ]
+    });
+    const modelTurn = geminiConv.contents.find((c) => c.role === "model");
+    assert.deepEqual(modelTurn.parts[0].functionCall.args, {});
+    assert.deepEqual(modelTurn.parts[1].functionCall.args, {});
   });
 });
