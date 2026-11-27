@@ -27,23 +27,22 @@ import { ModalDialog } from '../components/ModalDialog';
 import { ConfirmDialog } from '../components/ConfirmDialog';
 import { ProviderLogo } from '../components/ProviderLogo';
 import { ProviderTopology } from '../components/ProviderTopology';
-import { LucianSlidingTabs } from '../components/lucian/LucianSlidingTabs';
-import { LucianGlowGrid, LucianGlowCard } from '../components/lucian/LucianGlowGrid';
+import { SegmentedControl } from '../components/SegmentedControl';
 import { LucianActivityBarChart } from '../components/lucian/LucianActivityBarChart';
 import { LucianTrendScrubChart } from '../components/lucian/LucianTrendScrubChart';
 
 const MAIN_TABS = [
-  { id: 'overview', label: 'Overview' },
-  { id: 'details', label: 'Request Details' },
+  { value: 'overview', label: 'Overview' },
+  { value: 'details', label: 'Request Details' },
 ];
 
 const RANGES = [
-  { id: 'today', label: 'Today' },
-  { id: '24h', label: '24h' },
-  { id: '7d', label: '7d' },
-  { id: '30d', label: '30d' },
-  { id: '60d', label: '60d' },
-  { id: 'all', label: 'All' },
+  { value: 'today', label: 'Today' },
+  { value: '24h', label: '24h' },
+  { value: '7d', label: '7d' },
+  { value: '30d', label: '30d' },
+  { value: '60d', label: '60d' },
+  { value: 'all', label: 'All' },
 ];
 
 const METRICS = [
@@ -526,30 +525,21 @@ export function UsagePage() {
     <div className="space-y-6">
       {/* Top 2-Tab Switcher + 6 Time Periods + Actions */}
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <LucianSlidingTabs
-          tabs={MAIN_TABS}
+        <SegmentedControl
+          options={MAIN_TABS}
           value={activeTab}
           onChange={setActiveTab}
           ariaLabel="Usage view"
         />
 
         <div className="flex flex-wrap items-center gap-2">
-          <div className="flex items-center rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-card)] p-0.5">
-            {RANGES.map((r) => (
-              <button
-                key={r.id}
-                type="button"
-                onClick={() => setRange(r.id)}
-                className={`rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${
-                  range === r.id
-                    ? 'bg-[#E56A4A] text-white'
-                    : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
-                }`}
-              >
-                {r.label}
-              </button>
-            ))}
-          </div>
+          <SegmentedControl
+            options={RANGES}
+            value={range}
+            onChange={setRange}
+            size="sm"
+            ariaLabel="Usage time range"
+          />
 
           <button
             type="button"
@@ -581,12 +571,11 @@ export function UsagePage() {
       {activeTab === 'overview' ? (
         <>
           {/* 5 Exact 9Router Overview Cards */}
-          <LucianGlowGrid
-            as="section"
-            ariaLabel="Usage Summary"
+          <section
+            aria-label="Usage Summary"
             className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5"
           >
-            <LucianGlowCard innerClassName="p-4">
+            <div className="r-card p-4">
               <div className="flex items-center justify-between text-xs text-[var(--text-secondary)]">
                 <span>Total Requests</span>
                 <Activity className="h-4 w-4 text-[#E56A4A]" aria-hidden="true" />
@@ -600,9 +589,9 @@ export function UsagePage() {
                   {formatNumber(summary.errorRequests || 0)} err
                 </span>
               </div>
-            </LucianGlowCard>
+            </div>
 
-            <LucianGlowCard innerClassName="p-4">
+            <div className="r-card p-4">
               <div className="flex items-center justify-between text-xs text-[var(--text-secondary)]">
                 <span>Input Tokens</span>
                 <ArrowUpRight className="h-4 w-4 text-sky-400" aria-hidden="true" />
@@ -613,9 +602,9 @@ export function UsagePage() {
               <div className="mt-1 text-xs text-[var(--text-muted)]">
                 Avg latency: {Math.round(summary.avgLatencyMs || 0)}ms
               </div>
-            </LucianGlowCard>
+            </div>
 
-            <LucianGlowCard innerClassName="p-4">
+            <div className="r-card p-4">
               <div className="flex items-center justify-between text-xs text-[var(--text-secondary)]">
                 <span>Cached Tokens</span>
                 <Database className="h-4 w-4 text-violet-400" aria-hidden="true" />
@@ -624,9 +613,9 @@ export function UsagePage() {
                 {formatCompactNumber(summary.cachedTokens || 0)}
               </div>
               <div className="mt-1 text-xs text-[var(--text-muted)]">Prompt cache read hits</div>
-            </LucianGlowCard>
+            </div>
 
-            <LucianGlowCard innerClassName="p-4">
+            <div className="r-card p-4">
               <div className="flex items-center justify-between text-xs text-[var(--text-secondary)]">
                 <span>Output Tokens</span>
                 <ArrowDownLeft className="h-4 w-4 text-emerald-500" aria-hidden="true" />
@@ -637,9 +626,9 @@ export function UsagePage() {
               <div className="mt-1 text-xs text-emerald-500">
                 −{formatCompactNumber(summary.savedChars || 0)} chars RTK saved
               </div>
-            </LucianGlowCard>
+            </div>
 
-            <LucianGlowCard innerClassName="p-4">
+            <div className="r-card p-4">
               <div className="flex items-center justify-between text-xs text-[var(--text-secondary)]">
                 <span>Est. Cost</span>
                 <DollarSign className="h-4 w-4 text-[var(--ux-mint)]" aria-hidden="true" />
@@ -653,8 +642,8 @@ export function UsagePage() {
                   Edit →
                 </Link>
               </div>
-            </LucianGlowCard>
-          </LucianGlowGrid>
+            </div>
+          </section>
 
           {/* Live Provider Topology (8 cols) + Live Recent Requests Feed (4 cols) */}
           <section className="grid gap-4 xl:grid-cols-12">

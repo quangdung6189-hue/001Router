@@ -16,11 +16,11 @@ import { useToast } from '../context/ToastContext';
 import { useLocale } from '../context/LocaleContext';
 import { ConfirmDialog } from '../components/ConfirmDialog';
 import { CopyButton } from '../components/CopyButton';
-import { LucianSlidingTabs } from '../components/lucian/LucianSlidingTabs';
+import { SegmentedControl } from '../components/SegmentedControl';
 
 const TABS = [
-  { id: 'server', label: 'Live Server Console (SSE)' },
-  { id: 'requests', label: 'Request Stream' },
+  { value: 'server', label: 'Live Server Console (SSE)' },
+  { value: 'requests', label: 'Request Stream' },
 ];
 
 const LEVEL_STYLES = {
@@ -208,8 +208,8 @@ export function ConsoleLogPage() {
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <LucianSlidingTabs
-          tabs={TABS}
+        <SegmentedControl
+          options={TABS}
           value={tab}
           onChange={setTab}
           ariaLabel="Console log view"

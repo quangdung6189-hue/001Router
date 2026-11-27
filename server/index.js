@@ -1,11 +1,14 @@
 import fs from "node:fs";
+import fsp from "node:fs/promises";
 import path from "node:path";
+import crypto from "node:crypto";
 import { pathToFileURL } from "node:url";
 import express from "express";
 import { DEFAULT_PORT, createStorage } from "./storage.js";
 import { RouterService } from "./router.js";
 import { LiveEventsHub } from "./liveEvents.js";
 import { AGENT_SKILLS, renderSkillMarkdown } from "./skillsData.js";
+import { checkTunnelHostAccess, cleanupLocalTunnels } from "./localTunnel.js";
 import {
   createRouterAuthMiddleware,
   isRouterKeyModelAllowed,
@@ -221,6 +224,25 @@ export async function createApp(options = {}) {
   if (options.headroomFetchImpl) {
     app.locals.headroomFetchImpl = options.headroomFetchImpl;
   }
+  if (options.tunnelManagerOverride) {
+    app.locals.tunnelManagerOverride = options.tunnelManagerOverride;
+  }
+  if (options.allowProcessExit !== undefined) {
+    app.locals.allowProcessExit = Boolean(options.allowProcessExit);
+  }
+  // Host-only CLI token for authenticated local terminal/launcher calls
+  const cliToken =
+    typeof options.cliToken === "string" && options.cliToken.trim()
+      ? options.cliToken.trim()
+      : crypto.randomBytes(24).toString("hex");
+  app.locals.cliToken = cliToken;
+  try {
+    const cliTokenPath = path.join(storage.dataDir, ".cli-token");
+    await fsp.writeFile(cliTokenPath, `${cliToken}\n`, { mode: 0o600 });
+    await fsp.chmod(cliTokenPath, 0o600).catch(() => {});
+  } catch {
+    // Non-fatal in read-only filesystems
+  }
 
   const routerService = new RouterService(storage, { appLocals: app.locals, liveEvents });
   app.routerService = routerService;
@@ -229,8 +251,13 @@ export async function createApp(options = {}) {
 
   // Mandatory security headers & locked-down CORS middleware (Section 9.8 #4, #7)
   app.use(createSecurityHeadersMiddleware());
-  // DNS-rebinding guard: loopback-bound servers only answer to loopback / explicitly allowed Host names
-  app.use(createHostGuardMiddleware({ bindHost }));
+  // DNS-rebinding guard: loopback-bound servers only answer to loopback, explicitly allowed hosts, or authorized tunnel hosts
+  app.use(
+    createHostGuardMiddleware({
+      bindHost,
+      isDynamicHostAllowed: (hostName, req) => checkTunnelHostAccess(hostName, req, storage)
+    })
+  );
   app.use(createCorsMiddleware());
 
   // Pre-auth flood guard (runs BEFORE body parsing so DDoS bursts cannot trigger 25 MB JSON parses)
@@ -593,7 +620,8 @@ if (isDirectRun) {
   const flushAndExit = (code) => {
     if (shuttingDown) return;
     shuttingDown = true;
-    Promise.resolve(app.storage.flushDeferred?.())
+    Promise.resolve(cleanupLocalTunnels())
+      .then(() => app.storage.flushDeferred?.())
       .catch((err) => console.error("[shutdown] failed to flush pending writes:", err?.message || err))
       .finally(() => process.exit(code));
   };
@@ -609,5 +637,6 @@ if (isDirectRun) {
     }
     startDailyCatalogScheduler(app.storage);
   });
+  app.locals.httpServer = server;
   configureHttpServer(server);
 }

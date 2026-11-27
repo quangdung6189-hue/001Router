@@ -1168,7 +1168,7 @@ dialog.nav-drawer:modal {
 
 @supports (position-area: block-end) {
   .header-menu-popover {
-    position-area: block-end span-inline-start;
+    position-area: block-end span-inline-end;
     position-try-fallbacks: flip-block, flip-inline, flip-block flip-inline;
     inset: auto;
     margin-block-start: 0.375rem;
@@ -1181,6 +1181,59 @@ dialog.nav-drawer:modal {
     inset: auto;
     margin: 0;
   }
+}
+
+.header-menu-popover [focusgroup~="menu"] > hr {
+  border: 0;
+  border-top: 1px solid var(--border-subtle);
+  margin: 0.25rem 0;
+}
+
+/* SegmentedControl / Tablist (modern-web-guidance: tabs) */
+.r-tablist {
+  display: inline-flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 0.25rem;
+  max-width: 100%;
+  overflow-x: auto;
+  scrollbar-width: none;
+  padding: 0.25rem;
+  border-radius: 0.625rem;
+  border: 1px solid var(--border-subtle);
+  background-color: var(--bg-subtle);
+}
+
+.r-tablist::-webkit-scrollbar {
+  display: none;
+}
+
+.r-tablist > button {
+  position: relative;
+  flex: none;
+  border-radius: 0.4375rem;
+  color: var(--text-secondary);
+  font-weight: 500;
+  transition: color 0.15s ease, background-color 0.15s ease;
+  cursor: pointer;
+}
+
+.r-tablist > button:hover {
+  color: var(--text-primary);
+}
+
+.r-tablist > button[aria-selected="true"] {
+  background-color: var(--bg-card);
+  color: var(--accent);
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--ux-shadow) 35%, transparent);
+}
+
+.r-tablist > button[aria-selected="true"]::after {
+  content: "";
+  position: absolute;
+  inset: auto 0.5rem 0.125rem;
+  border-block-end: 2px solid var(--accent);
+  border-radius: 999px;
 }
 
 @media (prefers-reduced-motion: no-preference) {

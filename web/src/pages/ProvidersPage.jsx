@@ -44,7 +44,7 @@ import { useToast } from '../context/ToastContext';
 import { useLocale } from '../context/LocaleContext';
 import { ModalDialog } from '../components/ModalDialog';
 import { ConfirmDialog } from '../components/ConfirmDialog';
-import { LucianSlidingTabs } from '../components/lucian/LucianSlidingTabs';
+import { SegmentedControl } from '../components/SegmentedControl';
 import { Switch } from '../components/Switch';
 import { CopyButton } from '../components/CopyButton';
 import { ProviderLogo } from '../components/ProviderLogo';
@@ -1062,6 +1062,7 @@ export function ProvidersPage() {
   const [loading, setLoading] = useState(true);
   const [localSearch, setLocalSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('all'); // all | connected | disconnected | free-tier
+  const [showAllApiKey, setShowAllApiKey] = useState(false);
   const [nowMs, setNowMs] = useState(() => Date.now());
 
   const [testingSection, setTestingSection] = useState(null);
@@ -2549,33 +2550,28 @@ export function ProvidersPage() {
       return [...ordered, ...extras];
     };
 
-    const allKnownOrdered = new Set([
-      ...SECTION_PRESET_ORDER['free-tier'],
-      ...SECTION_PRESET_ORDER.cheap,
-      ...SECTION_PRESET_ORDER.apikey,
-      ...SECTION_PRESET_ORDER.local,
-      ...SECTION_PRESET_ORDER.service,
-    ]);
+    const oauthKeys = ['antigravity', 'gemini-cli', 'gemini', 'openrouter', 'gitlab', 'github', 'vertex'];
+    const oauthSet = new Set(oauthKeys);
+    const oauthProviders = pickPresets(
+      oauthKeys,
+      (p) => !oauthSet.has(p.preset) && /oauth|pkce|device/i.test(p.badge || '')
+    );
+    const usedInOAuth = new Set(oauthProviders.map((p) => p.preset));
 
     const freeTier = pickPresets(
-      SECTION_PRESET_ORDER['free-tier'],
-      (p) => !allKnownOrdered.has(p.preset) && p.category === 'free-tier'
+      SECTION_PRESET_ORDER['free-tier'].filter((k) => !usedInOAuth.has(k)),
+      (p) => !usedInOAuth.has(p.preset) && p.category === 'free-tier'
     );
-    const cheapCoding = pickPresets(
-      SECTION_PRESET_ORDER.cheap,
-      (p) => !allKnownOrdered.has(p.preset) && p.category === 'apikey' && p.tier === 'cheap'
-    );
-    const flagshipApi = pickPresets(
-      SECTION_PRESET_ORDER.apikey,
-      (p) => !allKnownOrdered.has(p.preset) && p.category === 'apikey' && p.tier !== 'cheap'
-    );
-    const localLlm = pickPresets(
-      SECTION_PRESET_ORDER.local,
-      (p) => !allKnownOrdered.has(p.preset) && p.category === 'local'
-    );
-    const serviceProviders = pickPresets(
-      SECTION_PRESET_ORDER.service,
-      (p) => !allKnownOrdered.has(p.preset) && p.category === 'service'
+    const usedInFree = new Set(freeTier.map((p) => p.preset));
+
+    const apiKeyAll = pickPresets(
+      [
+        ...SECTION_PRESET_ORDER.cheap,
+        ...SECTION_PRESET_ORDER.apikey,
+        ...SECTION_PRESET_ORDER.local,
+        ...SECTION_PRESET_ORDER.service,
+      ].filter((k) => !usedInOAuth.has(k) && !usedInFree.has(k)),
+      (p) => !usedInOAuth.has(p.preset) && !usedInFree.has(p.preset)
     );
 
     const buildSec = (id, title, desc, list, badge, badgeClass) => ({
@@ -2591,6 +2587,14 @@ export function ProvidersPage() {
 
     return [
       buildSec(
+        'oauth',
+        'OAuth & Cloud Auth Providers',
+        'Sign in with official OAuth, PKCE, Device Flow, or Service Account JSON.',
+        oauthProviders,
+        'OAuth / Account',
+        'bg-indigo-500/15 text-indigo-400 border-indigo-500/30'
+      ),
+      buildSec(
         'free-tier',
         t('providers.section.freeTier'),
         t('providers.section.freeTierDesc'),
@@ -2599,36 +2603,12 @@ export function ProvidersPage() {
         'bg-emerald-500/15 text-emerald-500 border-emerald-500/30'
       ),
       buildSec(
-        'cheap',
-        t('providers.section.cheap'),
-        t('providers.section.cheapDesc'),
-        cheapCoding,
-        '$0.20–$0.60 / 1M',
-        'bg-amber-500/15 text-amber-400 border-amber-500/30'
-      ),
-      buildSec(
         'apikey',
-        t('providers.section.apikey'),
-        t('providers.section.apikeyDesc'),
-        flagshipApi,
-        'Official BYOK',
+        'API Key & Local Providers',
+        'Connect API keys, coding plans, local LLMs, and multimodal service providers.',
+        apiKeyAll,
+        `${apiKeyAll.length} Providers`,
         'bg-[#E56A4A]/15 text-[#E56A4A] border-[#E56A4A]/30'
-      ),
-      buildSec(
-        'local',
-        t('providers.section.local'),
-        t('providers.section.localDesc'),
-        localLlm,
-        'No Account / Local',
-        'bg-sky-500/15 text-sky-400 border-sky-500/30'
-      ),
-      buildSec(
-        'service',
-        t('providers.section.service'),
-        t('providers.section.serviceDesc'),
-        serviceProviders,
-        '9 Service Kinds',
-        'bg-purple-500/15 text-purple-400 border-purple-500/30'
       ),
     ];
   }, [presets, presetMap, matchesFilter, providerByPreset, t]);
@@ -2753,12 +2733,12 @@ export function ProvidersPage() {
 
       {/* Top Filter Pills + Mobile Search + Explore All Models button */}
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <LucianSlidingTabs
-          tabs={[
-            { id: 'all', label: `${t('providers.filter.all')} (${presets.length - 1})` },
-            { id: 'connected', label: `${t('providers.filter.connected')} (${totalConnected})` },
-            { id: 'disconnected', label: t('providers.filter.notConnected') },
-            { id: 'free-tier', label: t('providers.filter.freeTier') },
+        <SegmentedControl
+          options={[
+            { value: 'all', label: `${t('providers.filter.all')} (${presets.length - 1})` },
+            { value: 'connected', label: `${t('providers.filter.connected')} (${totalConnected})` },
+            { value: 'disconnected', label: t('providers.filter.notConnected') },
+            { value: 'free-tier', label: t('providers.filter.freeTier') },
           ]}
           value={statusFilter}
           onChange={setStatusFilter}
@@ -2818,13 +2798,77 @@ export function ProvidersPage() {
         </div>
       </div>
 
-      {/* 5 Official Provider Sections */}
+      {/* Section 1: API Key Compatible / Custom Providers */}
+      <section className="space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="text-[16px] font-semibold text-[var(--text-primary)]">
+              {t('providers.section.compatible')}
+            </h2>
+            <p className="mt-0.5 text-xs text-[var(--text-secondary)]">
+              {t('providers.section.compatibleDesc')}
+            </p>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => openAddCompatibleModal('anthropic')}
+              className="r-btn-primary inline-flex items-center gap-1.5 px-3.5 py-2 text-xs shadow-xs"
+            >
+              <Plus className="h-3.5 w-3.5" aria-hidden="true" />
+              {t('providers.addAnthropicCompat')}
+            </button>
+            <button
+              type="button"
+              onClick={() => openAddCompatibleModal('openai')}
+              className="r-btn-contrast inline-flex items-center gap-1.5 px-3.5 py-2 text-xs shadow-xs"
+            >
+              <Plus className="h-3.5 w-3.5" aria-hidden="true" />
+              {t('providers.addOpenAICompat')}
+            </button>
+          </div>
+        </div>
+
+        {filteredCompatible.length === 0 ? (
+          <div className="rounded-xl border border-dashed border-[var(--border-strong)] bg-[var(--bg-card)]/50 px-5 py-4 text-center text-xs text-[var(--text-muted)]">
+            {t('providers.noCustomYet')}
+          </div>
+        ) : (
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+            {filteredCompatible.map((prov) => {
+              const isAnthropic = prov.formatType === 'anthropic';
+              const customMeta = {
+                preset: prov.preset || 'custom',
+                name: prov.name,
+                category: 'custom',
+                logo: isAnthropic ? 'anthropic' : 'openai',
+                color: isAnthropic ? '#E56A4A' : '#10A37F',
+                monogram: String(prov.name || prov.slug || 'CU').slice(0, 2).toUpperCase(),
+                baseUrl: prov.baseUrl,
+                formatType: prov.formatType,
+                models: prov.models || [],
+              };
+              return renderProviderCard(customMeta, prov, prov.id);
+            })}
+          </div>
+        )}
+      </section>
+
+      {/* Sections 2-4: OAuth, Free Tier, and API Key Providers */}
       {sections.map((section) => {
         if (section.presets.length === 0) return null;
         const isTesting = testingSection === section.id;
+        const canCollapse =
+          section.id === 'apikey' &&
+          !effectiveSearch &&
+          statusFilter === 'all' &&
+          section.presets.length > 20;
+        const visiblePresets =
+          canCollapse && !showAllApiKey ? section.presets.slice(0, 20) : section.presets;
 
         return (
-          <section key={section.id} className="space-y-3">
+          <section key={section.id} className="space-y-3 border-t border-[var(--border-subtle)] pt-5">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="min-w-0">
                 <div className="flex flex-wrap items-center gap-2">
@@ -2860,7 +2904,7 @@ export function ProvidersPage() {
             </div>
 
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-              {section.presets.map((presetObj) =>
+              {visiblePresets.map((presetObj) =>
                 renderProviderCard(
                   presetObj,
                   providerByPreset.get(presetObj.preset) || null,
@@ -2868,66 +2912,23 @@ export function ProvidersPage() {
                 )
               )}
             </div>
+
+            {canCollapse ? (
+              <div className="pt-1">
+                <button
+                  type="button"
+                  onClick={() => setShowAllApiKey((prev) => !prev)}
+                  className="r-btn-secondary px-3.5 py-1.5 text-xs"
+                >
+                  {showAllApiKey
+                    ? 'Show fewer providers'
+                    : `Show all ${section.presets.length} providers`}
+                </button>
+              </div>
+            ) : null}
           </section>
         );
       })}
-
-      {/* Section 6: API Key Compatible Providers (Custom Nodes — exact 9Router bottom bar!) */}
-      <section className="space-y-3 border-t border-[var(--border-subtle)] pt-6">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <h2 className="text-[16px] font-semibold text-[var(--text-primary)]">
-              {t('providers.section.compatible')}
-            </h2>
-            <p className="mt-0.5 text-xs text-[var(--text-secondary)]">
-              {t('providers.section.compatibleDesc')}
-            </p>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-2">
-            <button
-              type="button"
-              onClick={() => openAddCompatibleModal('anthropic')}
-              className="r-btn-primary inline-flex items-center gap-1.5 px-3.5 py-2 text-xs shadow-xs"
-            >
-              <Plus className="h-3.5 w-3.5" aria-hidden="true" />
-              {t('providers.addAnthropicCompat')}
-            </button>
-            <button
-              type="button"
-              onClick={() => openAddCompatibleModal('openai')}
-              className="r-btn-contrast inline-flex items-center gap-1.5 px-3.5 py-2 text-xs shadow-xs"
-            >
-              <Plus className="h-3.5 w-3.5" aria-hidden="true" />
-              {t('providers.addOpenAICompat')}
-            </button>
-          </div>
-        </div>
-
-        {filteredCompatible.length === 0 ? (
-          <div className="rounded-xl border border-dashed border-[var(--border-strong)] bg-[var(--bg-card)]/50 px-5 py-6 text-center text-xs text-[var(--text-muted)]">
-            {t('providers.noCustomYet')}
-          </div>
-        ) : (
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-            {filteredCompatible.map((prov) => {
-              const isAnthropic = prov.formatType === 'anthropic';
-              const customMeta = {
-                preset: prov.preset || 'custom',
-                name: prov.name,
-                category: 'custom',
-                logo: isAnthropic ? 'anthropic' : 'openai',
-                color: isAnthropic ? '#E56A4A' : '#10A37F',
-                monogram: String(prov.name || prov.slug || 'CU').slice(0, 2).toUpperCase(),
-                baseUrl: prov.baseUrl,
-                formatType: prov.formatType,
-                models: prov.models || [],
-              };
-              return renderProviderCard(customMeta, prov, prov.id);
-            })}
-          </div>
-        )}
-      </section>
 
       {/* Rich Provider Detail & Model Catalog Modal */}
       <ModalDialog
@@ -3034,12 +3035,11 @@ export function ProvidersPage() {
               <div className="space-y-4">
                 {/* 3-Tab Official Connection Mode Selector */}
                 <div className="flex flex-wrap items-center justify-between gap-2.5">
-                  <LucianSlidingTabs
-                    idPrefix="provider-connect-mode"
-                    tabs={[
-                      { id: 'api', label: t('providers.mode.api') },
-                      { id: 'json', label: t('providers.mode.json') },
-                      { id: 'web', label: t('providers.mode.web') },
+                  <SegmentedControl
+                    options={[
+                      { value: 'api', label: t('providers.mode.api') },
+                      { value: 'json', label: t('providers.mode.json') },
+                      { value: 'web', label: t('providers.mode.web') },
                     ]}
                     value={connectionMode}
                     onChange={(nextMode) => {
@@ -3047,6 +3047,7 @@ export function ProvidersPage() {
                       setModalFeedback(null);
                       setWebTokenError('');
                     }}
+                    size="sm"
                     ariaLabel={t('providers.mode.ariaLabel')}
                   />
 

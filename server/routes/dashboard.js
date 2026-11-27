@@ -21,10 +21,22 @@ import {
   isPasswordChangeRequired,
   isPublicDeployment,
   isRouterKeyRequired,
+  isValidLocalCliRequest,
   maskKey,
   sanitizeSecrets,
   signSessionToken
 } from "../auth.js";
+import { parseHostHeaderName, isLoopbackHost } from "../security/headers.js";
+import {
+  cleanupLocalTunnels,
+  disableTailscale,
+  disableTunnel,
+  enableTailscale,
+  enableTunnel,
+  getDownloadStatus,
+  getTailscaleStatus,
+  getTunnelStatus
+} from "../localTunnel.js";
 import {
   RTK_FILTER_CATALOG,
   VALID_CAVEMAN_LEVELS,
@@ -1712,7 +1724,7 @@ export function createDashboardRouter(storage, liveEvents = null) {
   });
 
   router.get("/me", (req, res) => {
-    const loginRequired = isDashboardLoginRequired(storage);
+    const loginRequired = isDashboardLoginRequired(storage, req);
     if (!loginRequired || isDashboardAuthenticated(req, storage)) {
       return res.json({
         authenticated: true,
@@ -1725,6 +1737,18 @@ export function createDashboardRouter(storage, liveEvents = null) {
       authenticated: false,
       error: "Unauthorized"
     });
+  });
+
+  // Local CLI-only password recovery: requires the host's .cli-token over loopback
+  router.post("/auth/reset-password", sensitiveCryptoRateLimit, async (req, res) => {
+    if (!isValidLocalCliRequest(req)) {
+      return res.status(403).json({
+        error: "Password reset is only permitted from the local CLI on loopback with a valid CLI token"
+      });
+    }
+    const defaultHash = await bcrypt.hash("1234", 10);
+    await storage.setPasswordHash(defaultHash);
+    return res.json({ ok: true, message: "Dashboard password reset to default (1234)" });
   });
 
   // Password-verified connect handshake for 001Router IDE extensions (VS Code / Antigravity IDE)
@@ -5821,20 +5845,271 @@ export function createDashboardRouter(storage, liveEvents = null) {
     if (body.catalogAutoSync !== undefined) {
       patch.catalogAutoSync = Boolean(body.catalogAutoSync);
     }
+    if (body.tunnelDashboardAccess !== undefined) {
+      const nextAccess = Boolean(body.tunnelDashboardAccess);
+      if (nextAccess && storage.isDefaultPasswordSync()) {
+        return res.status(400).json({
+          error: "Change the default dashboard password before allowing dashboard access via tunnel"
+        });
+      }
+      patch.tunnelDashboardAccess = nextAccess;
+    }
+    if (body.outboundProxyEnabled !== undefined) {
+      patch.outboundProxyEnabled = Boolean(body.outboundProxyEnabled);
+    }
+    if (body.outboundProxyUrl !== undefined) {
+      const rawUrl = typeof body.outboundProxyUrl === "string" ? body.outboundProxyUrl.trim() : "";
+      if (rawUrl) {
+        const parsed = parseProxyUrl(rawUrl);
+        if (!parsed.ok) {
+          return res.status(400).json({ error: parsed.error || "Invalid outbound proxy URL" });
+        }
+        const ssrf = classifyHostForSSRF(parsed.host);
+        const allowPriv =
+          body.allowPrivateUpstreams !== undefined
+            ? Boolean(body.allowPrivateUpstreams)
+            : storage.getSettings().allowPrivateUpstreams;
+        if (
+          ssrf.isMetadataOrLinkLocal ||
+          (ssrf.isPrivateLan && allowPriv !== true) ||
+          (ssrf.isLoopback && allowPriv === false)
+        ) {
+          return res.status(400).json({ error: "Outbound proxy host is blocked by SSRF policy" });
+        }
+        patch.outboundProxyUrl = parsed.url;
+      } else {
+        patch.outboundProxyUrl = "";
+      }
+    }
+    if (body.outboundNoProxy !== undefined) {
+      patch.outboundNoProxy =
+        typeof body.outboundNoProxy === "string" ? body.outboundNoProxy.slice(0, 1000) : "";
+    }
 
     const updated = await storage.updateSettings(patch);
     return res.json({
       settings: updated,
       publicDeployment: isPublicDeployment(storage),
       effective: {
-        requireKey: isRouterKeyRequired(storage),
-        requireLogin: isDashboardLoginRequired(storage)
+        requireKey: isRouterKeyRequired(storage, req),
+        requireLogin: isDashboardLoginRequired(storage, req)
       }
     });
   };
 
   router.put("/settings", handleUpdateSettings);
   router.patch("/settings", handleUpdateSettings);
+
+  router.post("/settings/proxy-test", heavyProbeRateLimit, async (req, res) => {
+    const rawUrl = typeof req.body?.proxyUrl === "string" ? req.body.proxyUrl.trim() : "";
+    const parsed = parseProxyUrl(rawUrl);
+    if (!parsed.ok) {
+      return res.status(400).json({ ok: false, error: parsed.error || "Invalid proxy URL" });
+    }
+    const ssrf = classifyHostForSSRF(parsed.host);
+    const allowPriv = storage.getSettings().allowPrivateUpstreams;
+    if (
+      ssrf.isMetadataOrLinkLocal ||
+      (ssrf.isPrivateLan && allowPriv !== true) ||
+      (ssrf.isLoopback && allowPriv === false)
+    ) {
+      return res.status(400).json({ ok: false, error: "Proxy host is blocked by SSRF policy" });
+    }
+
+    const netMod = await import("node:net");
+    const dnsMod = await import("node:dns");
+    const started = Date.now();
+    try {
+      const host = parsed.host.replace(/^\[|\]$/g, "");
+      let targetIp = host;
+      if (!netMod.default.isIP(host)) {
+        const addrs = await dnsMod.default.promises.lookup(host, { all: true });
+        if (!addrs?.length) {
+          return res.status(400).json({ ok: false, error: "Proxy DNS lookup returned no addresses" });
+        }
+        targetIp = addrs[0].address;
+      }
+      const probeOk = await new Promise((resolve, reject) => {
+        const sock = netMod.default.createConnection({ host: targetIp, port: parsed.port });
+        sock.setTimeout(5000);
+        sock.once("connect", () => {
+          sock.destroy();
+          resolve(true);
+        });
+        sock.once("timeout", () => {
+          sock.destroy();
+          reject(new Error("Proxy connection timed out"));
+        });
+        sock.once("error", (err) => {
+          sock.destroy();
+          reject(err);
+        });
+      });
+      return res.json({
+        ok: probeOk,
+        status: "TCP_OK",
+        elapsedMs: Date.now() - started
+      });
+    } catch (err) {
+      return res.status(502).json({
+        ok: false,
+        elapsedMs: Date.now() - started,
+        error: sanitizeSecrets(err?.message || "Proxy test failed", [rawUrl])
+      });
+    }
+  });
+
+  // --- Local Cloudflare Tunnel & Tailscale Funnel ---
+
+  const getTunnelManager = (req) => {
+    const ov = req.app?.locals?.tunnelManagerOverride;
+    return {
+      getTunnelStatus: ov?.getTunnelStatus || getTunnelStatus,
+      getDownloadStatus: ov?.getDownloadStatus || getDownloadStatus,
+      enableTunnel: ov?.enableTunnel || enableTunnel,
+      disableTunnel: ov?.disableTunnel || disableTunnel,
+      getTailscaleStatus: ov?.getTailscaleStatus || getTailscaleStatus,
+      enableTailscale: ov?.enableTailscale || enableTailscale,
+      disableTailscale: ov?.disableTailscale || disableTailscale,
+      cleanup: ov?.cleanup || cleanupLocalTunnels
+    };
+  };
+
+  router.get("/tunnel/status", async (req, res) => {
+    if (isPublicDeployment(storage)) {
+      return res.json({
+        tunnel: { enabled: false, settingsEnabled: false, tunnelUrl: "", publicUrl: "", running: false, installed: false },
+        tailscale: { installed: false, loggedIn: false, running: false, enabled: false, settingsEnabled: false, tunnelUrl: "" },
+        download: { downloading: false, progress: 0 },
+        unavailableReason: "Tunnels are only available on local desktop installations"
+      });
+    }
+    const mgr = getTunnelManager(req);
+    const [tunnel, tailscale] = await Promise.all([
+      mgr.getTunnelStatus(storage),
+      mgr.getTailscaleStatus(storage)
+    ]);
+    return res.json({
+      tunnel,
+      tailscale,
+      download: mgr.getDownloadStatus()
+    });
+  });
+
+  router.post("/tunnel/enable", async (req, res) => {
+    if (isPublicDeployment(storage)) {
+      return res.status(403).json({ error: "Tunnel is disabled on public deployments" });
+    }
+    if (storage.isDefaultPasswordSync()) {
+      return res.status(400).json({
+        error: "Security required: Change the default dashboard password before enabling remote tunnel access"
+      });
+    }
+    if (!isRouterKeyRequired(storage)) {
+      return res.status(400).json({
+        error: "Security required: Enable \"Require API key\" before enabling the tunnel"
+      });
+    }
+    try {
+      const mgr = getTunnelManager(req);
+      const port = Number(req.app?.locals?.port) || storage.port || 20128;
+      const result = await mgr.enableTunnel(storage, port);
+      liveEvents?.log?.("info", "tunnel", `Cloudflare Quick Tunnel active: ${result.tunnelUrl}`);
+      return res.json(result);
+    } catch (err) {
+      return res.status(500).json({ error: err?.message || "Failed to start tunnel" });
+    }
+  });
+
+  router.post("/tunnel/disable", async (req, res) => {
+    try {
+      const mgr = getTunnelManager(req);
+      const result = await mgr.disableTunnel(storage);
+      liveEvents?.log?.("info", "tunnel", "Cloudflare Quick Tunnel disabled");
+      return res.json(result);
+    } catch (err) {
+      return res.status(500).json({ error: err?.message || "Failed to stop tunnel" });
+    }
+  });
+
+  router.get("/tunnel/tailscale-check", async (req, res) => {
+    if (isPublicDeployment(storage)) {
+      return res.json({ installed: false, loggedIn: false, running: false, enabled: false, tunnelUrl: "" });
+    }
+    const mgr = getTunnelManager(req);
+    const ts = await mgr.getTailscaleStatus(storage);
+    return res.json(ts);
+  });
+
+  router.post("/tunnel/tailscale-enable", async (req, res) => {
+    if (isPublicDeployment(storage)) {
+      return res.status(403).json({ error: "Tailscale tunnel is disabled on public deployments" });
+    }
+    if (storage.isDefaultPasswordSync()) {
+      return res.status(400).json({
+        error: "Security required: Change the default dashboard password before enabling Tailscale Funnel"
+      });
+    }
+    try {
+      const mgr = getTunnelManager(req);
+      const port = Number(req.app?.locals?.port) || storage.port || 20128;
+      const result = await mgr.enableTailscale(storage, port);
+      if (result?.success) {
+        liveEvents?.log?.("info", "tunnel", `Tailscale Funnel active: ${result.tunnelUrl}`);
+      }
+      return res.json(result);
+    } catch (err) {
+      return res.status(500).json({ error: err?.message || "Failed to enable Tailscale" });
+    }
+  });
+
+  router.post("/tunnel/tailscale-disable", async (req, res) => {
+    try {
+      const mgr = getTunnelManager(req);
+      const result = await mgr.disableTailscale(storage);
+      liveEvents?.log?.("info", "tunnel", "Tailscale Funnel disabled");
+      return res.json(result);
+    } catch (err) {
+      return res.status(500).json({ error: err?.message || "Failed to disable Tailscale" });
+    }
+  });
+
+  // --- Version & Local Server Shutdown ---
+
+  router.get("/version", (_req, res) => {
+    return res.json({
+      version: "2.0.0",
+      currentVersion: "2.0.0",
+      latestVersion: "2.0.0",
+      hasUpdate: false
+    });
+  });
+
+  router.post("/version/shutdown", async (req, res) => {
+    const reqHost = parseHostHeaderName(req.headers?.host);
+    if (isPublicDeployment(storage) || !reqHost || !isLoopbackHost(reqHost)) {
+      return res.status(403).json({
+        error: "Server shutdown is only permitted from localhost"
+      });
+    }
+    await getTunnelManager(req).cleanup().catch(() => {});
+    await storage.flushDeferred?.().catch(() => {});
+    liveEvents?.log?.("warn", "server", "Shutdown requested from local dashboard");
+    res.json({ success: true, message: "Shutting down 001Router proxy server..." });
+
+    const allowExit =
+      !process.env.NODE_TEST_CONTEXT && req.app?.locals?.allowProcessExit !== false;
+    if (allowExit) {
+      setTimeout(() => {
+        try {
+          req.app?.locals?.httpServer?.close?.(() => process.exit(0));
+        } catch {
+          // ignore
+        }
+        setTimeout(() => process.exit(0), 500).unref();
+      }, 250).unref();
+    }
+  });
 
   router.post("/settings/password", sensitiveCryptoRateLimit, async (req, res) => {
     const body = req.body || {};

@@ -3,11 +3,15 @@
   "version": "1.0.0",
   "description": "Local AI router & gateway compatible with OpenAI and Anthropic APIs (official API keys by default; experimental Gemini CLI / Antigravity sign-in)",
   "type": "module",
+  "bin": {
+    "001router": "./cli/index.js"
+  },
   "scripts": {
     "dev": "node --watch server/index.js",
     "dev:web": "npm --prefix web run dev",
     "build": "npm --prefix web run build",
     "start": "node server/index.js",
+    "cli": "node cli/index.js",
     "test": "node --test test/*.test.js",
     "security:scan": "node scripts/security-scan.js"
   },

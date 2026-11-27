@@ -2,116 +2,134 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, NavLink, useParams } from 'react-router-dom';
 import {
   ArrowRight,
-  Cpu,
-  Film,
+  AudioLines,
+  Database,
   Globe,
-  Image,
+  Image as ImageIcon,
+  Layers,
   Mic,
   RefreshCw,
   Search,
-  Volume2,
+  Video,
 } from 'lucide-react';
-import {
-  catalogApi,
-  FALLBACK_PRESETS,
-  MEDIA_PROVIDER_KINDS,
-  providersApi,
-} from '../lib/api';
+import { FALLBACK_PRESETS, MEDIA_PROVIDER_KINDS, providersApi } from '../lib/api';
 import { useToast } from '../context/ToastContext';
-import { CopyButton } from '../components/CopyButton';
 import { ProviderLogo } from '../components/ProviderLogo';
+import { CopyButton } from '../components/CopyButton';
 import { Switch } from '../components/Switch';
 
-const KIND_ICONS = {
-  embedding: Cpu,
-  image: Image,
-  video: Film,
-  tts: Volume2,
+const KIND_ICON = {
+  embedding: Database,
+  image: ImageIcon,
+  video: Video,
+  tts: AudioLines,
   stt: Mic,
+  systemone: Layers,
   web: Globe,
 };
 
-function matchesMediaKinds(presetObj, targetKinds) {
-  const services = Array.isArray(presetObj?.serviceKinds)
-    ? presetObj.serviceKinds
-    : presetObj?.serviceKind
-      ? [presetObj.serviceKind]
-      : [];
-  const catalogKinds = (presetObj?.modelCatalog || []).map((m) => m.kind).filter(Boolean);
-  const combined = new Set([...services, ...catalogKinds]);
+function MediaProviderGrid({ items, connectedByPreset, targetKindId, matchKinds, onToggle }) {
+  return (
+    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+      {items.map((pr) => {
+        const connected = connectedByPreset.get(pr.preset);
+        const targetId = connected ? connected.id : pr.preset;
+        const isLocal = pr.category === 'local' || pr.keyOptional;
+        const catalogMatches = Array.isArray(pr.modelCatalog)
+          ? pr.modelCatalog.filter((m) => matchKinds.includes(m?.kind))
+          : [];
+        const modelCount =
+          catalogMatches.length > 0
+            ? catalogMatches.length
+            : (connected?.models || pr.models || []).length;
 
-  // Also match self-hosted presets explicitly by slug
-  const p = String(presetObj?.preset || presetObj?.slug || '').toLowerCase();
-  if (p.includes('embedding') || p === 'voyage' || p === 'jina' || p === 'cohere') {
-    combined.add('embedding');
-  }
-  if (p.includes('image') || p === 'fal' || p === 'bfl' || p === 'stability' || p === 'recraft') {
-    combined.add('image');
-  }
-  if (p === 'fal' || p === 'runway' || p === 'luma' || p === 'kling') {
-    combined.add('video');
-  }
-  if (p.includes('tts') || p === 'elevenlabs' || p === 'deepgram' || p === 'openai') {
-    combined.add('tts');
-  }
-  if (p.includes('stt') || p === 'deepgram' || p === 'assemblyai' || p === 'groq' || p === 'openai') {
-    combined.add('stt');
-  }
-  if (
-    p === 'tavily' ||
-    p === 'brave' ||
-    p === 'serper' ||
-    p === 'exa' ||
-    p === 'linkup' ||
-    p === 'searxng' ||
-    p === 'searchapi' ||
-    p === 'google-pse' ||
-    p === 'firecrawl' ||
-    p === 'jina'
-  ) {
-    combined.add('search');
-    combined.add('fetch');
-  }
-  return targetKinds.some((k) => combined.has(k));
+        return (
+          <article
+            key={pr.preset}
+            className={`r-card flex flex-col justify-between p-3.5 transition-colors hover:border-[#E56A4A]/60 ${
+              connected ? 'border-[var(--border-strong)]' : ''
+            }`}
+          >
+            <div className="flex items-start justify-between gap-2.5">
+              <div className="flex min-w-0 items-center gap-2.5">
+                <ProviderLogo
+                  preset={pr.preset}
+                  logo={pr.logo}
+                  logoExt={pr.logoExt}
+                  name={connected?.name || pr.name}
+                  color={pr.color}
+                  size="sm"
+                />
+                <div className="min-w-0">
+                  <h3 className="truncate text-sm font-medium text-[var(--text-primary)]">
+                    {connected?.name || pr.name}
+                  </h3>
+                  <div className="mt-0.5 flex flex-wrap items-center gap-1.5">
+                    {connected ? (
+                      <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/15 px-1.5 py-0.2 text-[10px] font-medium text-emerald-400">
+                        <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                        Connected
+                      </span>
+                    ) : (
+                      <span className="text-[11px] text-[var(--text-muted)]">Not connected</span>
+                    )}
+                    {isLocal ? (
+                      <span className="rounded-full bg-sky-500/15 px-1.5 py-0.2 text-[10px] font-medium text-sky-400">
+                        Local
+                      </span>
+                    ) : null}
+                  </div>
+                </div>
+              </div>
+
+              {connected ? (
+                <Switch
+                  size="sm"
+                  checked={connected.enabled !== false}
+                  onChange={(val) => onToggle(connected, val)}
+                  aria-label={`Toggle ${connected.name}`}
+                />
+              ) : null}
+            </div>
+
+            <div className="mt-3 flex items-center justify-between gap-2 border-t border-[var(--border-subtle)] pt-2.5">
+              <span className="font-mono text-[11px] text-[var(--text-muted)]">
+                {modelCount} model(s)
+              </span>
+              <Link
+                to={`/media-providers/${targetKindId}/${encodeURIComponent(targetId)}`}
+                className="inline-flex items-center gap-1 text-xs font-medium text-[#E56A4A] hover:underline"
+              >
+                {connected ? 'Configure' : 'Connect'}
+                <ArrowRight className="h-3 w-3" aria-hidden="true" />
+              </Link>
+            </div>
+          </article>
+        );
+      })}
+    </div>
+  );
 }
 
-export function MediaProvidersPage({ forcedKind = '' }) {
-  const params = useParams();
-  const kind = forcedKind || params.kind || 'embedding';
+export function MediaProvidersPage({ forcedKind }) {
+  const { kind } = useParams();
+  const activeKindId = forcedKind || kind || 'image';
   const toast = useToast();
 
   const [providers, setProviders] = useState([]);
-  const [presets, setPresets] = useState(FALLBACK_PRESETS);
-  const [search, setSearch] = useState('');
   const [loading, setLoading] = useState(true);
+  const [search, setSearch] = useState('');
 
   const kindMeta = useMemo(
-    () => MEDIA_PROVIDER_KINDS.find((k) => k.id === kind) || MEDIA_PROVIDER_KINDS[0],
-    [kind]
+    () => MEDIA_PROVIDER_KINDS.find((k) => k.id === activeKindId) || MEDIA_PROVIDER_KINDS[0],
+    [activeKindId]
   );
 
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
-      const [provRes, catRes] = await Promise.all([
-        providersApi.list(),
-        catalogApi.get().catch(() => null),
-      ]);
-      setProviders(provRes?.providers || []);
-      const serverPresets =
-        Array.isArray(provRes?.presets) && provRes.presets.length > 0
-          ? provRes.presets
-          : Array.isArray(catRes?.presets) && catRes.presets.length > 0
-            ? catRes.presets
-            : [];
-      if (serverPresets.length > 0) {
-        const merged = [...serverPresets];
-        const seen = new Set(merged.map((p) => p.preset));
-        for (const fb of FALLBACK_PRESETS) {
-          if (!seen.has(fb.preset)) merged.push(fb);
-        }
-        setPresets(merged);
-      }
+      const res = await providersApi.list();
+      setProviders(res?.providers || []);
     } catch (err) {
       toast.error(err?.message || 'Failed to load media providers');
     } finally {
@@ -126,66 +144,69 @@ export function MediaProvidersPage({ forcedKind = '' }) {
   const connectedByPreset = useMemo(() => {
     const map = new Map();
     for (const p of providers) {
-      map.set(p.preset || p.slug, p);
-      map.set(p.slug, p);
+      if (p.preset) map.set(p.preset, p);
     }
     return map;
   }, [providers]);
 
   const items = useMemo(() => {
     const q = search.trim().toLowerCase();
-    const list = presets.filter((pr) => matchesMediaKinds(pr, kindMeta.kinds));
-    // Include any connected custom provider matching kind
-    const seen = new Set(list.map((p) => p.preset));
-    for (const cp of providers) {
-      if (!seen.has(cp.preset) && matchesMediaKinds(cp, kindMeta.kinds)) {
-        list.push({
-          preset: cp.preset || cp.slug,
-          name: cp.name,
-          baseUrl: cp.baseUrl,
-          models: cp.models || [],
-        });
-      }
-    }
-    return list
-      .filter((pr) => {
-        if (!q) return true;
-        return `${pr.name} ${pr.preset} ${(pr.models || []).join(' ')}`
-          .toLowerCase()
-          .includes(q);
-      })
-      .sort((a, b) => {
-        const ac = connectedByPreset.has(a.preset) ? 0 : 1;
-        const bc = connectedByPreset.has(b.preset) ? 0 : 1;
-        if (ac !== bc) return ac - bc;
-        return String(a.name).localeCompare(String(b.name));
-      });
-  }, [presets, providers, kindMeta.kinds, search, connectedByPreset]);
+    return FALLBACK_PRESETS.filter((pr) => {
+      const sk = pr.serviceKinds || [];
+      const cat = pr.modelCatalog || [];
+      const matchesKind =
+        kindMeta.kinds.some((k) => sk.includes(k)) || cat.some((m) => kindMeta.kinds.includes(m?.kind));
+      if (!matchesKind) return false;
+      if (!q) return true;
+      return `${pr.name} ${pr.preset} ${pr.badge || ''}`.toLowerCase().includes(q);
+    });
+  }, [kindMeta, search]);
+
+  const webSearchItems = useMemo(
+    () =>
+      items.filter(
+        (pr) =>
+          (pr.serviceKinds || []).includes('search') ||
+          (pr.modelCatalog || []).some((m) => m?.kind === 'search')
+      ),
+    [items]
+  );
+
+  const webFetchItems = useMemo(
+    () =>
+      items.filter(
+        (pr) =>
+          (pr.serviceKinds || []).includes('fetch') ||
+          (pr.modelCatalog || []).some((m) => m?.kind === 'fetch')
+      ),
+    [items]
+  );
 
   const handleQuickToggle = async (prov, nextEnabled) => {
+    setProviders((prev) =>
+      prev.map((p) => (p.id === prov.id ? { ...p, enabled: nextEnabled } : p))
+    );
     try {
-      const res = await providersApi.update(prov.id, { enabled: nextEnabled });
-      if (res?.provider) {
-        setProviders((prev) => prev.map((p) => (p.id === prov.id ? res.provider : p)));
-      }
+      await providersApi.update(prov.id, { enabled: nextEnabled });
       toast.success(`${prov.name} ${nextEnabled ? 'enabled' : 'disabled'}`);
     } catch (err) {
-      toast.error(err?.message || 'Failed to update provider');
+      setProviders((prev) =>
+        prev.map((p) => (p.id === prov.id ? { ...p, enabled: prov.enabled } : p))
+      );
+      toast.error(err?.message || 'Failed to update status');
     }
   };
 
-  const KindIcon = KIND_ICONS[kindMeta.id] || Cpu;
-  const origin = window.location.origin;
+  const origin =
+    typeof window !== 'undefined' ? window.location.origin : 'http://127.0.0.1:20128';
+  const KindIcon = KIND_ICON[kindMeta.id] || Database;
 
   return (
     <div className="space-y-6">
-      {/* Kind Navigation Pills */}
-      <nav
-        aria-label="Media provider categories"
-        className="flex flex-wrap items-center gap-2"
-      >
+      {/* Sub-navigation bar matching 9Router Media Providers */}
+      <nav aria-label="Media Provider Kinds" className="flex flex-wrap gap-1.5">
         {MEDIA_PROVIDER_KINDS.map((k) => {
-          const Icon = KIND_ICONS[k.id] || Cpu;
+          const Icon = KIND_ICON[k.id] || Database;
           return (
             <NavLink
               key={k.id}
@@ -193,8 +214,8 @@ export function MediaProvidersPage({ forcedKind = '' }) {
               className={({ isActive }) =>
                 `inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors ${
                   isActive
-                    ? 'border-[#E56A4A] bg-[#E56A4A]/14 text-[#E56A4A]'
-                    : 'border-[var(--border-subtle)] bg-[var(--bg-card)] text-[var(--text-secondary)] hover:border-[var(--border-strong)] hover:text-[var(--text-primary)]'
+                    ? 'border-[#E56A4A] bg-[#E56A4A]/12 text-[#E56A4A]'
+                    : 'border-[var(--border-subtle)] bg-[var(--bg-card)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
                 }`
               }
             >
@@ -206,14 +227,14 @@ export function MediaProvidersPage({ forcedKind = '' }) {
       </nav>
 
       {/* Endpoint Info Banner */}
-      <section className="r-card flex flex-wrap items-center justify-between gap-4 p-5">
+      <section className="r-card flex flex-wrap items-center justify-between gap-4 p-4">
         <div className="flex items-start gap-3">
-          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#E56A4A]/14 text-[#E56A4A]">
-            <KindIcon className="h-5 w-5" aria-hidden="true" />
+          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#E56A4A]/14 text-[#E56A4A]">
+            <KindIcon className="h-4.5 w-4.5" aria-hidden="true" />
           </div>
           <div>
             <h2 className="text-base font-semibold text-[var(--text-primary)]">
-              {kindMeta.label} Providers ({items.length})
+              {kindMeta.label} ({items.length})
             </h2>
             <p className="mt-0.5 text-xs text-[var(--text-secondary)]">{kindMeta.desc}</p>
           </div>
@@ -259,87 +280,61 @@ export function MediaProvidersPage({ forcedKind = '' }) {
         />
       </div>
 
-      {/* Providers Grid */}
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        {items.map((pr) => {
-          const connected = connectedByPreset.get(pr.preset);
-          const targetId = connected ? connected.id : pr.preset;
-          const isLocal = pr.category === 'local' || pr.keyOptional;
-
-          return (
-            <article
-              key={pr.preset}
-              className={`r-card flex flex-col justify-between p-4 transition-colors hover:border-[#E56A4A]/60 ${
-                connected ? 'border-[var(--border-strong)]' : ''
-              }`}
-            >
-              <div className="flex items-start justify-between gap-3">
-                <div className="flex min-w-0 items-center gap-3">
-                  <ProviderLogo
-                    preset={pr.preset}
-                    logo={pr.logo}
-                    logoExt={pr.logoExt}
-                    name={connected?.name || pr.name}
-                    color={pr.color}
-                    size="md"
-                  />
-                  <div className="min-w-0">
-                    <h3 className="truncate text-sm font-semibold text-[var(--text-primary)]">
-                      {connected?.name || pr.name}
-                    </h3>
-                    <div className="mt-1 flex flex-wrap items-center gap-1.5">
-                      {connected ? (
-                        <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-400">
-                          <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-                          Connected
-                        </span>
-                      ) : (
-                        <span className="text-[11px] text-[var(--text-muted)]">Not connected</span>
-                      )}
-                      {isLocal ? (
-                        <span className="rounded-full bg-sky-500/15 px-2 py-0.5 text-[10px] font-semibold text-sky-400">
-                          Self-Hosted
-                        </span>
-                      ) : null}
-                    </div>
-                  </div>
-                </div>
-
-                {connected ? (
-                  <Switch
-                    size="sm"
-                    checked={connected.enabled !== false}
-                    onChange={(val) => handleQuickToggle(connected, val)}
-                    aria-label={`Toggle ${connected.name}`}
-                  />
-                ) : null}
+      {kindMeta.id === 'web' ? (
+        <div className="space-y-6">
+          <section className="space-y-3">
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="text-sm font-semibold text-[var(--text-primary)]">
+                  Web Search Providers
+                </h3>
+                <p className="text-xs text-[var(--text-secondary)]">
+                  Route <code className="font-mono">POST /v1/search</code> queries.
+                </p>
               </div>
+              <span className="text-xs text-[var(--text-muted)]">{webSearchItems.length}</span>
+            </div>
+            <MediaProviderGrid
+              items={webSearchItems}
+              connectedByPreset={connectedByPreset}
+              targetKindId="web"
+              matchKinds={['search']}
+              onToggle={handleQuickToggle}
+            />
+          </section>
 
-              <div className="mt-4 flex items-center justify-between gap-2 border-t border-[var(--border-subtle)] pt-3">
-                <span className="font-mono text-[11px] text-[var(--text-muted)]">
-                  {(() => {
-                    const catalogMatches = Array.isArray(pr.modelCatalog)
-                      ? pr.modelCatalog.filter((m) => kindMeta.kinds.includes(m?.kind))
-                      : [];
-                    const count =
-                      catalogMatches.length > 0
-                        ? catalogMatches.length
-                        : (connected?.models || pr.models || []).length;
-                    return `${count} model(s)`;
-                  })()}
-                </span>
-                <Link
-                  to={`/media-providers/${kindMeta.id}/${encodeURIComponent(targetId)}`}
-                  className="inline-flex items-center gap-1 text-xs font-semibold text-[#E56A4A] hover:underline"
-                >
-                  {connected ? 'Configure & Try It' : 'Connect & Try It'}
-                  <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
-                </Link>
+          <section className="space-y-3 border-t border-[var(--border-subtle)] pt-5">
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="text-sm font-semibold text-[var(--text-primary)]">
+                  Web Fetch Providers
+                </h3>
+                <p className="text-xs text-[var(--text-secondary)]">
+                  Extract clean Markdown via <code className="font-mono">POST /v1/web/fetch</code>.
+                </p>
               </div>
-            </article>
-          );
-        })}
-      </div>
+              <span className="text-xs text-[var(--text-muted)]">{webFetchItems.length}</span>
+            </div>
+            <MediaProviderGrid
+              items={webFetchItems}
+              connectedByPreset={connectedByPreset}
+              targetKindId="web"
+              matchKinds={['fetch']}
+              onToggle={handleQuickToggle}
+            />
+          </section>
+        </div>
+      ) : (
+        <MediaProviderGrid
+          items={items}
+          connectedByPreset={connectedByPreset}
+          targetKindId={kindMeta.id}
+          matchKinds={kindMeta.kinds}
+          onToggle={handleQuickToggle}
+        />
+      )}
     </div>
   );
 }
+
+export default MediaProvidersPage;

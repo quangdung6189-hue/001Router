@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import { constantTimeEqual, hashRouterKey } from "./security/crypto.js";
-import { isLoopbackHost } from "./security/headers.js";
+import { isLoopbackHost, parseHostHeaderName } from "./security/headers.js";
 import { BoundedRateLimiter, extractClientIp } from "./security/ratelimit.js";
 import { maskKey as redactMaskKey, redactSecrets } from "./security/redact.js";
 
@@ -210,28 +210,71 @@ export function isPublicDeployment(storage) {
 }
 
 /**
- * Determine whether dashboard authentication is enforced.
- * On non-loopback hosts, login is ALWAYS enforced regardless of `settings.requireLogin`.
- * @param {import("./storage.js").Storage} storage
+ * Determine whether an incoming request carries a non-loopback tunnel/remote `Host` header.
+ * @param {import("express").Request} [req]
  * @returns {boolean}
  */
-export function isDashboardLoginRequired(storage) {
+function isRemoteRequestHost(req) {
+  if (!req) return false;
+  if (req._isTunnelRequest) return true;
+  const hostName = parseHostHeaderName(req.headers?.host);
+  return Boolean(hostName && !isLoopbackHost(hostName));
+}
+
+/**
+ * Determine whether the request carries the local host-only CLI authentication token
+ * over loopback with zero browser cross-site markers.
+ * @param {import("express").Request} [req]
+ * @returns {boolean}
+ */
+export function isValidLocalCliRequest(req) {
+  if (!req) return false;
+  const expectedToken = req.app?.locals?.cliToken;
+  const providedToken = req.headers?.["x-001r-cli-token"];
+  if (typeof expectedToken !== "string" || !expectedToken || typeof providedToken !== "string" || !providedToken) {
+    return false;
+  }
+  if (!constantTimeEqual(providedToken, expectedToken)) {
+    return false;
+  }
+  const hostName = parseHostHeaderName(req.headers?.host);
+  if (!hostName || !isLoopbackHost(hostName)) return false;
+  const remoteAddr = String(req.socket?.remoteAddress || "");
+  if (
+    remoteAddr !== "127.0.0.1" &&
+    remoteAddr !== "::1" &&
+    remoteAddr !== "::ffff:127.0.0.1"
+  ) {
+    return false;
+  }
+  if (req.headers?.origin || req.headers?.referer) return false;
+  return true;
+}
+
+/**
+ * Determine whether dashboard authentication is enforced.
+ * On non-loopback hosts or tunnel requests, login is ALWAYS enforced regardless of `settings.requireLogin`.
+ * @param {import("./storage.js").Storage} storage
+ * @param {import("express").Request} [req]
+ * @returns {boolean}
+ */
+export function isDashboardLoginRequired(storage, req) {
   if (!storage || typeof storage !== "object") return true;
-  if (isPublicDeployment(storage)) return true;
+  if (isPublicDeployment(storage) || isRemoteRequestHost(req)) return true;
   const settings = storage.getSettings?.();
   return settings?.requireLogin !== false;
 }
 
 /**
  * Whether `/v1/*` requires a router API key. Fail-closed: only an explicit `requireKey: false` on a
- * local (loopback) install turns it off. Public deployments ALWAYS require a key, whatever the
- * stored setting says — a restored backup or an old data file could still hold `false`.
+ * local (loopback) install turns it off. Public deployments and tunnel requests ALWAYS require a key.
  * @param {import("./storage.js").Storage} storage
+ * @param {import("express").Request} [req]
  * @returns {boolean}
  */
-export function isRouterKeyRequired(storage) {
+export function isRouterKeyRequired(storage, req) {
   if (!storage || typeof storage !== "object") return true;
-  if (isPublicDeployment(storage)) return true;
+  if (isPublicDeployment(storage) || isRemoteRequestHost(req)) return true;
   return storage.getSettings?.()?.requireKey !== false;
 }
 
@@ -241,7 +284,10 @@ export function isRouterKeyRequired(storage) {
  */
 export function createDashboardAuthMiddleware(storage) {
   return (req, res, next) => {
-    if (!isDashboardLoginRequired(storage)) {
+    if (isValidLocalCliRequest(req)) {
+      return next();
+    }
+    if (!isDashboardLoginRequired(storage, req)) {
       return next();
     }
     const secret = storage.getSessionSecret();
@@ -414,7 +460,7 @@ export function createRouterAuthMiddleware(storage, options = {}) {
       matched = matchRouterApiKey(token, keys, keysByHash);
     }
 
-    if (isRouterKeyRequired(storage)) {
+    if (isRouterKeyRequired(storage, req)) {
       if (!matched) {
         const ip = extractClientIp(req);
         const failCheck = failureLimiter.consume(ip);

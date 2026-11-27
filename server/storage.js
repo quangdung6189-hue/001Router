@@ -28,6 +28,16 @@ const DEFAULT_DATA_DIR = process.env.VERCEL
   ? path.join(os.tmpdir(), "001router-data")
   : path.resolve(import.meta.dirname, "../data");
 
+export function resolveDataDir(overrideDir) {
+  if (typeof overrideDir === "string" && overrideDir.trim()) {
+    return path.resolve(overrideDir.trim());
+  }
+  if (typeof process.env.ROUTER001_DATA_DIR === "string" && process.env.ROUTER001_DATA_DIR.trim()) {
+    return path.resolve(process.env.ROUTER001_DATA_DIR.trim());
+  }
+  return DEFAULT_DATA_DIR;
+}
+
 function resolveDatabaseUrlFromEnv() {
   const priorityKeys = [
     "DATABASE_URL",
@@ -116,6 +126,14 @@ async function createInitialData(port = DEFAULT_PORT) {
       requireLogin: true,
       catalogAutoSync: true,
       requireKey: true,
+      tunnelEnabled: false,
+      tunnelUrl: "",
+      tunnelDashboardAccess: false,
+      tailscaleEnabled: false,
+      tailscaleUrl: "",
+      outboundProxyEnabled: false,
+      outboundProxyUrl: "",
+      outboundNoProxy: "",
       port
     },
     providers: [],
@@ -183,7 +201,7 @@ export class Storage {
    * @param {{ dataDir?: string, port?: number, bindHost?: string, databaseUrl?: string }} [options]
    */
   constructor(options = {}) {
-    this.dataDir = options.dataDir ? path.resolve(options.dataDir) : DEFAULT_DATA_DIR;
+    this.dataDir = resolveDataDir(options.dataDir);
     this.dbPath = path.join(this.dataDir, "db.json");
     this.port = Number(options.port) || DEFAULT_PORT;
     this.bindHost = options.bindHost || process.env.HOST || "127.0.0.1";
@@ -624,6 +642,38 @@ export class Storage {
       }
       if (typeof loaded.settings.catalogAutoSync !== "boolean") {
         loaded.settings.catalogAutoSync = true;
+        needsSave = true;
+      }
+      if (typeof loaded.settings.tunnelEnabled !== "boolean") {
+        loaded.settings.tunnelEnabled = false;
+        needsSave = true;
+      }
+      if (typeof loaded.settings.tunnelUrl !== "string") {
+        loaded.settings.tunnelUrl = "";
+        needsSave = true;
+      }
+      if (typeof loaded.settings.tunnelDashboardAccess !== "boolean") {
+        loaded.settings.tunnelDashboardAccess = false;
+        needsSave = true;
+      }
+      if (typeof loaded.settings.tailscaleEnabled !== "boolean") {
+        loaded.settings.tailscaleEnabled = false;
+        needsSave = true;
+      }
+      if (typeof loaded.settings.tailscaleUrl !== "string") {
+        loaded.settings.tailscaleUrl = "";
+        needsSave = true;
+      }
+      if (typeof loaded.settings.outboundProxyEnabled !== "boolean") {
+        loaded.settings.outboundProxyEnabled = false;
+        needsSave = true;
+      }
+      if (typeof loaded.settings.outboundProxyUrl !== "string") {
+        loaded.settings.outboundProxyUrl = "";
+        needsSave = true;
+      }
+      if (typeof loaded.settings.outboundNoProxy !== "string") {
+        loaded.settings.outboundNoProxy = "";
         needsSave = true;
       }
       if (loaded.settings.port !== this.port) {

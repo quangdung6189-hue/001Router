@@ -17,16 +17,18 @@ import {
   Lock,
   Monitor,
   Moon,
+  Power,
   RefreshCw,
   Save,
   Scissors,
+  Server,
   Shield,
   ShieldAlert,
   ShieldCheck,
   Sun,
   Upload,
 } from 'lucide-react';
-import { catalogApi, securityApi, settingsApi } from '../lib/api';
+import { catalogApi, securityApi, settingsApi, versionApi } from '../lib/api';
 import { useToast } from '../context/ToastContext';
 import { useTheme } from '../context/ThemeContext';
 import { useLocale } from '../context/LocaleContext';
@@ -55,6 +57,14 @@ export function SettingsPage() {
   const [enableTranslator, setEnableTranslator] = useState(true);
   const [fallbackStrategy, setFallbackStrategy] = useState('round-robin');
   const [stickyRoundRobinLimit, setStickyRoundRobinLimit] = useState('3');
+  const [outboundProxyEnabled, setOutboundProxyEnabled] = useState(false);
+  const [outboundProxyUrl, setOutboundProxyUrl] = useState('');
+  const [outboundNoProxy, setOutboundNoProxy] = useState('');
+  const [savingProxy, setSavingProxy] = useState(false);
+  const [testingProxy, setTestingProxy] = useState(false);
+  const [proxyTestResult, setProxyTestResult] = useState(null);
+  const [shutdownOpen, setShutdownOpen] = useState(false);
+  const [shuttingDown, setShuttingDown] = useState(false);
   const [changelogOpen, setChangelogOpen] = useState(false);
   const [port, setPort] = useState(20128);
 
@@ -120,6 +130,9 @@ export function SettingsPage() {
           : 'round-robin'
       );
       setStickyRoundRobinLimit(String(s.stickyRoundRobinLimit ?? 3));
+      setOutboundProxyEnabled(Boolean(s.outboundProxyEnabled));
+      setOutboundProxyUrl(s.outboundProxyUrl || '');
+      setOutboundNoProxy(s.outboundNoProxy || '');
       setPort(s.port || 20128);
       if (syncRes) setSyncStatus(syncRes);
       if (s.catalogAutoSync !== undefined) {
@@ -241,6 +254,66 @@ export function SettingsPage() {
       toast.error(err?.message || 'Failed to save settings');
     } finally {
       setSavingSettings(false);
+    }
+  };
+
+  const handleSaveProxy = async (e) => {
+    e?.preventDefault?.();
+    setSavingProxy(true);
+    setProxyTestResult(null);
+    try {
+      const res = await settingsApi.update({
+        outboundProxyEnabled,
+        outboundProxyUrl: outboundProxyUrl.trim(),
+        outboundNoProxy: outboundNoProxy.trim(),
+      });
+      if (res?.settings) {
+        setOutboundProxyEnabled(Boolean(res.settings.outboundProxyEnabled));
+        setOutboundProxyUrl(res.settings.outboundProxyUrl || '');
+        setOutboundNoProxy(res.settings.outboundNoProxy || '');
+      }
+      toast.success('Saved outbound proxy settings');
+    } catch (err) {
+      toast.error(err?.message || 'Failed to save proxy settings');
+    } finally {
+      setSavingProxy(false);
+    }
+  };
+
+  const handleTestProxy = async () => {
+    const candidate = outboundProxyUrl.trim();
+    if (!candidate) {
+      toast.error('Enter a proxy URL before testing.');
+      return;
+    }
+    setTestingProxy(true);
+    setProxyTestResult(null);
+    try {
+      const res = await settingsApi.testProxy(candidate);
+      setProxyTestResult(res);
+      if (res?.ok) {
+        toast.success(`Proxy reachable (${res.latencyMs || 0}ms)`);
+      } else {
+        toast.error(res?.error || 'Proxy test failed');
+      }
+    } catch (err) {
+      const msg = err?.message || 'Proxy test failed';
+      setProxyTestResult({ ok: false, error: msg });
+      toast.error(msg);
+    } finally {
+      setTestingProxy(false);
+    }
+  };
+
+  const handleShutdownServer = async () => {
+    setShuttingDown(true);
+    try {
+      await versionApi.shutdown();
+      setShutdownOpen(false);
+      toast.success('Local 001Router proxy is shutting down…');
+    } catch (err) {
+      toast.error(err?.message || 'Failed to shutdown local server');
+      setShuttingDown(false);
     }
   };
 
@@ -964,6 +1037,91 @@ export function SettingsPage() {
         </section>
       </div>
 
+      {/* Outbound Proxy Configuration */}
+      <section className="r-card space-y-4 p-5">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--border-subtle)] pb-3">
+          <div className="flex items-center gap-2.5">
+            <Server className="h-4 w-4 text-[#E56A4A]" aria-hidden="true" />
+            <div>
+              <h2 className="text-base font-semibold text-[var(--text-primary)]">Outbound Proxy</h2>
+              <p className="text-xs text-[var(--text-secondary)]">
+                Optional HTTP/HTTPS/SOCKS proxy applied to upstream provider requests.
+              </p>
+            </div>
+          </div>
+          <Switch
+            checked={outboundProxyEnabled}
+            onChange={(val) => setOutboundProxyEnabled(val)}
+            aria-label="Enable outbound proxy"
+          />
+        </div>
+
+        <form onSubmit={handleSaveProxy} className="grid gap-4 sm:grid-cols-2">
+          <div>
+            <label
+              htmlFor="outbound-proxy-url"
+              className="block text-xs font-medium text-[var(--text-secondary)]"
+            >
+              Proxy URL
+            </label>
+            <input
+              id="outbound-proxy-url"
+              type="text"
+              value={outboundProxyUrl}
+              onChange={(e) => setOutboundProxyUrl(e.target.value)}
+              placeholder="http://proxy.example.com:8080 or socks5://..."
+              className="field-input mt-1.5 w-full px-3 py-2 font-mono text-xs"
+            />
+          </div>
+
+          <div>
+            <label
+              htmlFor="outbound-no-proxy"
+              className="block text-xs font-medium text-[var(--text-secondary)]"
+            >
+              Bypass List (NO_PROXY)
+            </label>
+            <input
+              id="outbound-no-proxy"
+              type="text"
+              value={outboundNoProxy}
+              onChange={(e) => setOutboundNoProxy(e.target.value)}
+              placeholder="localhost,127.0.0.1,.internal"
+              className="field-input mt-1.5 w-full px-3 py-2 font-mono text-xs"
+            />
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2.5 sm:col-span-2">
+            <button
+              type="button"
+              onClick={handleTestProxy}
+              disabled={testingProxy || !outboundProxyUrl.trim()}
+              className="r-btn-secondary px-3.5 py-2 text-xs"
+            >
+              {testingProxy ? 'Testing…' : 'Test Proxy'}
+            </button>
+            <button
+              type="submit"
+              disabled={savingProxy}
+              className="r-btn-primary px-4 py-2 text-xs"
+            >
+              {savingProxy ? t('common.saving') : 'Save Proxy'}
+            </button>
+            {proxyTestResult ? (
+              <span
+                className={`text-xs ${
+                  proxyTestResult.ok ? 'text-emerald-400' : 'text-red-400'
+                }`}
+              >
+                {proxyTestResult.ok
+                  ? `Connected (${proxyTestResult.latencyMs || 0}ms)`
+                  : proxyTestResult.error}
+              </span>
+            ) : null}
+          </div>
+        </form>
+      </section>
+
       {/* Backup & Restore (3 Secure Export Modes — Section 9.8.8) */}
       <section className="r-card space-y-5 p-5">
         <div className="border-b border-[var(--border-subtle)] pb-3">
@@ -1210,6 +1368,43 @@ export function SettingsPage() {
           </div>
         </div>
       </section>
+
+      {/* Close Proxy / Local Server Shutdown */}
+      {!publicDeployment ? (
+        <section className="r-card flex flex-wrap items-center justify-between gap-4 border-red-500/25 p-5">
+          <div>
+            <h2 className="text-base font-semibold text-[var(--text-primary)]">Close Proxy</h2>
+            <p className="mt-0.5 text-xs text-[var(--text-secondary)]">
+              Cleanly stop any active Cloudflare Quick Tunnel and shut down the local 001Router
+              server process on port {port}.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setShutdownOpen(true)}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-red-500/40 bg-red-500/12 px-4 py-2 text-xs font-semibold text-red-400 transition-colors hover:bg-red-500/20"
+          >
+            <Power className="h-3.5 w-3.5" aria-hidden="true" />
+            Shutdown
+          </button>
+        </section>
+      ) : null}
+
+      <ConfirmDialog
+        open={shutdownOpen}
+        onClose={() => setShutdownOpen(false)}
+        onConfirm={handleShutdownServer}
+        title="Close Proxy?"
+        destructive
+        busy={shuttingDown}
+        confirmLabel="Shutdown"
+        message={
+          <p>
+            Are you sure you want to close the local 001Router proxy on port{' '}
+            <strong>{port}</strong>? Running CLI tools will lose access until you restart it.
+          </p>
+        }
+      />
 
       <ConfirmDialog
         open={importConfirmOpen}

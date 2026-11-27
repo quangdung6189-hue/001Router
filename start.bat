@@ -3,7 +3,7 @@ setlocal
 cd /d "%~dp0"
 
 echo ==================================================
-echo   001Router - Local AI Router Gateway
+echo   001Router - AI Multi-Provider Router (Local)
 echo ==================================================
 
 if not exist "node_modules" (
@@ -22,13 +22,11 @@ if not exist "web\dist\index.html" (
   if errorlevel 1 goto :error
 )
 
-echo [3/3] Starting 001Router server...
-echo Dashboard: http://localhost:20128
-echo API Base : http://localhost:20128/v1
-echo Default password: 1234
+echo [3/3] Launching 001Router CLI...
+echo Dashboard: http://127.0.0.1:20128
+echo API Base : http://127.0.0.1:20128/v1
 echo.
-start "" http://localhost:20128
-node server/index.js
+node cli/index.js %*
 goto :eof
 
 :error

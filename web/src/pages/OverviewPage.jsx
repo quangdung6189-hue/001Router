@@ -1,210 +1,307 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
-  Activity,
-  AlertTriangle,
-  ArrowRight,
-  Cpu,
+  Cloud,
+  ExternalLink,
   Eye,
   EyeOff,
   Globe,
-  Image,
   KeyRound,
-  Layers,
-  Lock,
-  MessageSquare,
-  Mic,
+  Monitor,
   Pencil,
   Plus,
   RefreshCw,
-  Search,
-  Server,
-  Shield,
-  Sparkles,
+  ShieldAlert,
   Trash2,
-  Volume2,
-  X,
 } from 'lucide-react';
 import {
   combosApi,
-  formatCompactNumber,
-  formatNumber,
-  formatRelativeTime,
   getRememberedRouterKey,
-  healthApi,
   keysApi,
   providersApi,
   rememberRouterKey,
-  SERVICE_KINDS_META,
   settingsApi,
-  usageApi,
+  tunnelApi,
 } from '../lib/api';
-import { LucianGlowGrid, LucianGlowCard } from '../components/lucian/LucianGlowGrid';
+import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
-import { useLocale } from '../context/LocaleContext';
 import { CopyButton } from '../components/CopyButton';
 import { Switch } from '../components/Switch';
 import { ModalDialog } from '../components/ModalDialog';
 import { ConfirmDialog } from '../components/ConfirmDialog';
 import { KeyAccessControls } from '../components/KeyAccessControls';
 
-const SERVICE_ICONS = {
-  chat: MessageSquare,
-  messages: Shield,
-  embedding: Cpu,
-  image: Image,
-  tts: Volume2,
-  stt: Mic,
-  search: Search,
-  fetch: Globe,
-  models: Layers,
-};
+function SecurityBanner({ message, actionLabel, actionTo }) {
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-500/35 bg-amber-500/10 px-3.5 py-2.5 text-xs text-amber-300">
+      <div className="flex items-center gap-2">
+        <ShieldAlert className="h-4 w-4 shrink-0 text-amber-400" aria-hidden="true" />
+        <span>{message}</span>
+      </div>
+      {actionTo ? (
+        <Link
+          to={actionTo}
+          className="shrink-0 font-semibold text-amber-200 underline hover:text-white"
+        >
+          {actionLabel}
+        </Link>
+      ) : null}
+    </div>
+  );
+}
 
 export function OverviewPage() {
+  const { defaultPassword } = useAuth();
   const toast = useToast();
-  const { t } = useLocale();
+
+  const [loading, setLoading] = useState(true);
   const [keys, setKeys] = useState([]);
   const [providers, setProviders] = useState([]);
   const [combos, setCombos] = useState([]);
-  const [usage, setUsage] = useState(null);
-  const [settings, setSettings] = useState(null);
-  // Public deployments (Vercel…) always require a router key, whatever the stored setting says.
-  const [publicDeployment, setPublicDeployment] = useState(false);
-  const [loading, setLoading] = useState(true);
+  const [settingsState, setSettingsState] = useState({
+    requireKey: true,
+    tunnelDashboardAccess: false,
+    publicDeployment: false,
+  });
 
-  const [revealedIds, setRevealedIds] = useState(() => new Set());
+  const [tunnelState, setTunnelState] = useState({
+    tunnel: { enabled: false, running: false, tunnelUrl: '' },
+    tailscale: { installed: false, loggedIn: false, running: false, enabled: false, tunnelUrl: '' },
+    download: { downloading: false, progress: 0 },
+    unavailableReason: '',
+  });
+  const [tunnelBusy, setTunnelBusy] = useState(false);
+  const [tsBusy, setTsBusy] = useState(false);
+  const [tsActionLink, setTsActionLink] = useState(null);
+  const [disableTunnelOpen, setDisableTunnelOpen] = useState(false);
+
+  const [initialRevealedKey, setInitialRevealedKey] = useState('');
+  const [visibleKeys, setVisibleKeys] = useState(() => new Set());
   const [createOpen, setCreateOpen] = useState(false);
   const [newKeyName, setNewKeyName] = useState('');
-  const [creating, setCreating] = useState(false);
-  const [createdKeyModal, setCreatedKeyModal] = useState(null);
-  const [oneTimeBannerKey, setOneTimeBannerKey] = useState(null);
+  const [creatingKey, setCreatingKey] = useState(false);
+  const [createdBannerKey, setCreatedBannerKey] = useState(null);
 
   const [renameTarget, setRenameTarget] = useState(null);
   const [renameValue, setRenameValue] = useState('');
-  const [renaming, setRenaming] = useState(false);
+  const [pauseTarget, setPauseTarget] = useState(null);
+  const [deleteTarget, setDeleteTarget] = useState(null);
+  const [mutatingKey, setMutatingKey] = useState(false);
 
-  const [revokeTarget, setRevokeTarget] = useState(null);
-  const [revoking, setRevoking] = useState(false);
-  const [pingResult, setPingResult] = useState(null);
-  const [pinging, setPinging] = useState(false);
+  const pollTimerRef = useRef(null);
 
-  const origin = window.location.origin;
-  const openaiBaseUrl = `${origin}/v1`;
-  const anthropicBaseUrl = origin;
+  const localOrigin = useMemo(
+    () => (typeof window !== 'undefined' ? window.location.origin : 'http://127.0.0.1:20128'),
+    []
+  );
+  const localEndpoint = `${localOrigin}/v1`;
+  const isRemoteHost =
+    typeof window !== 'undefined' &&
+    window.location.hostname !== 'localhost' &&
+    window.location.hostname !== '127.0.0.1';
 
   const loadAll = useCallback(async () => {
     setLoading(true);
     try {
-      const [keysRes, providersRes, combosRes, usageRes, settingsRes, revealRes] =
-        await Promise.all([
-          keysApi.list(),
-          providersApi.list(),
-          combosApi.list(),
-          usageApi.get('24h'),
-          settingsApi.get(),
-          keysApi.revealInitial().catch(() => null),
-        ]);
+      const [keysRes, settingsRes, tunRes, provRes, combosRes] = await Promise.all([
+        keysApi.list().catch(() => ({ keys: [] })),
+        settingsApi.get().catch(() => null),
+        tunnelApi.status().catch(() => null),
+        providersApi.list().catch(() => ({ providers: [] })),
+        combosApi.list().catch(() => ({ combos: [] })),
+      ]);
 
-      const loadedKeys = keysRes?.keys || [];
-      for (const k of loadedKeys) {
-        if (k.key && !String(k.key).includes('…')) {
-          rememberRouterKey(k);
-        }
-      }
-      setKeys(loadedKeys);
-      setProviders(providersRes?.providers || []);
+      setKeys(keysRes?.keys || []);
+      setProviders(provRes?.providers || []);
       setCombos(combosRes?.combos || []);
-      setUsage(usageRes || null);
-      setSettings(settingsRes?.settings || null);
-      setPublicDeployment(settingsRes?.publicDeployment === true);
 
-      // Handle one-time initial seeded router key reveal (/api/keys/reveal-initial)
-      if (revealRes) {
-        const rawKey =
-          typeof revealRes.key === 'string'
-            ? {
-                id: revealRes.id || loadedKeys[0]?.id || 'initial',
-                name: revealRes.name || loadedKeys[0]?.name || 'Default Router Key',
-                key: revealRes.key,
-                keyPreview: revealRes.keyPreview || loadedKeys[0]?.keyPreview,
-              }
-            : revealRes.key?.key
-              ? revealRes.key
-              : typeof revealRes.initialKey === 'string'
-                ? {
-                    id: loadedKeys[0]?.id || 'initial',
-                    name: loadedKeys[0]?.name || 'Default Router Key',
-                    key: revealRes.initialKey,
-                  }
-                : null;
-
-        if (rawKey?.key) {
-          rememberRouterKey(rawKey);
-          setOneTimeBannerKey(rawKey);
-        }
+      if (settingsRes) {
+        const s = settingsRes.settings || {};
+        setSettingsState({
+          requireKey: settingsRes.effective?.requireKey ?? s.requireKey !== false,
+          tunnelDashboardAccess: Boolean(s.tunnelDashboardAccess),
+          publicDeployment: Boolean(settingsRes.publicDeployment),
+        });
       }
-    } catch (err) {
-      toast.error(err?.message || 'Failed to load overview');
+
+      if (tunRes) {
+        setTunnelState(tunRes);
+      }
     } finally {
       setLoading(false);
     }
-  }, [toast]);
+  }, []);
 
   useEffect(() => {
     loadAll();
+    keysApi
+      .revealInitial()
+      .then((res) => {
+        if (res?.revealed && res?.key?.key) {
+          rememberRouterKey(res.key);
+          setInitialRevealedKey(res.key.key);
+        }
+      })
+      .catch(() => {});
+
+    return () => {
+      if (pollTimerRef.current) clearInterval(pollTimerRef.current);
+    };
   }, [loadAll]);
 
-  const toggleReveal = (id) => {
-    setRevealedIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
+  const startTunnelDownloadPoll = () => {
+    if (pollTimerRef.current) clearInterval(pollTimerRef.current);
+    pollTimerRef.current = setInterval(async () => {
+      try {
+        const status = await tunnelApi.status();
+        if (status) setTunnelState(status);
+        if (!status?.download?.downloading) {
+          clearInterval(pollTimerRef.current);
+          pollTimerRef.current = null;
+        }
+      } catch {
+        clearInterval(pollTimerRef.current);
+        pollTimerRef.current = null;
+      }
+    }, 1000);
+  };
+
+  const handleEnableTunnel = async () => {
+    setTunnelBusy(true);
+    startTunnelDownloadPoll();
+    try {
+      const res = await tunnelApi.enable();
+      const refreshed = await tunnelApi.status().catch(() => null);
+      if (refreshed) setTunnelState(refreshed);
+      if (res?.tunnelUrl) {
+        toast.success(`Cloudflare Tunnel enabled: ${res.tunnelUrl}`);
+      } else {
+        toast.success('Cloudflare Tunnel started');
+      }
+    } catch (err) {
+      toast.error(err?.message || 'Failed to enable Cloudflare Tunnel');
+    } finally {
+      if (pollTimerRef.current) {
+        clearInterval(pollTimerRef.current);
+        pollTimerRef.current = null;
+      }
+      setTunnelBusy(false);
+    }
+  };
+
+  const handleConfirmDisableTunnel = async () => {
+    setTunnelBusy(true);
+    try {
+      await tunnelApi.disable();
+      const refreshed = await tunnelApi.status().catch(() => null);
+      if (refreshed) setTunnelState(refreshed);
+      setDisableTunnelOpen(false);
+      toast.success('Cloudflare Tunnel disabled');
+    } catch (err) {
+      toast.error(err?.message || 'Failed to disable Cloudflare Tunnel');
+    } finally {
+      setTunnelBusy(false);
+    }
+  };
+
+  const handleEnableTailscale = async () => {
+    setTsBusy(true);
+    setTsActionLink(null);
+    try {
+      const res = await tunnelApi.tailscaleEnable();
+      if (res?.needsLogin && res?.authUrl) {
+        setTsActionLink({ label: 'Open Tailscale Login', url: res.authUrl });
+        toast.error(res.error || 'Tailscale login required');
+        return;
+      }
+      if (res?.funnelNotEnabled && res?.enableUrl) {
+        setTsActionLink({ label: 'Enable Funnel on Tailnet', url: res.enableUrl });
+        toast.error(res.error || 'Enable Tailscale Funnel first');
+        return;
+      }
+      if (!res?.success) {
+        toast.error(res?.error || 'Failed to start Tailscale Funnel');
+        return;
+      }
+      const refreshed = await tunnelApi.status().catch(() => null);
+      if (refreshed) setTunnelState(refreshed);
+      toast.success(`Tailscale Funnel active: ${res.tunnelUrl}`);
+    } catch (err) {
+      toast.error(err?.message || 'Failed to start Tailscale Funnel');
+    } finally {
+      setTsBusy(false);
+    }
+  };
+
+  const handleDisableTailscale = async () => {
+    setTsBusy(true);
+    try {
+      await tunnelApi.tailscaleDisable();
+      const refreshed = await tunnelApi.status().catch(() => null);
+      if (refreshed) setTunnelState(refreshed);
+      toast.success('Tailscale Funnel disabled');
+    } catch (err) {
+      toast.error(err?.message || 'Failed to disable Tailscale Funnel');
+    } finally {
+      setTsBusy(false);
+    }
+  };
+
+  const handleToggleTunnelDashboard = async (nextVal) => {
+    try {
+      const res = await settingsApi.update({ tunnelDashboardAccess: nextVal });
+      if (res?.settings) {
+        setSettingsState((prev) => ({
+          ...prev,
+          tunnelDashboardAccess: Boolean(res.settings.tunnelDashboardAccess),
+        }));
+      }
+      toast.success(
+        nextVal ? 'Dashboard access via tunnel enabled' : 'Dashboard access via tunnel blocked'
+      );
+    } catch (err) {
+      toast.error(err?.message || 'Failed to update tunnel dashboard setting');
+    }
+  };
+
+  const handleToggleRequireKey = async (nextVal) => {
+    try {
+      const res = await settingsApi.update({ requireKey: nextVal });
+      setSettingsState((prev) => ({
+        ...prev,
+        requireKey: res?.effective?.requireKey ?? nextVal,
+      }));
+      toast.success(nextVal ? 'API key enforcement enabled' : 'Local open access enabled');
+    } catch (err) {
+      toast.error(err?.message || 'Failed to update require-key setting');
+    }
   };
 
   const handleCreateKey = async (e) => {
     e.preventDefault();
-    const trimmed = newKeyName.trim();
-    if (!trimmed) return;
-    setCreating(true);
+    const name = newKeyName.trim();
+    if (!name) return;
+    setCreatingKey(true);
     try {
-      const res = await keysApi.create(trimmed);
+      const res = await keysApi.create(name);
       const created = res?.key;
       if (created) {
-        if (created.key) {
-          rememberRouterKey(created);
-        }
-        setKeys((prev) => [created, ...prev]);
-        setCreateOpen(false);
-        setNewKeyName('');
-        setCreatedKeyModal(created);
-        setOneTimeBannerKey(created);
+        rememberRouterKey(created);
+        setKeys((prev) => [...prev, { ...created, key: undefined }]);
+        setCreatedBannerKey(created);
+        setVisibleKeys((prev) => {
+          const next = new Set(prev);
+          next.add(created.id);
+          return next;
+        });
       }
+      setNewKeyName('');
+      setCreateOpen(false);
+      toast.success(`Created key "${name}"`);
     } catch (err) {
-      toast.error(err?.message || 'Failed to create router key');
+      toast.error(err?.message || 'Failed to create API key');
     } finally {
-      setCreating(false);
-    }
-  };
-
-  const handleToggleKey = async (keyItem, nextEnabled) => {
-    setKeys((prev) =>
-      prev.map((k) => (k.id === keyItem.id ? { ...k, enabled: nextEnabled } : k))
-    );
-    try {
-      const res = await keysApi.patch(keyItem.id, { enabled: nextEnabled });
-      if (res?.key) {
-        setKeys((prev) => prev.map((k) => (k.id === keyItem.id ? res.key : k)));
-      }
-      toast.success(
-        `Key "${keyItem.name}" ${nextEnabled ? t('common.enabled') : t('common.disabled')}`
-      );
-    } catch (err) {
-      setKeys((prev) =>
-        prev.map((k) => (k.id === keyItem.id ? { ...k, enabled: keyItem.enabled } : k))
-      );
-      toast.error(err?.message || 'Failed to update key');
+      setCreatingKey(false);
     }
   };
 
@@ -213,717 +310,626 @@ export function OverviewPage() {
     if (!renameTarget) return;
     const trimmed = renameValue.trim();
     if (!trimmed) return;
-    setRenaming(true);
+    setMutatingKey(true);
     try {
       const res = await keysApi.patch(renameTarget.id, { name: trimmed });
-      if (res?.key) {
-        setKeys((prev) => prev.map((k) => (k.id === renameTarget.id ? res.key : k)));
-      }
+      setKeys((prev) =>
+        prev.map((k) => (k.id === renameTarget.id ? res?.key || { ...k, name: trimmed } : k))
+      );
       setRenameTarget(null);
-      toast.success('Router key renamed');
+      toast.success('Renamed API key');
     } catch (err) {
       toast.error(err?.message || 'Failed to rename key');
     } finally {
-      setRenaming(false);
+      setMutatingKey(false);
     }
   };
 
-  const handleRevokeConfirm = async () => {
-    if (!revokeTarget) return;
-    setRevoking(true);
+  const applyKeyPatch = async (keyId, patch, successMsg) => {
+    setMutatingKey(true);
     try {
-      await keysApi.remove(revokeTarget.id);
-      setKeys((prev) => prev.filter((k) => k.id !== revokeTarget.id));
-      const deletedName = revokeTarget.name;
-      setRevokeTarget(null);
-      toast.success(`Revoked router key "${deletedName}"`);
+      const res = await keysApi.patch(keyId, patch);
+      setKeys((prev) => prev.map((k) => (k.id === keyId ? res?.key || { ...k, ...patch } : k)));
+      if (successMsg) toast.success(successMsg);
     } catch (err) {
-      toast.error(err?.message || 'Failed to revoke key');
+      toast.error(err?.message || 'Failed to update key');
     } finally {
-      setRevoking(false);
+      setMutatingKey(false);
     }
   };
 
-  const handleUpdateKeyAccess = async (keyItem, nextAccess) => {
-    setKeys((prev) =>
-      prev.map((k) => (k.id === keyItem.id ? { ...k, access: nextAccess } : k))
-    );
+  const handleDeleteConfirm = async () => {
+    if (!deleteTarget) return;
+    setMutatingKey(true);
     try {
-      const res = await keysApi.patch(keyItem.id, { access: nextAccess });
-      if (res?.key) {
-        setKeys((prev) => prev.map((k) => (k.id === keyItem.id ? res.key : k)));
-      }
-      toast.success(
-        nextAccess.restricted
-          ? `Restricted "${keyItem.name}" to ${nextAccess.allow?.length || 0} allowed target(s)`
-          : `Unrestricted access for "${keyItem.name}"`
-      );
+      await keysApi.remove(deleteTarget.id);
+      setKeys((prev) => prev.filter((k) => k.id !== deleteTarget.id));
+      toast.success(`Deleted key "${deleteTarget.name}"`);
+      setDeleteTarget(null);
     } catch (err) {
-      setKeys((prev) =>
-        prev.map((k) => (k.id === keyItem.id ? { ...k, access: keyItem.access } : k))
-      );
-      toast.error(err?.message || 'Failed to update key access controls');
-    }
-  };
-
-  const handleToggleRequireKey = async (nextVal) => {
-    const prev = settings?.requireKey !== false;
-    setSettings((s) => (s ? { ...s, requireKey: nextVal } : { requireKey: nextVal }));
-    try {
-      const res = await settingsApi.update({ requireKey: nextVal });
-      if (res?.settings) setSettings(res.settings);
-      toast.success(
-        nextVal ? 'Router API Key authentication required on /v1/*' : 'Router API Key now optional on localhost'
-      );
-    } catch (err) {
-      setSettings((s) => (s ? { ...s, requireKey: prev } : s));
-      toast.error(err?.message || 'Failed to update Require API Key setting');
-    }
-  };
-
-  const handleHealthPing = async () => {
-    setPinging(true);
-    const t0 = performance.now();
-    try {
-      const res = await healthApi.check();
-      const ms = Math.round(performance.now() - t0);
-      setPingResult({ ok: Boolean(res?.ok), ms, port: res?.port });
-      toast.success(`Gateway healthy on :${res?.port || 20128} (${ms}ms)`);
-    } catch (err) {
-      setPingResult({ ok: false, ms: 0 });
-      toast.error(err?.message || 'Gateway health check failed');
+      toast.error(err?.message || 'Failed to delete key');
     } finally {
-      setPinging(false);
+      setMutatingKey(false);
     }
   };
 
-  const enabledProviders = providers.filter((p) => p.enabled !== false).length;
-  const enabledCombos = combos.filter((c) => c.enabled !== false).length;
-  const summary = usage?.summary || {};
-  const totalReq = summary.totalRequests || 0;
-  const successRate =
-    totalReq > 0 ? `${((summary.successRequests / totalReq) * 100).toFixed(1)}%` : '—';
+  const toggleVisibility = (keyObj) => {
+    const remembered = getRememberedRouterKey(keyObj);
+    if (!remembered && !visibleKeys.has(keyObj.id)) {
+      toast.error('Plaintext keys can only be viewed once when created on this browser.');
+      return;
+    }
+    setVisibleKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(keyObj.id)) next.delete(keyObj.id);
+      else next.add(keyObj.id);
+      return next;
+    });
+  };
+
+  const tunnel = tunnelState.tunnel || {};
+  const tailscale = tunnelState.tailscale || {};
+  const download = tunnelState.download || {};
+  const anyTunnelActive = Boolean(tunnel.enabled || tailscale.enabled);
+  const tunnelsUnavailable = Boolean(tunnelState.unavailableReason || settingsState.publicDeployment);
 
   return (
-    <div className="space-y-6">
-      <div className="flex flex-wrap items-center justify-end gap-2.5">
-        <div className="flex flex-wrap items-center gap-2.5">
-          <div className="inline-flex items-center gap-2 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-card)] px-2.5 py-1.5 text-xs">
-            <span
-              className="font-medium text-[var(--text-secondary)]"
-              title={
-                publicDeployment
-                  ? 'Bản công khai: /v1/* luôn bắt buộc router API key (không tắt được)'
-                  : undefined
-              }
-            >
-              Require Key{publicDeployment ? ' · bản công khai' : ''}
-            </span>
-            <Switch
-              size="sm"
-              checked={publicDeployment || settings?.requireKey !== false}
-              onChange={handleToggleRequireKey}
-              disabled={publicDeployment}
-              aria-label="Require Router API Key on /v1/*"
-            />
+    <div className="mx-auto max-w-4xl space-y-6">
+      {defaultPassword ? (
+        <SecurityBanner
+          message="Dashboard is still using the default password (1234). Change it before exposing any remote endpoint."
+          actionLabel="Change password"
+          actionTo="/settings"
+        />
+      ) : null}
+
+      {/* Card 1: API Endpoint */}
+      <section className="r-card space-y-4 p-5">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <Globe className="h-5 w-5 text-[#E56A4A]" aria-hidden="true" />
+            <h2 className="text-base font-semibold text-[var(--text-primary)]">API Endpoint</h2>
           </div>
-          <button
-            type="button"
-            onClick={handleHealthPing}
-            disabled={pinging}
-            className="r-btn-secondary inline-flex items-center gap-1.5 px-3 py-2 text-xs"
-          >
-            <Activity className="h-3.5 w-3.5 text-emerald-500" aria-hidden="true" />
-            {pinging
-              ? 'Pinging…'
-              : pingResult
-                ? pingResult.ok
-                  ? `Healthy (${pingResult.ms}ms)`
-                  : 'Offline'
-                : 'Ping Gateway'}
-          </button>
-          <Link to="/skills" className="r-btn-secondary inline-flex items-center gap-1.5 px-3 py-2 text-xs">
-            Agent Skills →
-          </Link>
-          <Link to="/settings/pricing" className="r-btn-secondary inline-flex items-center gap-1.5 px-3 py-2 text-xs">
-            Pricing →
-          </Link>
           <button
             type="button"
             onClick={loadAll}
             disabled={loading}
-            className="r-btn-secondary inline-flex items-center gap-1.5 px-3 py-2 text-xs"
+            className="r-btn-secondary inline-flex items-center gap-1.5 px-2.5 py-1 text-xs"
           >
             <RefreshCw
               className={`h-3.5 w-3.5 ${loading ? 'animate-spin motion-reduce:animate-none' : ''}`}
               aria-hidden="true"
             />
-            {t('common.refresh')}
+            Refresh
           </button>
+        </div>
+
+        {/* Row 1: Local */}
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-subtle)] px-4 py-3">
+          <div className="flex min-w-0 flex-1 items-center gap-3">
+            <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/15 px-2.5 py-0.5 text-[11px] font-semibold text-emerald-400">
+              <Monitor className="h-3 w-3" aria-hidden="true" />
+              Local
+            </span>
+            <code className="truncate font-mono text-xs text-[var(--text-primary)]">
+              {localEndpoint}
+            </code>
+          </div>
+          <CopyButton value={localEndpoint} size="xs" toastMessage="Copied local endpoint URL" />
+        </div>
+
+        {/* Row 2: Cloudflare Tunnel */}
+        {!tunnelsUnavailable ? (
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-subtle)] px-4 py-3">
+            <div className="flex min-w-0 flex-1 items-center gap-3">
+              <span
+                className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[11px] font-semibold ${
+                  tunnel.enabled
+                    ? 'bg-orange-500/15 text-orange-400'
+                    : 'bg-[var(--bg-card)] text-[var(--text-secondary)]'
+                }`}
+              >
+                <Cloud className="h-3 w-3" aria-hidden="true" />
+                Cloudflare Tunnel
+              </span>
+              {tunnel.enabled && tunnel.tunnelUrl ? (
+                <code className="truncate font-mono text-xs text-[var(--text-primary)]">
+                  {`${tunnel.tunnelUrl}/v1`}
+                </code>
+              ) : download.downloading ? (
+                <span className="text-xs text-[var(--text-secondary)]">
+                  Downloading cloudflared ({download.progress || 0}%)…
+                </span>
+              ) : (
+                <span className="text-xs text-[var(--text-muted)]">
+                  Temporary HTTPS URL (*.trycloudflare.com)
+                </span>
+              )}
+            </div>
+
+            <div className="flex items-center gap-2">
+              {tunnel.enabled && tunnel.tunnelUrl ? (
+                <>
+                  <CopyButton
+                    value={`${tunnel.tunnelUrl}/v1`}
+                    size="xs"
+                    toastMessage="Copied tunnel endpoint"
+                  />
+                  <button
+                    type="button"
+                    disabled={tunnelBusy}
+                    onClick={() => setDisableTunnelOpen(true)}
+                    className="r-btn-secondary px-3 py-1 text-xs text-red-400 hover:border-red-500/40"
+                  >
+                    Disable
+                  </button>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  disabled={tunnelBusy || defaultPassword || !settingsState.requireKey}
+                  onClick={handleEnableTunnel}
+                  className="r-btn-primary px-3 py-1 text-xs"
+                  title={
+                    defaultPassword || !settingsState.requireKey
+                      ? 'Change default password and require API key first'
+                      : 'Start Cloudflare Quick Tunnel'
+                  }
+                >
+                  {tunnelBusy ? 'Starting…' : 'Enable'}
+                </button>
+              )}
+            </div>
+          </div>
+        ) : (
+          <div className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-subtle)] px-4 py-2.5 text-xs text-[var(--text-muted)]">
+            {tunnelState.unavailableReason || 'Tunnels are disabled on public deployments.'}
+          </div>
+        )}
+
+        {/* Row 3: Tailscale Funnel */}
+        {!tunnelsUnavailable ? (
+          <div className="space-y-2 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-subtle)] px-4 py-3">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex min-w-0 flex-1 items-center gap-3">
+                <span
+                  className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[11px] font-semibold ${
+                    tailscale.enabled
+                      ? 'bg-sky-500/15 text-sky-400'
+                      : 'bg-[var(--bg-card)] text-[var(--text-secondary)]'
+                  }`}
+                >
+                  Tailscale
+                </span>
+                {tailscale.enabled && tailscale.tunnelUrl ? (
+                  <code className="truncate font-mono text-xs text-[var(--text-primary)]">
+                    {`${tailscale.tunnelUrl}/v1`}
+                  </code>
+                ) : (
+                  <span className="text-xs text-[var(--text-muted)]">
+                    {tailscale.installed
+                      ? 'Expose local router via Tailscale MagicDNS Funnel'
+                      : 'Tailscale CLI not detected on PATH'}
+                  </span>
+                )}
+              </div>
+
+              <div className="flex items-center gap-2">
+                {tailscale.enabled && tailscale.tunnelUrl ? (
+                  <>
+                    <CopyButton
+                      value={`${tailscale.tunnelUrl}/v1`}
+                      size="xs"
+                      toastMessage="Copied Tailscale endpoint"
+                    />
+                    <button
+                      type="button"
+                      disabled={tsBusy}
+                      onClick={handleDisableTailscale}
+                      className="r-btn-secondary px-3 py-1 text-xs text-red-400"
+                    >
+                      Disable
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    type="button"
+                    disabled={tsBusy || !tailscale.installed || defaultPassword}
+                    onClick={handleEnableTailscale}
+                    className="r-btn-secondary px-3 py-1 text-xs"
+                  >
+                    {tsBusy ? 'Connecting…' : 'Enable'}
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {tsActionLink ? (
+              <div className="flex items-center justify-between rounded border border-sky-500/30 bg-sky-500/10 px-3 py-1.5 text-xs">
+                <span className="text-sky-300">Action required in Tailscale admin:</span>
+                <a
+                  href={tsActionLink.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1 font-semibold text-sky-200 underline"
+                >
+                  {tsActionLink.label}
+                  <ExternalLink className="h-3 w-3" aria-hidden="true" />
+                </a>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+
+        {/* Active tunnel warnings & Dashboard access toggle */}
+        {anyTunnelActive ? (
+          <div className="space-y-3 border-t border-[var(--border-subtle)] pt-3">
+            {!settingsState.requireKey ? (
+              <SecurityBanner message="Require API key is disabled — remote endpoints are open without a key!" />
+            ) : null}
+
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <div className="text-xs font-medium text-[var(--text-primary)]">
+                  Allow dashboard access via tunnel
+                </div>
+                <div className="text-[11px] text-[var(--text-muted)]">
+                  When disabled, tunnel hosts only serve <code className="font-mono">/v1/*</code>{' '}
+                  API traffic and reject dashboard routes.
+                </div>
+              </div>
+              <Switch
+                checked={settingsState.tunnelDashboardAccess}
+                disabled={defaultPassword}
+                onChange={handleToggleTunnelDashboard}
+                aria-label="Allow dashboard access via tunnel"
+              />
+            </div>
+          </div>
+        ) : null}
+      </section>
+
+      {/* One-time reveal banners */}
+      {initialRevealedKey ? (
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-emerald-500/40 bg-emerald-500/10 px-4 py-3 text-xs">
+          <div className="min-w-0 flex-1">
+            <div className="font-semibold text-emerald-400">
+              Initial Router API Key (shown once)
+            </div>
+            <code className="mt-1 block truncate font-mono text-[var(--text-primary)]">
+              {initialRevealedKey}
+            </code>
+          </div>
+          <div className="flex items-center gap-2">
+            <CopyButton value={initialRevealedKey} size="xs" />
+            <button
+              type="button"
+              onClick={() => setInitialRevealedKey('')}
+              className="r-btn-secondary px-2.5 py-1 text-xs"
+            >
+              Dismiss
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      {createdBannerKey ? (
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-emerald-500/40 bg-emerald-500/10 px-4 py-3 text-xs">
+          <div className="min-w-0 flex-1">
+            <div className="font-semibold text-emerald-400">
+              New API Key Created: {createdBannerKey.name}
+            </div>
+            <code className="mt-1 block truncate font-mono text-[var(--text-primary)]">
+              {createdBannerKey.key}
+            </code>
+          </div>
+          <div className="flex items-center gap-2">
+            <CopyButton value={createdBannerKey.key} size="xs" />
+            <button
+              type="button"
+              onClick={() => setCreatedBannerKey(null)}
+              className="r-btn-secondary px-2.5 py-1 text-xs"
+            >
+              Done
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      {/* Card 2: API Keys */}
+      <section className="r-card space-y-4 p-5">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <KeyRound className="h-5 w-5 text-[#E56A4A]" aria-hidden="true" />
+            <h2 className="text-base font-semibold text-[var(--text-primary)]">API Keys</h2>
+          </div>
           <button
             type="button"
             onClick={() => setCreateOpen(true)}
-            className="r-btn-primary inline-flex items-center gap-1.5 px-3.5 py-2 text-xs"
+            className="r-btn-primary inline-flex items-center gap-1.5 px-3 py-1.5 text-xs"
           >
-            <Plus className="h-4 w-4" aria-hidden="true" />
-            {t('overview.createKey')}
+            <Plus className="h-3.5 w-3.5" aria-hidden="true" />
+            Create Key
           </button>
         </div>
-      </div>
 
-      {/* Prominent One-Time Key Reveal Banner (Shown Only Once — Stored as SHA-256 Hash) */}
-      {oneTimeBannerKey?.key ? (
-        <section
-          role="alert"
-          aria-label="One-time Router API Key Reveal"
-          className="rounded-xl border-2 border-amber-500/60 bg-amber-500/10 p-4 shadow-lg"
-        >
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div className="flex items-start gap-3">
-              <AlertTriangle
-                className="mt-0.5 h-5 w-5 shrink-0 text-[var(--ux-warn)]"
-                aria-hidden="true"
-              />
-              <div>
-                <h2 className="text-sm font-bold text-[var(--ux-warn)]">
-                  Copy Your Key Now (Shown Only Once)
-                </h2>
-                <p className="mt-0.5 text-xs text-[var(--text-secondary)]">
-                  The full secret for{' '}
-                  <strong className="text-[var(--text-primary)]">{oneTimeBannerKey.name}</strong> is
-                  only displayed once. Copy and save this token before closing.
-                </p>
-              </div>
-            </div>
-            <button
-              type="button"
-              onClick={() => setOneTimeBannerKey(null)}
-              aria-label="Dismiss one-time key banner"
-              className="rounded-lg p-1 text-[var(--text-muted)] hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)]"
-            >
-              <X className="h-4 w-4" aria-hidden="true" />
-            </button>
-          </div>
-
-          <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-500/40 bg-[var(--bg-card)] px-3.5 py-2.5">
-            <code className="font-mono text-sm font-bold text-[var(--ux-mint)] select-all break-all">
-              {oneTimeBannerKey.key}
-            </code>
-            <CopyButton
-              value={oneTimeBannerKey.key}
-              label="Copy Secret Key"
-              toastMessage={`Copied router key "${oneTimeBannerKey.name}"`}
-            />
-          </div>
-        </section>
-      ) : null}
-
-      {/* Unified Primary Endpoint Cards */}
-      <section aria-label="Gateway Endpoints" className="grid gap-4 lg:grid-cols-2">
-        <div className="r-card p-5">
-          <div className="flex items-center justify-between gap-2">
-            <span className="inline-flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-[#E56A4A]">
-              <Sparkles className="h-3.5 w-3.5" aria-hidden="true" />
-              {t('overview.openaiUrl')}
-            </span>
-            <CopyButton
-              value={openaiBaseUrl}
-              label={t('overview.copyUrl')}
-              toastMessage="Copied OpenAI Base URL"
-            />
-          </div>
-          <div className="mt-3 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-subtle)] px-3.5 py-2.5 font-mono text-sm text-[var(--text-primary)] select-all break-all">
-            {openaiBaseUrl}
-          </div>
-          <p className="mt-2.5 text-xs text-[var(--text-secondary)]">
-            {t('overview.openaiDesc')}
-          </p>
-        </div>
-
-        <div className="r-card p-5">
-          <div className="flex items-center justify-between gap-2">
-            <span className="inline-flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-[#E56A4A]">
-              <Shield className="h-3.5 w-3.5" aria-hidden="true" />
-              {t('overview.anthropicUrl')}
-            </span>
-            <CopyButton
-              value={anthropicBaseUrl}
-              label={t('overview.copyUrl')}
-              toastMessage="Copied Anthropic Base URL"
-            />
-          </div>
-          <div className="mt-3 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-subtle)] px-3.5 py-2.5 font-mono text-sm text-[var(--text-primary)] select-all break-all">
-            {anthropicBaseUrl}
-          </div>
-          <p className="mt-2.5 text-xs text-[var(--text-secondary)]">
-            {t('overview.anthropicDesc')}
-          </p>
-        </div>
-      </section>
-
-      {/* 9 Service Kinds Unified Endpoints Grid (Section 9.4 & 9.9) */}
-      <section aria-label="9 Service Kinds Unified Endpoints" className="r-card space-y-3.5 p-5">
-        <div className="flex flex-wrap items-center justify-between gap-2">
+        {/* Require API key row */}
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--border-subtle)] pb-4">
           <div>
-            <div className="flex items-center gap-2">
-              <h2 className="text-base font-semibold text-[var(--text-primary)]">
-                9 Service Kinds — Unified OpenAI &amp; Anthropic Endpoints
-              </h2>
-              <span className="rounded-full border border-[#E56A4A]/30 bg-[#E56A4A]/12 px-2 py-0.5 text-[10px] font-semibold text-[#E56A4A]">
-                1 Port · 9 Service Kinds
-              </span>
+            <div className="text-sm font-medium text-[var(--text-primary)]">Require API key</div>
+            <div className="text-xs text-[var(--text-muted)]">
+              Requests without a valid router key are rejected with HTTP 401.
             </div>
-            <p className="mt-0.5 text-xs text-[var(--text-secondary)]">
-              Every endpoint below shares the same Router API Key (<code>Bearer sk-001r-...</code>{' '}
-              or <code>x-api-key</code>) and routes to official provider APIs.
+          </div>
+          <Switch
+            checked={settingsState.requireKey}
+            disabled={settingsState.publicDeployment || isRemoteHost}
+            onChange={handleToggleRequireKey}
+            aria-label="Require API key"
+          />
+        </div>
+
+        {keys.length === 0 ? (
+          <div className="py-10 text-center">
+            <KeyRound className="mx-auto mb-3 h-8 w-8 text-[#E56A4A]/70" aria-hidden="true" />
+            <p className="text-sm font-medium text-[var(--text-primary)]">No API keys yet</p>
+            <p className="mt-1 text-xs text-[var(--text-muted)]">
+              Create your first API key to authenticate IDE extensions and CLI tools.
             </p>
-          </div>
-          <Link to="/models" className="text-xs font-medium text-[#E56A4A] hover:underline">
-            Explore 470+ Models by Service Kind →
-          </Link>
-        </div>
-
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-          {SERVICE_KINDS_META.map((svc) => {
-            const Icon = SERVICE_ICONS[svc.id] || Sparkles;
-            const fullUrl = `${origin}${svc.path}`;
-            return (
-              <div
-                key={svc.id}
-                className="r-card-subtle flex flex-col justify-between p-3.5 transition-colors hover:border-[#E56A4A]/50"
-              >
-                <div>
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="inline-flex items-center gap-2 text-xs font-semibold text-[var(--text-primary)]">
-                      <Icon className="h-3.5 w-3.5 text-[#E56A4A]" aria-hidden="true" />
-                      {svc.label}
-                    </span>
-                    <span
-                      className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-bold ${
-                        svc.method === 'GET'
-                          ? 'bg-sky-500/15 text-sky-400'
-                          : 'bg-emerald-500/15 text-emerald-400'
-                      }`}
-                    >
-                      {svc.method}
-                    </span>
-                  </div>
-                  <p className="mt-1 text-[11px] leading-relaxed text-[var(--text-secondary)]">
-                    {svc.desc}
-                  </p>
-                </div>
-
-                <div className="mt-3 flex items-center justify-between gap-2 rounded-md border border-[var(--border-subtle)] bg-[var(--bg-card)] px-2.5 py-1.5">
-                  <code className="single-line-truncate font-mono text-[11px] text-[#E56A4A] select-all">
-                    {fullUrl}
-                  </code>
-                  <CopyButton
-                    value={fullUrl}
-                    size="xs"
-                    iconOnly
-                    label={`Copy ${svc.label} endpoint`}
-                    toastMessage={`Copied ${fullUrl}`}
-                  />
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      </section>
-
-      {/* Quick KPI Cards */}
-      <LucianGlowGrid
-        as="section"
-        ariaLabel="Quick Summary"
-        className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4"
-      >
-        <LucianGlowCard as={Link} to="/providers" innerClassName="group p-4">
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-medium text-[var(--text-secondary)]">
-              {t('overview.kpiProviders')}
-            </span>
-            <Server className="h-4 w-4 text-[#E56A4A]" aria-hidden="true" />
-          </div>
-          <div className="mt-2 flex items-baseline gap-2">
-            <span className="text-2xl font-bold text-[var(--text-primary)]">
-              {enabledProviders}
-            </span>
-            <span className="text-xs text-[var(--text-muted)]">/ {providers.length}</span>
-          </div>
-          <div className="mt-2 inline-flex items-center gap-1 text-xs text-[var(--text-secondary)] group-hover:text-[#E56A4A]">
-            {t('overview.manageProviders')} <ArrowRight className="h-3 w-3" aria-hidden="true" />
-          </div>
-        </LucianGlowCard>
-
-        <LucianGlowCard as={Link} to="/combos" innerClassName="group p-4">
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-medium text-[var(--text-secondary)]">
-              {t('overview.kpiCombos')}
-            </span>
-            <Layers className="h-4 w-4 text-[#E56A4A]" aria-hidden="true" />
-          </div>
-          <div className="mt-2 flex items-baseline gap-2">
-            <span className="text-2xl font-bold text-[var(--text-primary)]">{enabledCombos}</span>
-            <span className="text-xs text-[var(--text-muted)]">/ {combos.length}</span>
-          </div>
-          <div className="mt-2 inline-flex items-center gap-1 text-xs text-[var(--text-secondary)] group-hover:text-[#E56A4A]">
-            {t('overview.manageCombos')} <ArrowRight className="h-3 w-3" aria-hidden="true" />
-          </div>
-        </LucianGlowCard>
-
-        <LucianGlowCard as={Link} to="/usage" innerClassName="group p-4">
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-medium text-[var(--text-secondary)]">
-              {t('overview.kpiRequests')}
-            </span>
-            <Activity className="h-4 w-4 text-[#E56A4A]" aria-hidden="true" />
-          </div>
-          <div className="mt-2 flex items-baseline gap-2">
-            <span className="text-2xl font-bold text-[var(--text-primary)]">
-              {formatNumber(totalReq)}
-            </span>
-            <span className="text-xs text-emerald-500">{successRate} ok</span>
-          </div>
-          <div className="mt-2 inline-flex items-center gap-1 text-xs text-[var(--text-secondary)] group-hover:text-[#E56A4A]">
-            {t('overview.viewUsage')} <ArrowRight className="h-3 w-3" aria-hidden="true" />
-          </div>
-        </LucianGlowCard>
-
-        <LucianGlowCard as={Link} to="/token-saver" innerClassName="group p-4">
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-medium text-[var(--text-secondary)]">
-              {t('overview.kpiTokenSaver')}
-            </span>
-            <KeyRound className="h-4 w-4 text-[#E56A4A]" aria-hidden="true" />
-          </div>
-          <div className="mt-2 flex items-baseline gap-2">
-            <span className="text-2xl font-bold text-[var(--text-primary)]">
-              {formatCompactNumber(summary.savedChars || 0)}
-            </span>
-            <span className="text-xs text-[var(--text-muted)]">{t('overview.charsTrimmed')}</span>
-          </div>
-          <div className="mt-2 text-xs text-[var(--text-secondary)]">
-            Auth:{' '}
-            <span
-              className={
-                settings?.requireKey === false && !publicDeployment
-                  ? 'text-amber-500'
-                  : 'text-emerald-500'
-              }
-            >
-              {settings?.requireKey === false && !publicDeployment ? 'Key optional' : 'Key required'}
-            </span>
-          </div>
-        </LucianGlowCard>
-      </LucianGlowGrid>
-
-      {/* Router API Keys Table */}
-      <section className="space-y-3">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div>
-            <h2
-              id="router-keys-heading"
-              className="text-base font-semibold text-[var(--text-primary)]"
-            >
-              {t('overview.routerKeys')} ({keys.length})
-            </h2>
-            <p className="text-xs text-[var(--text-secondary)]">{t('overview.routerKeysDesc')}</p>
-          </div>
-          <Link to="/cli-tools" className="text-xs font-medium text-[#E56A4A] hover:underline">
-            {t('overview.cliSnippetsLink')}
-          </Link>
-        </div>
-
-        {keys.length === 0 && !loading ? (
-          <div className="r-card border-dashed p-8 text-center">
-            <KeyRound className="mx-auto h-8 w-8 text-[var(--text-muted)]" aria-hidden="true" />
-            <h3 className="mt-3 text-sm font-medium text-[var(--text-primary)]">
-              {t('overview.noKeysTitle')}
-            </h3>
-            <p className="mt-1 text-xs text-[var(--text-secondary)]">{t('overview.noKeysDesc')}</p>
             <button
               type="button"
               onClick={() => setCreateOpen(true)}
               className="r-btn-primary mt-4 inline-flex items-center gap-1.5 px-3.5 py-2 text-xs"
             >
-              <Plus className="h-4 w-4" aria-hidden="true" />
-              {t('overview.createFirstKey')}
+              <Plus className="h-3.5 w-3.5" aria-hidden="true" />
+              Create Key
             </button>
           </div>
         ) : (
-          <div
-            tabIndex={0}
-            role="region"
-            aria-labelledby="router-keys-heading"
-            className="responsive-table-wrapper"
-          >
-            <table className="responsive-table responsive-table--stack">
-              <thead>
-                <tr>
-                  <th>Name</th>
-                  <th>Key Preview &amp; Storage</th>
-                  <th>Status</th>
-                  <th>Requests</th>
-                  <th>Last Used</th>
-                  <th className="text-right">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {keys.map((item) => {
-                  const fullKey = getRememberedRouterKey(item);
-                  const isRevealed = revealedIds.has(item.id);
-                  const displayKey =
-                    isRevealed && fullKey ? fullKey : item.keyPreview || item.key || 'sk-001r-••••';
+          <div className="divide-y divide-[var(--border-subtle)]">
+            {keys.map((keyObj) => {
+              const remembered = getRememberedRouterKey(keyObj);
+              const isVisible = visibleKeys.has(keyObj.id) && Boolean(remembered);
+              const isEnabled = keyObj.enabled !== false;
 
-                  return (
-                    <tr key={item.id} className="text-sm">
-                      <td data-label="Name" className="font-medium text-[var(--text-primary)]">
-                        <div className="flex min-w-0 items-center gap-2">
-                          <span className="single-line-truncate">{item.name}</span>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setRenameTarget(item);
-                              setRenameValue(item.name);
-                            }}
-                            aria-label={`Rename ${item.name}`}
-                            className="rounded p-1 text-[var(--text-muted)] hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)]"
-                          >
-                            <Pencil className="h-3.5 w-3.5" aria-hidden="true" />
-                          </button>
-                        </div>
-                      </td>
-
-                      <td data-label="Key">
-                        <div className="min-w-0 flex-1 space-y-1.5">
-                          <div className="flex flex-wrap items-center gap-1.5">
-                            <code className="rounded bg-[var(--bg-subtle)] px-2 py-1 text-xs text-[var(--text-primary)]">
-                              {displayKey}
-                            </code>
-                            {fullKey ? (
-                              <>
-                                <button
-                                  type="button"
-                                  onClick={() => toggleReveal(item.id)}
-                                  aria-label={
-                                    isRevealed ? `Mask ${item.name}` : `Reveal ${item.name}`
-                                  }
-                                  className="rounded p-1.5 text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)]"
-                                >
-                                  {isRevealed ? (
-                                    <EyeOff className="h-3.5 w-3.5" aria-hidden="true" />
-                                  ) : (
-                                    <Eye className="h-3.5 w-3.5" aria-hidden="true" />
-                                  )}
-                                </button>
-                                <CopyButton
-                                  value={fullKey}
-                                  size="xs"
-                                  iconOnly
-                                  label={`Copy key ${item.name}`}
-                                  toastMessage={`Copied key "${item.name}"`}
-                                />
-                              </>
-                            ) : null}
-                          </div>
-                          <KeyAccessControls
-                            apiKey={item}
-                            combos={combos}
-                            providers={providers}
-                            onChange={(nextAccess) => handleUpdateKeyAccess(item, nextAccess)}
-                          />
-                        </div>
-                      </td>
-
-                      <td data-label="Status">
-                        <div className="inline-flex items-center gap-2">
-                          <Switch
-                            size="sm"
-                            checked={item.enabled}
-                            onChange={(val) => handleToggleKey(item, val)}
-                            aria-label={`Toggle key ${item.name}`}
-                          />
-                          <span
-                            className={`text-xs font-medium ${
-                              item.enabled ? 'text-emerald-500' : 'text-[var(--text-muted)]'
-                            }`}
-                          >
-                            {item.enabled ? t('common.active') : t('common.disabled')}
-                          </span>
-                        </div>
-                      </td>
-
-                      <td
-                        data-label="Requests"
-                        className="font-mono text-xs text-[var(--text-primary)]"
-                      >
-                        {formatNumber(item.requestCount || 0)}
-                      </td>
-
-                      <td data-label="Last Used" className="text-xs text-[var(--text-secondary)]">
-                        {formatRelativeTime(item.lastUsedAt)}
-                      </td>
-
-                      <td data-label="Actions" className="text-right">
+              return (
+                <div
+                  key={keyObj.id}
+                  className={`py-3.5 first:pt-1 last:pb-1 ${!isEnabled ? 'opacity-65' : ''}`}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-sm font-medium text-[var(--text-primary)]">
+                          {keyObj.name}
+                        </span>
                         <button
                           type="button"
-                          onClick={() => setRevokeTarget(item)}
-                          aria-label={`Revoke key ${item.name}`}
-                          className="inline-flex items-center gap-1 rounded-md border border-red-500/30 bg-red-500/10 px-2.5 py-1 text-xs font-medium text-red-500 transition-colors hover:bg-red-500/20"
+                          onClick={() => {
+                            setRenameTarget(keyObj);
+                            setRenameValue(keyObj.name);
+                          }}
+                          className="rounded p-1 text-[var(--text-muted)] hover:bg-[var(--bg-subtle)] hover:text-[var(--text-primary)]"
+                          title="Rename key"
+                          aria-label={`Rename ${keyObj.name}`}
                         >
-                          <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
-                          {t('overview.revoke')}
+                          <Pencil className="h-3 w-3" aria-hidden="true" />
                         </button>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+                        {!isEnabled ? (
+                          <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-amber-400">
+                            Paused
+                          </span>
+                        ) : null}
+                      </div>
+
+                      <div className="mt-1 flex flex-wrap items-center gap-2">
+                        <code className="font-mono text-xs text-[var(--text-secondary)]">
+                          {isVisible ? remembered : keyObj.keyPreview}
+                        </code>
+                        <button
+                          type="button"
+                          onClick={() => toggleVisibility(keyObj)}
+                          className="rounded p-1 text-[var(--text-muted)] hover:bg-[var(--bg-subtle)] hover:text-[var(--text-primary)]"
+                          title={isVisible ? 'Hide key' : 'Show key'}
+                          aria-label={isVisible ? 'Hide key' : 'Show key'}
+                        >
+                          {isVisible ? (
+                            <EyeOff className="h-3.5 w-3.5" aria-hidden="true" />
+                          ) : (
+                            <Eye className="h-3.5 w-3.5" aria-hidden="true" />
+                          )}
+                        </button>
+                        <CopyButton
+                          value={remembered || keyObj.keyPreview}
+                          size="xs"
+                          iconOnly
+                          label="Copy key"
+                        />
+                      </div>
+
+                      <div className="mt-1 text-[11px] text-[var(--text-muted)]">
+                        Created {new Date(keyObj.createdAt).toLocaleDateString()} ·{' '}
+                        {keyObj.requestCount || 0} requests
+                      </div>
+
+                      <KeyAccessControls
+                        apiKey={keyObj}
+                        combos={combos}
+                        providers={providers}
+                        onChange={(access) => applyKeyPatch(keyObj.id, { access })}
+                      />
+                    </div>
+
+                    <div className="flex shrink-0 items-center gap-2 pt-0.5">
+                      <Switch
+                        size="sm"
+                        checked={isEnabled}
+                        onChange={(checked) => {
+                          if (!checked) {
+                            setPauseTarget(keyObj);
+                          } else {
+                            applyKeyPatch(keyObj.id, { enabled: true }, 'Resumed API key');
+                          }
+                        }}
+                        aria-label={`Toggle ${keyObj.name}`}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setDeleteTarget(keyObj)}
+                        className="rounded p-1.5 text-red-400 transition-colors hover:bg-red-500/12"
+                        title="Delete key"
+                        aria-label={`Delete ${keyObj.name}`}
+                      >
+                        <Trash2 className="h-4 w-4" aria-hidden="true" />
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
           </div>
         )}
       </section>
 
-      {/* Create Key Dialog */}
+      {/* Create Key Modal */}
       <ModalDialog
         open={createOpen}
-        onClose={() => setCreateOpen(false)}
-        title={t('overview.createKey')}
-        subtitle="Generate a client token (sk-001r-...). The full secret is shown only once."
+        onClose={() => {
+          setCreateOpen(false);
+          setNewKeyName('');
+        }}
+        title="Create API Key"
         size="sm"
       >
         <form onSubmit={handleCreateKey} className="space-y-4">
           <div>
             <label
               htmlFor="new-key-name"
-              className="block text-sm font-medium text-[var(--text-primary)]"
+              className="block text-xs font-medium text-[var(--text-secondary)]"
             >
-              Key Label
+              Key Name
             </label>
             <input
               id="new-key-name"
               type="text"
-              required
               autoFocus
+              required
               value={newKeyName}
               onChange={(e) => setNewKeyName(e.target.value)}
-              placeholder="e.g. Claude Code, Cursor, Codex CLI"
-              className="field-input mt-2 w-full px-3 py-2 text-sm"
+              placeholder="e.g. Claude Code / Cursor Key"
+              className="field-input mt-1.5 w-full px-3 py-2 text-sm"
             />
           </div>
-          <div className="flex justify-end gap-2.5 pt-2">
+          <div className="flex justify-end gap-2">
             <button
               type="button"
               onClick={() => setCreateOpen(false)}
               className="r-btn-secondary px-3.5 py-2 text-xs"
             >
-              {t('common.cancel')}
+              Cancel
             </button>
             <button
               type="submit"
-              disabled={creating || !newKeyName.trim()}
-              className="r-btn-primary px-4 py-2 text-xs"
+              disabled={creatingKey || !newKeyName.trim()}
+              className="r-btn-primary px-3.5 py-2 text-xs"
             >
-              {creating ? t('common.saving') : t('overview.createKey')}
+              {creatingKey ? 'Creating…' : 'Create Key'}
             </button>
           </div>
         </form>
       </ModalDialog>
 
-      {/* Newly Created Key Modal (Shown Only Once) */}
-      <ModalDialog
-        open={Boolean(createdKeyModal)}
-        onClose={() => setCreatedKeyModal(null)}
-        title="Copy Your Key Now (Shown Only Once)"
-        subtitle={`Key "${createdKeyModal?.name || ''}" cannot be viewed again after closing.`}
-        size="sm"
-        footer={
-          <button
-            type="button"
-            onClick={() => setCreatedKeyModal(null)}
-            className="r-btn-primary px-4 py-2 text-xs"
-          >
-            {t('common.done')}
-          </button>
-        }
-      >
-        {createdKeyModal ? (
-          <div className="space-y-3">
-            <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-2.5 text-xs text-[var(--ux-warn)]">
-              <strong>Important:</strong> Copy this secret key now. Only a masked preview (
-              <code>{createdKeyModal.keyPreview || 'prefix…last4'}</code>) will remain visible
-              after closing.
-            </div>
-            <div className="flex items-center gap-2 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-subtle)] p-2.5">
-              <code className="flex-1 overflow-x-auto text-xs font-semibold text-[var(--ux-mint)] select-all">
-                {createdKeyModal.key}
-              </code>
-              <CopyButton value={createdKeyModal.key} />
-            </div>
-          </div>
-        ) : null}
-      </ModalDialog>
-
-      {/* Rename Modal */}
+      {/* Rename Key Modal */}
       <ModalDialog
         open={Boolean(renameTarget)}
         onClose={() => setRenameTarget(null)}
-        title="Rename Router Key"
+        title="Rename API Key"
         size="sm"
       >
         <form onSubmit={handleRenameSubmit} className="space-y-4">
           <div>
             <label
               htmlFor="rename-key-input"
-              className="block text-sm font-medium text-[var(--text-primary)]"
+              className="block text-xs font-medium text-[var(--text-secondary)]"
             >
-              New Label
+              Key Name
             </label>
             <input
               id="rename-key-input"
               type="text"
-              required
               autoFocus
+              required
               value={renameValue}
               onChange={(e) => setRenameValue(e.target.value)}
-              className="field-input mt-2 w-full px-3 py-2 text-sm"
+              className="field-input mt-1.5 w-full px-3 py-2 text-sm"
             />
           </div>
-          <div className="flex justify-end gap-2.5 pt-2">
+          <div className="flex justify-end gap-2">
             <button
               type="button"
               onClick={() => setRenameTarget(null)}
               className="r-btn-secondary px-3.5 py-2 text-xs"
             >
-              {t('common.cancel')}
+              Cancel
             </button>
             <button
               type="submit"
-              disabled={renaming || !renameValue.trim()}
-              className="r-btn-primary px-4 py-2 text-xs"
+              disabled={mutatingKey || !renameValue.trim()}
+              className="r-btn-primary px-3.5 py-2 text-xs"
             >
-              {renaming ? t('common.saving') : t('common.save')}
+              Save
             </button>
           </div>
         </form>
       </ModalDialog>
 
       <ConfirmDialog
-        open={Boolean(revokeTarget)}
-        onClose={() => setRevokeTarget(null)}
-        onConfirm={handleRevokeConfirm}
-        title="Revoke Router API Key?"
+        open={disableTunnelOpen}
+        onClose={() => setDisableTunnelOpen(false)}
+        onConfirm={handleConfirmDisableTunnel}
+        title="Disable Cloudflare Tunnel?"
         destructive
-        busy={revoking}
-        confirmLabel={t('overview.revoke')}
+        busy={tunnelBusy}
+        confirmLabel="Disable Tunnel"
+        message={
+          <p>Active clients using the current *.trycloudflare.com URL will lose remote access.</p>
+        }
+      />
+
+      <ConfirmDialog
+        open={Boolean(pauseTarget)}
+        onClose={() => setPauseTarget(null)}
+        onConfirm={async () => {
+          const target = pauseTarget;
+          setPauseTarget(null);
+          if (target) await applyKeyPatch(target.id, { enabled: false }, 'Paused API key');
+        }}
+        title="Pause API Key?"
+        confirmLabel="Pause Key"
         message={
           <p>
-            Tools using <strong>{revokeTarget?.name}</strong> (
-            <code>{revokeTarget?.keyPreview}</code>) will immediately fail with <code>401</code>{' '}
-            when router key auth is enabled.
+            Pause <strong>{pauseTarget?.name}</strong>? Requests using this key will be rejected
+            until resumed.
+          </p>
+        }
+      />
+
+      <ConfirmDialog
+        open={Boolean(deleteTarget)}
+        onClose={() => setDeleteTarget(null)}
+        onConfirm={handleDeleteConfirm}
+        title="Delete API Key?"
+        destructive
+        busy={mutatingKey}
+        confirmLabel="Delete Key"
+        message={
+          <p>
+            Permanently revoke <strong>{deleteTarget?.name}</strong>? This action cannot be undone.
           </p>
         }
       />
     </div>
   );
 }
+
+export default OverviewPage;

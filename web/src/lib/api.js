@@ -404,6 +404,13 @@ export const MEDIA_PROVIDER_KINDS = [
     kinds: ['stt'],
   },
   {
+    id: 'systemone',
+    label: 'SystemOne',
+    endpoint: 'POST /v1/images/generations · /v1/audio · /v1/embeddings',
+    desc: 'Unified media hub across Image, Video, Music, TTS, STT, Embedding, and Rerank providers.',
+    kinds: ['image', 'video', 'music', 'tts', 'stt', 'embedding', 'rerank'],
+  },
+  {
     id: 'web',
     label: 'Web Fetch & Search',
     endpoint: 'POST /v1/search · POST /v1/web/fetch',
@@ -512,6 +519,11 @@ export const debugApi = {
 export const settingsApi = {
   get: () => apiFetch('/api/settings'),
   update: (data) => apiFetch('/api/settings', { method: 'PUT', body: data }),
+  testProxy: (proxyUrl) =>
+    apiFetch('/api/settings/proxy-test', {
+      method: 'POST',
+      body: { proxyUrl },
+    }),
   changePassword: (currentPassword, newPassword) =>
     apiFetch('/api/settings/password', {
       method: 'POST',
@@ -534,6 +546,20 @@ export const settingsApi = {
     });
   },
   importConfig: (payload) => apiFetch('/api/import', { method: 'POST', body: payload }),
+};
+
+export const tunnelApi = {
+  status: () => apiFetch('/api/tunnel/status'),
+  enable: () => apiFetch('/api/tunnel/enable', { method: 'POST' }),
+  disable: () => apiFetch('/api/tunnel/disable', { method: 'POST' }),
+  tailscaleCheck: () => apiFetch('/api/tunnel/tailscale-check'),
+  tailscaleEnable: () => apiFetch('/api/tunnel/tailscale-enable', { method: 'POST' }),
+  tailscaleDisable: () => apiFetch('/api/tunnel/tailscale-disable', { method: 'POST' }),
+};
+
+export const versionApi = {
+  get: () => apiFetch('/api/version'),
+  shutdown: () => apiFetch('/api/version/shutdown', { method: 'POST', skipAuthRedirect: true }),
 };
 
 export const healthApi = {

@@ -695,17 +695,14 @@ export function CombosPage() {
         </div>
       </div>
 
-      {/* 3-Tier Smart Templates Bar */}
+      {/* Smart Fallback Presets */}
       <section className="r-card space-y-3.5 p-5">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2">
             <Wand2 className="h-4 w-4 text-[#E56A4A]" aria-hidden="true" />
             <h2 className="text-sm font-semibold text-[var(--text-primary)]">
-              3-Tier Smart Fallback Templates (One-Click Generator)
+              Smart Fallback Presets
             </h2>
-            <span className="rounded-full border border-[#E56A4A]/30 bg-[#E56A4A]/12 px-2 py-0.5 text-[10px] font-semibold text-[#E56A4A]">
-              Tier 1 Flagship → Tier 2 Cheap → Tier 3 Free
-            </span>
           </div>
           <span className="text-xs text-[var(--text-muted)]">
             Drag combo cards to reorder priority

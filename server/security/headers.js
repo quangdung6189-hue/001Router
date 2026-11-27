@@ -60,11 +60,10 @@ export function parseAllowedHosts(raw) {
 
 /**
  * DNS-rebinding guard. When the server is bound to a loopback address, only accept requests whose
- * `Host` header is itself a loopback name (`localhost`, `127.x.x.x`, `::1`) or is explicitly listed in
- * `allowedHosts` / `ROUTER001_ALLOWED_HOSTS`. This stops a malicious web page that rebinds its DNS name to
- * 127.0.0.1 from talking to the dashboard/API as if it were same-origin.
+ * `Host` header is itself a loopback name (`localhost`, `127.x.x.x`, `::1`), is explicitly listed in
+ * `allowedHosts` / `ROUTER001_ALLOWED_HOSTS`, or matches an authorized active tunnel hostname.
  * Not enforced for non-loopback binds or managed platforms (Vercel/Render/Railway), where a public Host is expected.
- * @param {{ bindHost?: string, allowedHosts?: string[] }} [options]
+ * @param {{ bindHost?: string, allowedHosts?: string[], isDynamicHostAllowed?: (hostName: string, req: any) => boolean | { allowed: false, status?: number, message?: string } }} [options]
  */
 export function createHostGuardMiddleware(options = {}) {
   const managed = Boolean(
@@ -80,6 +79,20 @@ export function createHostGuardMiddleware(options = {}) {
     if (!enforced) return next();
     const name = parseHostHeaderName(req.headers?.host);
     if (name && (isLoopbackHost(name) || extra.has(name))) return next();
+    if (name && typeof options.isDynamicHostAllowed === "function") {
+      const check = options.isDynamicHostAllowed(name, req);
+      if (check === true) return next();
+      if (check && check.allowed === false) {
+        const denyMsg =
+          check.message ||
+          "Access via tunnel is disabled for this route.";
+        const denyStatus = Number(check.status) || 403;
+        if (req.path === "/v1" || req.path.startsWith("/v1/") || req.path.startsWith("/v1beta/")) {
+          return res.status(denyStatus).json({ error: { message: denyMsg, type: "invalid_request_error" } });
+        }
+        return res.status(denyStatus).json({ error: denyMsg });
+      }
+    }
     const message =
       "Host header not allowed. Access 001Router via localhost/127.0.0.1, or add this host to ROUTER001_ALLOWED_HOSTS.";
     if (req.path === "/v1" || req.path.startsWith("/v1/") || req.path.startsWith("/v1beta/")) {
@@ -90,15 +103,14 @@ export function createHostGuardMiddleware(options = {}) {
 }
 
 /**
- * Determine whether the incoming request arrived over HTTPS (only trusting `X-Forwarded-Proto`
- * when Express `trust proxy` is enabled or running on Vercel).
+ * Determine whether the incoming request arrived over HTTPS or behind a trusted HTTPS reverse proxy.
  * @param {import("express").Request} req
  * @returns {boolean}
  */
 function isTrustedHttpsRequest(req) {
   if (!req) return false;
   if (req.secure === true) return true;
-  const trustProxy = Boolean(process.env.VERCEL || req.app?.get?.("trust proxy"));
+  const trustProxy = Boolean(process.env.VERCEL || req.app?.get?.("trust proxy") || req._isTunnelRequest);
   if (trustProxy) {
     const proto = req.headers?.["x-forwarded-proto"];
     if (typeof proto === "string" && proto.split(",")[0].trim().toLowerCase() === "https") {

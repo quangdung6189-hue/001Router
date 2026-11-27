@@ -22,6 +22,10 @@ const UsagePage = lazy(() => import('./pages/UsagePage').then((m) => ({ default:
 const QuotaPage = lazy(() => import('./pages/QuotaPage').then((m) => ({ default: m.QuotaPage })));
 const TokenSaverPage = lazy(() => import('./pages/TokenSaverPage').then((m) => ({ default: m.TokenSaverPage })));
 const CliToolsPage = lazy(() => import('./pages/CliToolsPage').then((m) => ({ default: m.CliToolsPage })));
+const CliToolDetailPage = lazy(() =>
+  import('./pages/CliToolDetailPage').then((m) => ({ default: m.CliToolDetailPage }))
+);
+const MitmPage = lazy(() => import('./pages/MitmPage').then((m) => ({ default: m.MitmPage })));
 const PlaygroundPage = lazy(() => import('./pages/PlaygroundPage').then((m) => ({ default: m.PlaygroundPage })));
 const SkillsPage = lazy(() => import('./pages/SkillsPage').then((m) => ({ default: m.SkillsPage })));
 const ConsoleLogPage = lazy(() => import('./pages/ConsoleLogPage').then((m) => ({ default: m.ConsoleLogPage })));
@@ -69,6 +73,8 @@ export default function App() {
                     <Route path="/quota" element={<QuotaPage />} />
                     <Route path="/token-saver" element={<TokenSaverPage />} />
                     <Route path="/cli-tools" element={<CliToolsPage />} />
+                    <Route path="/cli-tools/:toolId" element={<CliToolDetailPage />} />
+                    <Route path="/mitm" element={<MitmPage />} />
                     <Route path="/integrations" element={<Navigate to="/cli-tools" replace />} />
                     <Route path="/playground" element={<PlaygroundPage />} />
                     <Route path="/skills" element={<SkillsPage />} />
@@ -77,6 +83,27 @@ export default function App() {
                     <Route path="/proxy-pools" element={<ProxyPoolsPage />} />
                     <Route path="/settings" element={<SettingsPage />} />
                     <Route path="/settings/pricing" element={<PricingPage />} />
+
+                    {/* 9Router /dashboard/* URL aliases */}
+                    <Route path="/dashboard" element={<Navigate to="/" replace />} />
+                    <Route path="/dashboard/endpoint" element={<Navigate to="/" replace />} />
+                    <Route path="/dashboard/providers" element={<Navigate to="/providers" replace />} />
+                    <Route path="/dashboard/providers/:id" element={<ProviderDetailPage />} />
+                    <Route path="/dashboard/combos" element={<Navigate to="/combos" replace />} />
+                    <Route path="/dashboard/usage" element={<Navigate to="/usage" replace />} />
+                    <Route path="/dashboard/quota" element={<Navigate to="/quota" replace />} />
+                    <Route path="/dashboard/token-saver" element={<Navigate to="/token-saver" replace />} />
+                    <Route path="/dashboard/cli-tools" element={<Navigate to="/cli-tools" replace />} />
+                    <Route path="/dashboard/cli-tools/:toolId" element={<CliToolDetailPage />} />
+                    <Route path="/dashboard/mitm" element={<Navigate to="/mitm" replace />} />
+                    <Route path="/dashboard/proxy-pools" element={<Navigate to="/proxy-pools" replace />} />
+                    <Route path="/dashboard/skills" element={<Navigate to="/skills" replace />} />
+                    <Route path="/dashboard/console-log" element={<Navigate to="/console-log" replace />} />
+                    <Route path="/dashboard/translator" element={<Navigate to="/translator" replace />} />
+                    <Route path="/dashboard/profile" element={<Navigate to="/settings" replace />} />
+                    <Route path="/dashboard/media-providers/web" element={<MediaProvidersPage forcedKind="web" />} />
+                    <Route path="/dashboard/media-providers/:kind" element={<MediaProvidersPage />} />
+                    <Route path="/dashboard/media-providers/:kind/:id" element={<MediaProviderDetailPage />} />
                   </Route>
                 </Route>
                 <Route path="*" element={<Navigate to="/" replace />} />
