@@ -17,6 +17,8 @@ const {
   STATE_AUTO_ACTIVE_FILE,
   STATE_AUTO_WORKSPACE,
   STATE_PERMISSIONS,
+  STATE_CUSTOM_WORKSPACES,
+  STATE_ACTIVE_PROJECT_ROOT,
   MAX_SESSIONS,
   MAX_MESSAGES_PER_SESSION,
   MAX_ATTACHMENT_CHARS,
@@ -29,9 +31,11 @@ const {
 } = require("./permissions/permissionManager");
 const {
   toPosixPath,
+  normalizeComparePath,
   formatErrorMessage,
   stripAnsi,
   findProjectRootFromPath,
+  discoverNearbyProjects,
   scanWorkspaceRoots,
   resolveProjectPath,
   readNumberedTextFile,
@@ -107,6 +111,172 @@ class Router001Controller {
     await this.context.globalState.update(STATE_PERMISSIONS, normalized);
     this.postToAll({ type: "permissionsUpdated", permissions: normalized });
     return normalized;
+  }
+
+  getCustomWorkspaces() {
+    const saved = this.context.globalState.get(STATE_CUSTOM_WORKSPACES);
+    if (!Array.isArray(saved)) return [];
+    const out = [];
+    const seen = new Set();
+    for (const item of saved) {
+      if (!item || typeof item.fsPath !== "string" || !item.fsPath.trim()) continue;
+      const abs = path.resolve(item.fsPath.trim());
+      const key = normalizeComparePath(abs);
+      if (seen.has(key)) continue;
+      try {
+        if (!fs.existsSync(abs) || !fs.statSync(abs).isDirectory()) continue;
+      } catch {
+        continue;
+      }
+      seen.add(key);
+      out.push({
+        name: item.name || path.basename(abs) || abs,
+        fsPath: abs,
+        pinnedAt: item.pinnedAt || Date.now()
+      });
+    }
+    return out.slice(0, 16);
+  }
+
+  async saveCustomWorkspaces(list) {
+    const dedup = [];
+    const seen = new Set();
+    for (const item of list || []) {
+      if (!item?.fsPath) continue;
+      const abs = path.resolve(item.fsPath);
+      const key = normalizeComparePath(abs);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      dedup.push({
+        name: item.name || path.basename(abs) || abs,
+        fsPath: abs,
+        pinnedAt: item.pinnedAt || Date.now()
+      });
+    }
+    const trimmed = dedup.slice(0, 16);
+    await this.context.globalState.update(STATE_CUSTOM_WORKSPACES, trimmed);
+    return trimmed;
+  }
+
+  getActiveProjectRoot() {
+    const raw = this.context.globalState.get(STATE_ACTIVE_PROJECT_ROOT);
+    if (typeof raw !== "string" || !raw.trim()) return "";
+    const abs = path.resolve(raw.trim());
+    try {
+      if (fs.existsSync(abs) && fs.statSync(abs).isDirectory()) return abs;
+    } catch {
+      // ignore missing dir
+    }
+    return "";
+  }
+
+  async switchProjectRoot(rawFsPath) {
+    const trimmed = String(rawFsPath || "").trim();
+    if (!trimmed || trimmed === "__ide__") {
+      await this.context.globalState.update(STATE_ACTIVE_PROJECT_ROOT, "");
+      this.invalidateWorkspaceCache();
+      const ctx = this.collectEditorContext(true);
+      this.postToAll({ type: "editorContext", editorContext: ctx });
+      return { ok: true, editorContext: ctx };
+    }
+
+    const abs = path.resolve(trimmed);
+    let isDir = false;
+    try {
+      isDir = fs.existsSync(abs) && fs.statSync(abs).isDirectory();
+    } catch {
+      isDir = false;
+    }
+    if (!isDir) {
+      vscode.window.showWarningMessage(`Thư mục không tồn tại trên máy: ${trimmed}`);
+      return { ok: false, error: `Thư mục không tồn tại: ${trimmed}` };
+    }
+
+    const ideFolders = (vscode.workspace.workspaceFolders || []).map((f) => normalizeComparePath(f.uri.fsPath));
+    const isIdeRoot = ideFolders.includes(normalizeComparePath(abs));
+    if (!isIdeRoot) {
+      const existing = this.getCustomWorkspaces();
+      const nextList = [
+        { name: path.basename(abs) || abs, fsPath: abs, pinnedAt: Date.now() },
+        ...existing.filter((w) => normalizeComparePath(w.fsPath) !== normalizeComparePath(abs))
+      ];
+      await this.saveCustomWorkspaces(nextList);
+    }
+
+    await this.context.globalState.update(STATE_ACTIVE_PROJECT_ROOT, isIdeRoot && ideFolders.length === 1 ? "" : abs);
+    this.invalidateWorkspaceCache();
+    const ctx = this.collectEditorContext(true);
+
+    // Tag active session with the newly selected project folder
+    const sessions = this.getSessions();
+    const activeId = this.context.globalState.get(STATE_ACTIVE_SESSION);
+    const activeSess = sessions.find((s) => s.id === activeId);
+    if (activeSess) {
+      activeSess.projectName = ctx.workspaceName || path.basename(abs);
+      activeSess.projectRoot = abs;
+      await this.saveSessions(sessions);
+    }
+
+    this.postToAll({ type: "editorContext", editorContext: ctx });
+    return { ok: true, editorContext: ctx };
+  }
+
+  async pickProjectFolder() {
+    const currentDir = this.editorContext?.workingDir;
+    const defaultUri = currentDir && fs.existsSync(currentDir) ? vscode.Uri.file(currentDir) : undefined;
+    const picked = await vscode.window.showOpenDialog({
+      canSelectFolders: true,
+      canSelectFiles: false,
+      canSelectMany: false,
+      defaultUri,
+      openLabel: "Chọn thư mục dự án làm việc"
+    });
+    if (!picked || !picked.length) return;
+    await this.switchProjectRoot(picked[0].fsPath);
+  }
+
+  async removeProjectFolder(rawFsPath) {
+    if (!rawFsPath) return;
+    const targetKey = normalizeComparePath(rawFsPath);
+    const filtered = this.getCustomWorkspaces().filter((w) => normalizeComparePath(w.fsPath) !== targetKey);
+    await this.saveCustomWorkspaces(filtered);
+    if (normalizeComparePath(this.getActiveProjectRoot()) === targetKey) {
+      await this.context.globalState.update(STATE_ACTIVE_PROJECT_ROOT, "");
+    }
+    this.invalidateWorkspaceCache();
+    const ctx = this.collectEditorContext(true);
+    this.postToAll({ type: "editorContext", editorContext: ctx });
+  }
+
+  async pickComputerFile(targetWebview) {
+    const currentDir = this.editorContext?.workingDir;
+    const defaultUri = currentDir && fs.existsSync(currentDir) ? vscode.Uri.file(currentDir) : undefined;
+    const pickedUris = await vscode.window.showOpenDialog({
+      canSelectMany: true,
+      canSelectFiles: true,
+      canSelectFolders: false,
+      defaultUri,
+      openLabel: "Đính kèm tệp từ máy tính"
+    });
+    if (!pickedUris || !pickedUris.length) return;
+
+    for (const uri of pickedUris) {
+      const readRes = readNumberedTextFile(uri.fsPath, 1, 0, MAX_ATTACHMENT_CHARS);
+      if (!readRes.ok) {
+        vscode.window.showWarningMessage(`Không thể đọc ${path.basename(uri.fsPath)}: ${readRes.error}`);
+        continue;
+      }
+      targetWebview.postMessage({
+        type: "attachedContext",
+        item: {
+          id: `${uri.fsPath}:${Date.now()}:${Math.random().toString(36).slice(2, 6)}`,
+          label: path.basename(uri.fsPath),
+          path: toPosixPath(uri.fsPath),
+          languageId: path.extname(uri.fsPath).slice(1),
+          content: readRes.content
+        }
+      });
+    }
   }
 
   async getStoredCredentials() {
@@ -284,7 +454,14 @@ class Router001Controller {
 
     let scanRoots = [];
     let rootSource = "none";
-    if (hasWorkspaceFolder) {
+    const activeProjectRoot = this.getActiveProjectRoot();
+    if (activeProjectRoot) {
+      const folderName = path.basename(activeProjectRoot) || activeProjectRoot;
+      scanRoots = [{ name: folderName, fsPath: activeProjectRoot }];
+      rootSource = "custom";
+      workingDir = activeProjectRoot;
+      workspaceName = folderName;
+    } else if (hasWorkspaceFolder) {
       scanRoots = folders.map((f) => ({ name: f.name || path.basename(f.uri.fsPath), fsPath: f.uri.fsPath }));
       rootSource = "workspace";
     } else {
@@ -310,7 +487,7 @@ class Router001Controller {
       }
     }
 
-    if (!hasWorkspaceFolder && workspaceSummary?.projectRoot) {
+    if ((rootSource === "custom" || !hasWorkspaceFolder) && workspaceSummary?.projectRoot) {
       if (activeFile?.fsPath && path.isAbsolute(activeFile.fsPath)) {
         const rel = toPosixPath(path.relative(workspaceSummary.projectRoot, activeFile.fsPath));
         if (rel && !rel.startsWith("..")) activeFile.displayPath = rel;
@@ -323,14 +500,46 @@ class Router001Controller {
       }
     }
 
+    // Build deduplicated list of switchable projects (IDE folders + Custom folders + Nearby sibling folders on disk)
+    const activeRootKey = workspaceSummary?.projectRoot ? normalizeComparePath(workspaceSummary.projectRoot) : "";
+    const availableProjects = [];
+    const seenProjectKeys = new Set();
+    const pushProj = (item) => {
+      if (!item?.fsPath) return;
+      const key = normalizeComparePath(item.fsPath);
+      if (seenProjectKeys.has(key)) return;
+      seenProjectKeys.add(key);
+      availableProjects.push({
+        name: item.name || path.basename(item.fsPath) || item.fsPath,
+        fsPath: item.fsPath,
+        source: item.source,
+        isActive: key === activeRootKey
+      });
+    };
+
+    for (const f of folders) {
+      pushProj({ name: f.name || path.basename(f.uri.fsPath), fsPath: f.uri.fsPath, source: "ide" });
+    }
+    for (const cw of this.getCustomWorkspaces()) {
+      pushProj({ name: cw.name, fsPath: cw.fsPath, source: "custom" });
+    }
+    const baseForNearby = workspaceSummary?.projectRoot || folders[0]?.uri?.fsPath || "";
+    if (baseForNearby) {
+      const nearby = discoverNearbyProjects(baseForNearby, Array.from(seenProjectKeys), 10);
+      for (const nb of nearby) pushProj(nb);
+    }
+
     this.editorContext = {
       hasWorkspaceFolder,
       hasProjectFolder: Boolean(workspaceSummary && workspaceSummary.fileCount > 0),
+      isCustomProject: rootSource === "custom",
+      activeProjectRoot: activeProjectRoot || "",
       workspaceName: workspaceSummary?.projectName || workspaceName,
       workingDir,
       activeFile,
       openTabs: openTabs.slice(0, 24),
-      workspaceSummary
+      workspaceSummary,
+      availableProjects
     };
     return this.editorContext;
   }
@@ -787,48 +996,49 @@ class Router001Controller {
       return;
     }
 
+    if (kind === "computerFile") {
+      await this.pickComputerFile(targetWebview);
+      return;
+    }
+
     if (kind === "workspaceFile") {
-      const hasWorkspace = (vscode.workspace.workspaceFolders || []).length > 0;
-      if (!hasWorkspace) {
-        const pickedUris = await vscode.window.showOpenDialog({ canSelectMany: false, openLabel: "Đính kèm vào 001Router" });
-        if (!pickedUris?.length) return;
-        const uri = pickedUris[0];
-        const bytes = await vscode.workspace.fs.readFile(uri);
-        let content = Buffer.from(bytes).toString("utf8");
-        if (content.length > MAX_ATTACHMENT_CHARS) content = `${content.slice(0, MAX_ATTACHMENT_CHARS)}\n...[truncated]`;
+      const ctx = this.collectEditorContext();
+      const wsFiles = ctx.workspaceSummary?.files || [];
+      if (wsFiles.length > 0) {
+        const browseOpt = { label: "$(folder-opened) Chọn tệp bất kỳ từ máy tính...", isBrowse: true };
+        const items = [browseOpt, ...wsFiles.map((rel) => ({ label: rel, isBrowse: false }))];
+        const picked = await vscode.window.showQuickPick(items, {
+          placeHolder: `Chọn tệp trong ${ctx.workspaceName || "dự án"} hoặc mở từ máy tính`
+        });
+        if (!picked) return;
+        if (picked.isBrowse) {
+          await this.pickComputerFile(targetWebview);
+          return;
+        }
+        const resolved = resolveProjectPath(picked.label, ctx.workspaceSummary?.roots || [], {
+          allowOutside: false,
+          mustExist: true
+        });
+        if (!resolved) return;
+        const readRes = readNumberedTextFile(resolved.absPath, 1, 0, MAX_ATTACHMENT_CHARS);
+        if (!readRes.ok) {
+          vscode.window.showWarningMessage(readRes.error || "Không thể đọc tệp.");
+          return;
+        }
         targetWebview.postMessage({
           type: "attachedContext",
           item: {
-            id: `${uri.fsPath}:${Date.now()}`,
-            label: path.basename(uri.fsPath),
-            path: uri.fsPath,
-            languageId: path.extname(uri.fsPath).slice(1),
-            content
+            id: `${resolved.relPath}:${Date.now()}`,
+            label: path.basename(resolved.relPath),
+            path: resolved.relPath,
+            languageId: path.extname(resolved.relPath).slice(1),
+            content: readRes.content
           }
         });
         return;
       }
 
-      const uris = await vscode.workspace.findFiles("**/*", "**/{node_modules,.git,dist,build,.next}/**", 300);
-      if (!uris.length) return;
-      const items = uris
-        .map((uri) => ({ label: vscode.workspace.asRelativePath(uri, false), uri }))
-        .sort((a, b) => a.label.localeCompare(b.label));
-      const picked = await vscode.window.showQuickPick(items, { placeHolder: "Chọn tệp để đính kèm vào ngữ cảnh 001Router" });
-      if (!picked) return;
-      const bytes = await vscode.workspace.fs.readFile(picked.uri);
-      let content = Buffer.from(bytes).toString("utf8");
-      if (content.length > MAX_ATTACHMENT_CHARS) content = `${content.slice(0, MAX_ATTACHMENT_CHARS)}\n...[truncated]`;
-      targetWebview.postMessage({
-        type: "attachedContext",
-        item: {
-          id: `${picked.label}:${Date.now()}`,
-          label: picked.label,
-          path: picked.label,
-          languageId: path.extname(picked.label).slice(1),
-          content
-        }
-      });
+      await this.pickComputerFile(targetWebview);
     }
   }
 
@@ -922,6 +1132,10 @@ class Router001Controller {
     const userDisplayText = promptText || `(Đính kèm ${attachments.length} tệp)`;
     if (session.title === "Untitled" && promptText) {
       session.title = promptText.slice(0, 46).replace(/\s+/g, " ");
+    }
+    if (editorContext.workspaceName) {
+      session.projectName = editorContext.workspaceName;
+      session.projectRoot = editorContext.workspaceSummary?.projectRoot || editorContext.workingDir || "";
     }
 
     const contextSections = [];
@@ -1148,9 +1362,12 @@ class Router001Controller {
 
   async createNewChat() {
     const sessions = this.getSessions();
+    const ctx = this.collectEditorContext();
     const fresh = {
       id: crypto.randomUUID(),
       title: "Untitled",
+      projectName: ctx.workspaceName || "",
+      projectRoot: ctx.workspaceSummary?.projectRoot || ctx.workingDir || "",
       bookmarked: false,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
@@ -1234,6 +1451,18 @@ class Router001Controller {
           this.postToAll({ type: "editorContext", editorContext: ctx });
           break;
         }
+        case "pickProjectFolder":
+          await this.pickProjectFolder();
+          break;
+        case "switchProjectRoot":
+          await this.switchProjectRoot(msg.fsPath);
+          break;
+        case "removeProjectFolder":
+          await this.removeProjectFolder(msg.fsPath);
+          break;
+        case "pickComputerFile":
+          await this.pickComputerFile(webview);
+          break;
         case "newChat":
           await this.createNewChat();
           break;

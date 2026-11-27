@@ -28,7 +28,7 @@
     { "source": "/v1beta/(.*)", "destination": "/api/index.js" },
     { "source": "/health", "destination": "/api/index.js" },
     {
-      "source": "/((?!assets/|providers/|favicon|manifest|robots\\.txt).*)",
+      "source": "/((?!assets/|providers/|favicon|manifest|robots\\.txt|001router-code\\.vsix).*)",
       "destination": "/index.html"
     }
   ]

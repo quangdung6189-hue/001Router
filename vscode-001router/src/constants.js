@@ -9,6 +9,8 @@ const STATE_MODE = "001router.mode";
 const STATE_AUTO_ACTIVE_FILE = "001router.autoActiveFile";
 const STATE_AUTO_WORKSPACE = "001router.autoWorkspace";
 const STATE_PERMISSIONS = "001router.permissions.v2";
+const STATE_CUSTOM_WORKSPACES = "001router.customWorkspaces.v1";
+const STATE_ACTIVE_PROJECT_ROOT = "001router.activeProjectRoot.v1";
 
 const MAX_SESSIONS = 40;
 const MAX_MESSAGES_PER_SESSION = 100;
@@ -164,6 +166,8 @@ module.exports = {
   STATE_AUTO_ACTIVE_FILE,
   STATE_AUTO_WORKSPACE,
   STATE_PERMISSIONS,
+  STATE_CUSTOM_WORKSPACES,
+  STATE_ACTIVE_PROJECT_ROOT,
   MAX_SESSIONS,
   MAX_MESSAGES_PER_SESSION,
   MAX_ATTACHMENT_CHARS,

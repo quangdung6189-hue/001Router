@@ -14,6 +14,10 @@ const {
   ApprovalQueue
 } = require("../vscode-001router/src/permissions/permissionManager.js");
 const { KNOWN_TOOL_NAMES, getToolsForMode } = require("../vscode-001router/src/tools/toolDefinitions.js");
+const { discoverNearbyProjects } = require("../vscode-001router/src/workspace/scanner.js");
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 describe("001Router Extension v1.4 — Anti-Corruption SSE, CloudCode Offsets & Permission Matrix", () => {
   it("1. cloudCodeChunkToOpenAI assigns non-colliding sequential tool_call indices across SSE chunks", () => {
@@ -160,5 +164,25 @@ describe("001Router Extension v1.4 — Anti-Corruption SSE, CloudCode Offsets & 
     assert.ok(askNames.includes("read_file"));
     assert.ok(!askNames.includes("write_to_file"));
     assert.ok(!askNames.includes("execute_command"));
+  });
+
+  it("8. discoverNearbyProjects finds sibling project directories on disk while excluding active root and system dirs", () => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), "001router-proj-"));
+    try {
+      const curProj = path.join(base, "proj-active");
+      const otherProj = path.join(base, "proj-other");
+      const plainDir = path.join(base, "notes");
+      fs.mkdirSync(curProj);
+      fs.mkdirSync(otherProj);
+      fs.mkdirSync(plainDir);
+      fs.writeFileSync(path.join(otherProj, "package.json"), "{}");
+
+      const found = discoverNearbyProjects(curProj, [curProj], 10);
+      assert.ok(found.length >= 2);
+      assert.equal(found[0].name, "proj-other");
+      assert.ok(!found.some((p) => p.name === "proj-active"));
+    } finally {
+      fs.rmSync(base, { recursive: true, force: true });
+    }
   });
 });

@@ -385,12 +385,89 @@ function hydrateProjectContextFiles(promptText, editorContext, existingAttachmen
   return { block, hydratedFiles };
 }
 
+function normalizeComparePath(p) {
+  const resolved = path.resolve(String(p || ""));
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+const SKIP_SIBLING_DIRS = new Set([
+  "$recycle.bin",
+  "system volume information",
+  "windows",
+  "program files",
+  "program files (x86)",
+  "programdata",
+  "appdata",
+  "recovery",
+  "perflogs",
+  "msocache",
+  "node_modules",
+  "temp",
+  "tmp"
+]);
+
+/**
+ * Discover nearby sibling project folders next to the current workspace so users
+ * can switch projects on disk with 1 click without reopening VS Code.
+ */
+function discoverNearbyProjects(baseDir, excludePaths = [], limit = 12) {
+  if (!baseDir) return [];
+  const parent = path.dirname(path.resolve(baseDir));
+  if (!parent || parent === path.resolve(baseDir)) return [];
+
+  const excluded = new Set((excludePaths || []).map(normalizeComparePath));
+  let entries;
+  try {
+    entries = fs.readdirSync(parent, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+
+  const results = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const name = entry.name;
+    if (!name || name.startsWith(".") || name.startsWith("$")) continue;
+    if (SKIP_SIBLING_DIRS.has(name.toLowerCase()) || IGNORED_DIRS.has(name)) continue;
+    const absPath = path.join(parent, name);
+    if (excluded.has(normalizeComparePath(absPath))) continue;
+
+    let hasMarker = false;
+    try {
+      for (const marker of PROJECT_ROOT_MARKERS) {
+        if (fs.existsSync(path.join(absPath, marker))) {
+          hasMarker = true;
+          break;
+        }
+      }
+    } catch {
+      continue;
+    }
+
+    results.push({
+      name,
+      fsPath: absPath,
+      source: "nearby",
+      hasMarker
+    });
+  }
+
+  results.sort((a, b) => {
+    if (a.hasMarker !== b.hasMarker) return a.hasMarker ? -1 : 1;
+    return a.name.localeCompare(b.name);
+  });
+
+  return results.slice(0, limit).map(({ name, fsPath, source }) => ({ name, fsPath, source }));
+}
+
 module.exports = {
   toPosixPath,
+  normalizeComparePath,
   isBinaryFileName,
   formatErrorMessage,
   stripAnsi,
   findProjectRootFromPath,
+  discoverNearbyProjects,
   scanWorkspaceRoots,
   resolveProjectPath,
   readNumberedTextFile,

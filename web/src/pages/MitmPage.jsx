@@ -4,6 +4,7 @@ import {
   ArrowLeft,
   ChevronDown,
   ChevronRight,
+  Download,
   KeyRound,
   Puzzle,
   Search,
@@ -185,15 +186,25 @@ export function MitmPage() {
             </div>
           </div>
 
-          <button
-            type="button"
-            disabled={provisioning}
-            onClick={handleProvisionExtensionKey}
-            className="r-btn-primary inline-flex items-center gap-1.5 px-3.5 py-2 text-xs"
-          >
-            <KeyRound className="h-3.5 w-3.5" aria-hidden="true" />
-            {provisioning ? 'Creating…' : 'Create Extension Key'}
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            <a
+              href="/001router-code.vsix"
+              download="001router-code-1.5.0.vsix"
+              className="r-btn-secondary inline-flex items-center gap-1.5 px-3.5 py-2 text-xs"
+            >
+              <Download className="h-3.5 w-3.5" aria-hidden="true" />
+              Download VSIX v1.5.0
+            </a>
+            <button
+              type="button"
+              disabled={provisioning}
+              onClick={handleProvisionExtensionKey}
+              className="r-btn-primary inline-flex items-center gap-1.5 px-3.5 py-2 text-xs"
+            >
+              <KeyRound className="h-3.5 w-3.5" aria-hidden="true" />
+              {provisioning ? 'Creating…' : 'Create Extension Key'}
+            </button>
+          </div>
         </div>
 
         <div className="grid gap-3 sm:grid-cols-2">

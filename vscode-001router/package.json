@@ -1,8 +1,8 @@
 {
   "name": "001router-code",
   "displayName": "001Router",
-  "description": "Autonomous AI Coding Agent powered by 001Router — Grok 3D Singularity Core, Cline-Grade Live Task Timeline, Full Terminal & File Permissions, Unified Multi-Provider Model & Ethereal Effort Engine.",
-  "version": "1.4.0",
+  "description": "Autonomous AI Coding Agent powered by 001Router — Grok 3D Singularity Core, Precision Effort Rail, Multi-Project Switcher, Cline-Grade Task Trace & Granular Permissions.",
+  "version": "1.5.0",
   "publisher": "001router",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -70,10 +70,7 @@
         "command": "001router.openPanel",
         "title": "Open in Editor Tab",
         "category": "001Router",
-        "icon": {
-          "light": "media/icon.svg",
-          "dark": "media/icon.svg"
-        }
+        "icon": "$(split-horizontal)"
       },
       {
         "command": "001router.focus",
@@ -139,7 +136,7 @@
   },
   "scripts": {
     "package:vsix": "node ./scripts/pack-vsix.js",
-    "publish:ovsx": "npx ovsx publish ./001router-code-1.4.0.vsix",
+    "publish:ovsx": "npx ovsx publish ./001router-code-1.5.0.vsix",
     "publish:vsce": "npx @vscode/vsce publish"
   }
 }
