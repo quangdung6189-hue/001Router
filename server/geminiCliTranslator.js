@@ -1042,10 +1042,13 @@ export function cloudCodeToOpenAIResponse(data, model) {
     ],
     usage: {
       prompt_tokens: Number(usage.promptTokenCount) || 0,
-      completion_tokens: Number(usage.candidatesTokenCount) || 0,
+      completion_tokens:
+        (Number(usage.candidatesTokenCount) || 0) + (Number(usage.thoughtsTokenCount) || 0),
       total_tokens:
         Number(usage.totalTokenCount) ||
-        (Number(usage.promptTokenCount) || 0) + (Number(usage.candidatesTokenCount) || 0)
+        (Number(usage.promptTokenCount) || 0) +
+          (Number(usage.candidatesTokenCount) || 0) +
+          (Number(usage.thoughtsTokenCount) || 0)
     }
   };
 }

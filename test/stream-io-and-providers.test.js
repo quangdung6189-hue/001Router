@@ -1243,4 +1243,171 @@ describe("Streaming I/O, Fail-Fast Errors, Disconnect Logging & Cross-Provider V
     assert.deepEqual(modelTurn.parts[0].functionCall.args, {});
     assert.deepEqual(modelTurn.parts[1].functionCall.args, {});
   });
+
+  it("13. Cloud Code thinking prelude flushes keep-alive with fallback remaining, counts thoughtsTokenCount, keeps Frame-1 fallback intact, and vercel.json enables Fluid Compute 300s", async () => {
+    await app.storage.update((d) => {
+      const ag = d.providers.find((p) => p.id === "p-ag");
+      if (ag && !ag.apiKeys.some((k) => k.id === "k-ag-2")) {
+        ag.apiKeys.push({
+          id: "k-ag-2",
+          label: "AG2",
+          authMethod: "antigravity",
+          key: "ya29.mock-ag-token-2",
+          oauthMeta: {
+            projectId: "proj-ag-2",
+            tier: "pro",
+            tierLabel: "Pro",
+            availableModels: [
+              { id: "gemini-4-neon-xhigh", kind: "chat" },
+              { id: "gemini-4-hydrogen-high", kind: "chat" }
+            ]
+          },
+          enabled: true
+        });
+      }
+    });
+
+    const enc = new TextEncoder();
+    try {
+      // 13a: Prelude frame with usageMetadata + empty text during slow thinking flushes SSE
+      // headers + : keep-alive immediately even when hasFallbackRemaining is true, and counts
+      // thoughtsTokenCount in completionTokens without shifting agObjs[0] delta order.
+      app.locals.streamHeartbeatMs = 40;
+      app.locals.cloudCodeFetchImpl = async () => {
+        const body = new ReadableStream({
+          start(controller) {
+            controller.enqueue(
+              enc.encode(
+                `data: ${JSON.stringify({
+                  response: {
+                    candidates: [{ content: { role: "model", parts: [{ text: "" }] } }],
+                    usageMetadata: {
+                      promptTokenCount: 57320,
+                      cachedContentTokenCount: 57214,
+                      candidatesTokenCount: 1,
+                      thoughtsTokenCount: 420
+                    }
+                  }
+                })}\n\n`
+              )
+            );
+            setTimeout(() => {
+              controller.enqueue(
+                enc.encode(
+                  `data: ${JSON.stringify({
+                    response: {
+                      candidates: [
+                        { content: { parts: [{ text: "Step by step", thought: true }] } }
+                      ],
+                      usageMetadata: {
+                        promptTokenCount: 57320,
+                        cachedContentTokenCount: 57214,
+                        candidatesTokenCount: 1,
+                        thoughtsTokenCount: 1200
+                      }
+                    }
+                  })}\n\n`
+                )
+              );
+              controller.enqueue(
+                enc.encode(
+                  `data: ${JSON.stringify({
+                    response: {
+                      candidates: [
+                        {
+                          content: { parts: [{ text: "Final answer." }] },
+                          finishReason: "STOP"
+                        }
+                      ],
+                      usageMetadata: {
+                        promptTokenCount: 57320,
+                        cachedContentTokenCount: 57214,
+                        candidatesTokenCount: 35,
+                        thoughtsTokenCount: 1200
+                      }
+                    }
+                  })}\n\n`
+                )
+              );
+              controller.close();
+            }, 110);
+          }
+        });
+        return new Response(body, {
+          status: 200,
+          headers: { "content-type": "text/event-stream" }
+        });
+      };
+
+      const resA = await postV1("/v1/chat/completions", {
+        model: "test-ag/gemini-4-neon-xhigh",
+        stream: true,
+        messages: [{ role: "user", content: "long thinking test" }]
+      });
+      assert.equal(resA.status, 200);
+      const rawA = await resA.text();
+      assert.match(rawA, /: keep-alive/, "Must flush : keep-alive during silent Cloud Code prelude");
+      const framesA = parseSSE(rawA);
+      assert.equal(framesA.at(-1)?.data, "[DONE]");
+      const objsA = framesA.slice(0, -1).map((f) => JSON.parse(f.data));
+      assert.equal(objsA[0].choices[0].delta.reasoning_content, "Step by step");
+      assert.equal(objsA.at(-1).choices[0].delta.content, "Final answer.");
+      assert.equal(objsA.at(-1).choices[0].finish_reason, "stop");
+      assert.equal(objsA.at(-1).usage?.completion_tokens, 1235);
+      const latestLog = app.storage.getLogs()[0];
+      assert.equal(latestLog.promptTokens, 57320);
+      assert.equal(latestLog.cachedTokens, 57214);
+      assert.equal(latestLog.completionTokens, 1235);
+
+      // 13b: Pre-first-byte Frame-1 error STILL falls back to second key cleanly
+      let callCount = 0;
+      app.locals.cloudCodeFetchImpl = async () => {
+        callCount += 1;
+        const payload =
+          callCount === 1
+            ? `data: ${JSON.stringify({ error: { code: 500, message: "Key 1 failed upfront" } })}\n\n`
+            : `data: ${JSON.stringify({
+                response: {
+                  candidates: [
+                    { content: { parts: [{ text: "Recovered on key 2" }] }, finishReason: "STOP" }
+                  ]
+                }
+              })}\n\n`;
+        return new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(enc.encode(payload));
+              controller.close();
+            }
+          }),
+          { status: 200, headers: { "content-type": "text/event-stream" } }
+        );
+      };
+
+      const resB = await postV1("/v1/chat/completions", {
+        model: "test-ag/gemini-4-neon-xhigh",
+        stream: true,
+        messages: [{ role: "user", content: "fallback check" }]
+      });
+      assert.equal(resB.status, 200);
+      assert.equal(callCount, 2);
+      const framesB = parseSSE(await resB.text());
+      const objsB = framesB.slice(0, -1).map((f) => JSON.parse(f.data));
+      assert.equal(objsB[0].choices[0].delta.content, "Recovered on key 2");
+      assert.equal(app.storage.getLogs()[0].fallbackHops, 1);
+
+      // 13c: vercel.json enables Fluid Compute + 300s maxDuration (eliminating 60s hard cutoff)
+      const vercelCfg = JSON.parse(
+        await fs.readFile(path.resolve("vercel.json"), "utf8")
+      );
+      assert.equal(vercelCfg.fluid, true);
+      assert.equal(vercelCfg.functions?.["api/index.js"]?.maxDuration, 300);
+    } finally {
+      delete app.locals.streamHeartbeatMs;
+      await app.storage.update((d) => {
+        const ag = d.providers.find((p) => p.id === "p-ag");
+        if (ag) ag.apiKeys = ag.apiKeys.filter((k) => k.id !== "k-ag-2");
+      });
+    }
+  });
 });

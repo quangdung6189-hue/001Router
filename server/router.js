@@ -2476,7 +2476,9 @@ export class RouterService {
                   const rawCloud = unwrapCloudCodeResponse(upstreamJson);
                   const usageMeta = rawCloud?.usageMetadata || {};
                   promptTokens = Number(usageMeta.promptTokenCount) || 0;
-                  completionTokens = Number(usageMeta.candidatesTokenCount) || 0;
+                  completionTokens =
+                    (Number(usageMeta.candidatesTokenCount) || 0) +
+                    (Number(usageMeta.thoughtsTokenCount) || 0);
                   cachedTokens = Number(usageMeta.cachedContentTokenCount) || 0;
                   upstreamJson = cloudCodeToOpenAIResponse(upstreamJson, target.upstreamModel);
                 }
@@ -2689,7 +2691,7 @@ export class RouterService {
                   Number(
                     this.options?.streamHeartbeatMs ??
                       this.options?.appLocals?.streamHeartbeatMs
-                  ) || 15_000,
+                  ) || 10_000,
                 cloudCode: isGeminiCliKey,
                 codexResponses: isCodexOAuth,
                 onFirstByteSent: () => {
@@ -2699,7 +2701,7 @@ export class RouterService {
 
               clearTimeout(timer);
 
-              if (streamResult.failedBeforeFirstByte) {
+              if (streamResult.failedBeforeFirstByte && !streamResult.abortedByClient) {
                 const secrets = this._allSecretKeys();
                 const cleanMsg = sanitizeSecrets(
                   streamResult.error || "Upstream stream error",
@@ -2994,7 +2996,7 @@ export class RouterService {
     abortUpstream,
     hasFallbackRemaining = false,
     streamIdleTimeoutMs = 120_000,
-    streamHeartbeatMs = 15_000,
+    streamHeartbeatMs = 10_000,
     onFirstByteSent,
     cloudCode = false,
     codexResponses = false
@@ -3003,6 +3005,7 @@ export class RouterService {
     const decoder = new TextDecoder();
     let headersFlushed = false;
     let firstByteSent = false;
+    let upstreamAcceptedNonError = false;
     let upstreamDataSeen = false;
     let timerCleared = false;
     let idleTimedOut = false;
@@ -3095,7 +3098,7 @@ export class RouterService {
       const tickMs = Math.max(20, Math.min(streamHeartbeatMs, 5000));
       heartbeatTimer = setInterval(() => {
         if (isClientAborted() || res.writableEnded || res.destroyed) return;
-        if (!firstByteSent && hasFallbackRemaining) return;
+        if (!firstByteSent && !upstreamAcceptedNonError && hasFallbackRemaining) return;
         if (Date.now() - lastWriteAt < Math.max(0, streamHeartbeatMs - 5)) return;
         writeToClient(": keep-alive\n\n");
       }, tickMs);
@@ -3198,8 +3201,10 @@ export class RouterService {
           const raw = unwrapCloudCodeResponse(parsed);
           const usageMeta = raw?.usageMetadata || {};
           if (usageMeta.promptTokenCount) promptTokens = Number(usageMeta.promptTokenCount) || 0;
-          if (usageMeta.candidatesTokenCount) {
-            completionTokens = Number(usageMeta.candidatesTokenCount) || 0;
+          const candTokens = Number(usageMeta.candidatesTokenCount) || 0;
+          const thoughtTokens = Number(usageMeta.thoughtsTokenCount) || 0;
+          if (candTokens || thoughtTokens) {
+            completionTokens = Math.max(completionTokens, candTokens + thoughtTokens);
           }
           if (usageMeta.cachedContentTokenCount) {
             cachedTokens = Number(usageMeta.cachedContentTokenCount) || 0;
@@ -3215,12 +3220,28 @@ export class RouterService {
             };
           }
 
+          if (
+            !upstreamAcceptedNonError &&
+            (Boolean(raw?.usageMetadata) ||
+              (Array.isArray(raw?.candidates) && raw.candidates.length > 0))
+          ) {
+            upstreamAcceptedNonError = true;
+          }
+
           const chunk = cloudCodeChunkToOpenAI(parsed, requestedModel, chunkId, {
             hasPriorToolCalls: sawToolCalls,
             toolCallIndexOffset: nextToolCallIndex,
             usage: lastUsage
           });
-          if (!chunk) return;
+          if (!chunk) {
+            // Upstream accepted the request with a valid prelude frame (e.g. usageMetadata
+            // or empty thinking part before visible tokens). Flush SSE headers + keep-alive
+            // immediately so reverse proxies and client TTFB timers do not stall at 0 bytes.
+            if (upstreamAcceptedNonError && !headersFlushed) {
+              writeToClient(": keep-alive\n\n");
+            }
+            return;
+          }
           upstreamDataSeen = true;
 
           const emittedTools = chunk.choices?.[0]?.delta?.tool_calls;
@@ -3423,7 +3444,14 @@ export class RouterService {
           const chunk = codexSseEventToOpenAIChunk(event, parsed, codexState);
           if (!chunk) {
             const rawErr = extractSSEErrorMessage(event, parsed);
-            if (rawErr) streamFailure = rawErr;
+            if (rawErr) {
+              streamFailure = rawErr;
+              return;
+            }
+            if (!upstreamAcceptedNonError && (parsed?.type || event)) {
+              upstreamAcceptedNonError = true;
+              if (!headersFlushed) writeToClient(": keep-alive\n\n");
+            }
             return;
           }
           if (chunk.error) {
@@ -3800,13 +3828,16 @@ export class RouterService {
             streamFailure = sseErr;
             return;
           }
+          upstreamAcceptedNonError = true;
           upstreamDataSeen = true;
           if (transformer.mode === "openai") {
             const out = transformer.pushChunk(parsed);
             if (out) writeToClient(out);
+            else if (!headersFlushed) writeToClient(": keep-alive\n\n");
           } else {
             const out = transformer.pushEvent(event, parsed);
             if (out) writeToClient(out);
+            else if (!headersFlushed) writeToClient(": keep-alive\n\n");
             if ((parsed.type || event) === "message_stop") {
               doneSeen = true;
             }

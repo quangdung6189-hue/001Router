@@ -47,7 +47,7 @@ export function getDefaultUpstreamDispatcher() {
         autoSelectFamily: true,
         autoSelectFamilyAttemptTimeout: 250
       },
-      headersTimeout: 120_000,
+      headersTimeout: 240_000,
       bodyTimeout: 0,
       keepAliveTimeout: 90_000,
       keepAliveMaxTimeout: 300_000
@@ -136,7 +136,7 @@ export function createGuardedAgent(policy) {
       }
       return connector(opts, callback);
     },
-    headersTimeout: 120_000,
+    headersTimeout: 240_000,
     bodyTimeout: 0,
     keepAliveTimeout: 90_000,
     keepAliveMaxTimeout: 300_000
@@ -517,7 +517,7 @@ export function getProxyDispatcher(provider, storage) {
     try {
       agent = new GuardedProxyAgent({
         uri: effectiveUrl,
-        headersTimeout: 120_000,
+        headersTimeout: 240_000,
         bodyTimeout: 0,
         keepAliveTimeout: 90_000,
         keepAliveMaxTimeout: 300_000,
