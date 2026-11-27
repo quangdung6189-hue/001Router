@@ -266,10 +266,10 @@ describe("001Router IDE Extension API & VSIX Packaging", () => {
     assert.equal(payload.catalog.providers.length, 4);
   });
 
-  it("4. packages a valid v1.5.0 .vsix archive with modular agent engine, Grok 3D core, and brand assets", async () => {
+  it("4. packages a valid v1.6.0 .vsix archive with modular agent engine, Grok 3D core, and brand assets", async () => {
     const packed = packVsix();
     assert.ok(packed.bytes > 5000);
-    assert.ok(packed.outPath.endsWith("001router-code-1.5.0.vsix"));
+    assert.ok(packed.outPath.endsWith("001router-code-1.6.0.vsix"));
     const vsixBuf = await fs.readFile(packed.outPath);
     // ZIP PK\x03\x04 signature + required OPC entries inside archive
     assert.equal(vsixBuf[0], 0x50);

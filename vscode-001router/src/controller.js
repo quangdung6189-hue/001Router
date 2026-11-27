@@ -19,6 +19,7 @@ const {
   STATE_PERMISSIONS,
   STATE_CUSTOM_WORKSPACES,
   STATE_ACTIVE_PROJECT_ROOT,
+  NO_PROJECT_SENTINEL,
   MAX_SESSIONS,
   MAX_MESSAGES_PER_SESSION,
   MAX_ATTACHMENT_CHARS,
@@ -160,6 +161,7 @@ class Router001Controller {
 
   getActiveProjectRoot() {
     const raw = this.context.globalState.get(STATE_ACTIVE_PROJECT_ROOT);
+    if (raw === NO_PROJECT_SENTINEL) return NO_PROJECT_SENTINEL;
     if (typeof raw !== "string" || !raw.trim()) return "";
     const abs = path.resolve(raw.trim());
     try {
@@ -172,6 +174,22 @@ class Router001Controller {
 
   async switchProjectRoot(rawFsPath) {
     const trimmed = String(rawFsPath || "").trim();
+    if (trimmed === NO_PROJECT_SENTINEL) {
+      await this.context.globalState.update(STATE_ACTIVE_PROJECT_ROOT, NO_PROJECT_SENTINEL);
+      this.invalidateWorkspaceCache();
+      const ctx = this.collectEditorContext(true);
+      const sessions = this.getSessions();
+      const activeId = this.context.globalState.get(STATE_ACTIVE_SESSION);
+      const activeSess = sessions.find((s) => s.id === activeId);
+      if (activeSess) {
+        activeSess.projectName = "";
+        activeSess.projectRoot = "";
+        activeSess.isNoProject = true;
+        await this.saveSessions(sessions);
+      }
+      this.postToAll({ type: "editorContext", editorContext: ctx });
+      return { ok: true, editorContext: ctx };
+    }
     if (!trimmed || trimmed === "__ide__") {
       await this.context.globalState.update(STATE_ACTIVE_PROJECT_ROOT, "");
       this.invalidateWorkspaceCache();
@@ -455,7 +473,13 @@ class Router001Controller {
     let scanRoots = [];
     let rootSource = "none";
     const activeProjectRoot = this.getActiveProjectRoot();
-    if (activeProjectRoot) {
+    const isNoProject = activeProjectRoot === NO_PROJECT_SENTINEL;
+    if (isNoProject) {
+      scanRoots = [];
+      rootSource = "none";
+      workingDir = os.homedir();
+      workspaceName = "";
+    } else if (activeProjectRoot) {
       const folderName = path.basename(activeProjectRoot) || activeProjectRoot;
       scanRoots = [{ name: folderName, fsPath: activeProjectRoot }];
       rootSource = "custom";
@@ -476,7 +500,7 @@ class Router001Controller {
     }
 
     let workspaceSummary = null;
-    if (scanRoots.length > 0) {
+    if (!isNoProject && scanRoots.length > 0) {
       const cacheKey = `${rootSource}|${scanRoots.map((r) => r.fsPath).join("|")}`;
       const now = Date.now();
       if (!forceRescan && this._workspaceScanCache?.key === cacheKey && now - this._workspaceScanCache.at < 4000) {
@@ -500,8 +524,8 @@ class Router001Controller {
       }
     }
 
-    // Build deduplicated list of switchable projects (IDE folders + Custom folders + Nearby sibling folders on disk)
-    const activeRootKey = workspaceSummary?.projectRoot ? normalizeComparePath(workspaceSummary.projectRoot) : "";
+    // Build deduplicated list of switchable projects (IDE folders + Custom folders + Nearby sibling projects on disk)
+    const activeRootKey = !isNoProject && workspaceSummary?.projectRoot ? normalizeComparePath(workspaceSummary.projectRoot) : "";
     const availableProjects = [];
     const seenProjectKeys = new Set();
     const pushProj = (item) => {
@@ -513,7 +537,7 @@ class Router001Controller {
         name: item.name || path.basename(item.fsPath) || item.fsPath,
         fsPath: item.fsPath,
         source: item.source,
-        isActive: key === activeRootKey
+        isActive: !isNoProject && key === activeRootKey
       });
     };
 
@@ -531,10 +555,11 @@ class Router001Controller {
 
     this.editorContext = {
       hasWorkspaceFolder,
-      hasProjectFolder: Boolean(workspaceSummary && workspaceSummary.fileCount > 0),
+      hasProjectFolder: Boolean(!isNoProject && workspaceSummary && workspaceSummary.fileCount > 0),
+      isNoProject,
       isCustomProject: rootSource === "custom",
       activeProjectRoot: activeProjectRoot || "",
-      workspaceName: workspaceSummary?.projectName || workspaceName,
+      workspaceName: isNoProject ? "" : workspaceSummary?.projectName || workspaceName,
       workingDir,
       activeFile,
       openTabs: openTabs.slice(0, 24),
@@ -1098,10 +1123,15 @@ class Router001Controller {
     }
 
     const editorContext = this.collectEditorContext(true);
-    const ws = includeWorkspace ? editorContext.workspaceSummary : null;
-    const toolsEnabled = Boolean(includeWorkspace || permissions.executeTerminal || permissions.webAccess);
+    const isNoProject = Boolean(editorContext.isNoProject);
+    const effectiveIncludeWorkspace = !isNoProject && includeWorkspace;
+    const effectiveIncludeActiveFile = !isNoProject && includeActiveFile;
+    const ws = effectiveIncludeWorkspace ? editorContext.workspaceSummary : null;
+    const toolsEnabled = isNoProject
+      ? Boolean(permissions.webAccess)
+      : Boolean(effectiveIncludeWorkspace || permissions.executeTerminal || permissions.webAccess);
 
-    if (includeActiveFile && editorContext.activeFile) {
+    if (effectiveIncludeActiveFile && editorContext.activeFile) {
       const already = attachments.some(
         (a) => a.path === editorContext.activeFile.displayPath || a.path === editorContext.activeFile.fsPath
       );
@@ -1111,7 +1141,7 @@ class Router001Controller {
       }
     }
 
-    const hydrated = includeWorkspace
+    const hydrated = effectiveIncludeWorkspace
       ? hydrateProjectContextFiles(promptText, editorContext, attachments)
       : { block: "", hydratedFiles: [] };
 
@@ -1133,9 +1163,14 @@ class Router001Controller {
     if (session.title === "Untitled" && promptText) {
       session.title = promptText.slice(0, 46).replace(/\s+/g, " ");
     }
-    if (editorContext.workspaceName) {
+    if (isNoProject) {
+      session.projectName = "";
+      session.projectRoot = "";
+      session.isNoProject = true;
+    } else if (editorContext.workspaceName) {
       session.projectName = editorContext.workspaceName;
       session.projectRoot = editorContext.workspaceSummary?.projectRoot || editorContext.workingDir || "";
+      session.isNoProject = false;
     }
 
     const contextSections = [];
@@ -1193,7 +1228,7 @@ class Router001Controller {
     };
 
     const apiMessages = [
-      { role: "system", content: buildSystemPrompt(mode, editorContext, includeWorkspace, toolsEnabled, permissions) },
+      { role: "system", content: buildSystemPrompt(mode, editorContext, effectiveIncludeWorkspace, toolsEnabled, permissions) },
       ...session.messages
         .filter((m) => m.role === "user" || m.role === "assistant")
         .slice(-16)
@@ -1231,7 +1266,7 @@ class Router001Controller {
         mode,
         apiMessages,
         editorContext,
-        includeWorkspace,
+        includeWorkspace: effectiveIncludeWorkspace,
         toolsEnabled,
         permissions,
         approvalQueue: this.approvalQueue,

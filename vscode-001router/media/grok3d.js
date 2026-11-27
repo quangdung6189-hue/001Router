@@ -536,11 +536,26 @@
     }, { passive: true });
   }
 
+  let resizeObs = null;
+  if (typeof ResizeObserver === "function") {
+    resizeObs = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const inst = instances.get(entry.target);
+        if (inst && entry.target.isConnected) {
+          renderCoreFrame(inst, simTime || 1.4);
+        }
+      }
+    });
+  }
+
   function mountAll(rootEl) {
     const scope = rootEl || document;
     // Prune disconnected canvases
     for (const canvas of instances.keys()) {
-      if (!canvas.isConnected) instances.delete(canvas);
+      if (!canvas.isConnected) {
+        resizeObs?.unobserve(canvas);
+        instances.delete(canvas);
+      }
     }
     const nodes = scope.querySelectorAll("canvas[data-grok3d]");
     nodes.forEach((canvas) => {
@@ -567,6 +582,7 @@
           lastPy: 0
         };
         instances.set(canvas, inst);
+        resizeObs?.observe(canvas);
         if (variant === "hero") bindHeroInteraction(canvas, inst);
       }
     });

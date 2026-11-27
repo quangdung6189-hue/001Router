@@ -1,6 +1,19 @@
 "use strict";
 
 function buildSystemPrompt(mode, editorContext, includeWorkspace = true, toolsEnabled = false, permissions = {}) {
+  if (editorContext?.isNoProject) {
+    const webNote =
+      toolsEnabled && permissions?.webAccess !== false
+        ? " You may use web_fetch only if the user asks to inspect a URL."
+        : "";
+    return (
+      "You are 001Router Axiom, an intelligent AI assistant running in No-Project Free Chat mode. " +
+      "No local workspace or project directory is attached, and you must not assume or reference any local project files unless the user explicitly attaches them in the message. " +
+      "Respond naturally, directly, clearly, and concisely in the user's language." +
+      webNote
+    );
+  }
+
   const parts = [];
   const ws = includeWorkspace ? editorContext?.workspaceSummary : null;
 

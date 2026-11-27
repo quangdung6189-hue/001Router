@@ -189,11 +189,11 @@ export function MitmPage() {
           <div className="flex flex-wrap items-center gap-2">
             <a
               href="/001router-code.vsix"
-              download="001router-code-1.5.0.vsix"
+              download="001router-code-1.6.0.vsix"
               className="r-btn-secondary inline-flex items-center gap-1.5 px-3.5 py-2 text-xs"
             >
               <Download className="h-3.5 w-3.5" aria-hidden="true" />
-              Download VSIX v1.5.0
+              Download VSIX v1.6.0
             </a>
             <button
               type="button"

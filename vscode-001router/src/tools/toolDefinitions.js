@@ -235,13 +235,17 @@ const KNOWN_TOOL_NAMES = new Set([
   ...Object.keys(TOOL_ALIASES)
 ]);
 
-function getToolsForMode(mode, permissions) {
+function getToolsForMode(mode, permissions, opts = {}) {
+  if (opts?.noProject) {
+    // In No-Project free-chat mode, never expose local workspace/filesystem/terminal tools
+    return ALL_TOOLS.filter((t) => {
+      if (t.function.name === "web_fetch") return permissions?.webAccess !== false;
+      return false;
+    }).map(({ type, function: fn }) => ({ type, function: fn }));
+  }
   const isReadOnlyMode = mode === "ask" || mode === "plan";
   return ALL_TOOLS.filter((t) => {
     if (isReadOnlyMode && !t.readOnly) return false;
-    if (t.function.name === "web_fetch" && permissions?.webAccess === false && permissions?.preset !== "ask") {
-      // Still expose web_fetch if preset is "ask" so user can approve on demand; only hide if explicitly unusable
-    }
     return true;
   }).map(({ type, function: fn }) => ({ type, function: fn }));
 }

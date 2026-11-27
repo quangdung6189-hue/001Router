@@ -401,6 +401,9 @@ const SKIP_SIBLING_DIRS = new Set([
   "recovery",
   "perflogs",
   "msocache",
+  "config.msi",
+  "found.000",
+  "onedrivetemp",
   "node_modules",
   "temp",
   "tmp"
@@ -408,7 +411,7 @@ const SKIP_SIBLING_DIRS = new Set([
 
 /**
  * Discover nearby sibling project folders next to the current workspace so users
- * can switch projects on disk with 1 click without reopening VS Code.
+ * can switch projects on disk with 1 click without cluttering with non-code OS/app dirs.
  */
 function discoverNearbyProjects(baseDir, excludePaths = [], limit = 12) {
   if (!baseDir) return [];
@@ -423,6 +426,7 @@ function discoverNearbyProjects(baseDir, excludePaths = [], limit = 12) {
     return [];
   }
 
+  const extraMarkers = [...PROJECT_ROOT_MARKERS, "index.html", "tsconfig.json", "requirements.txt", "Dockerfile"];
   const results = [];
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
@@ -434,30 +438,35 @@ function discoverNearbyProjects(baseDir, excludePaths = [], limit = 12) {
 
     let hasMarker = false;
     try {
-      for (const marker of PROJECT_ROOT_MARKERS) {
+      for (const marker of extraMarkers) {
         if (fs.existsSync(path.join(absPath, marker))) {
           hasMarker = true;
           break;
+        }
+      }
+      // Also recognize nested app/ or src/ repo layouts (e.g. parent/app/package.json)
+      if (!hasMarker) {
+        const subAppPkg = path.join(absPath, "app", "package.json");
+        const subSrc = path.join(absPath, "src");
+        if (fs.existsSync(subAppPkg) || (fs.existsSync(subSrc) && fs.statSync(subSrc).isDirectory())) {
+          hasMarker = true;
         }
       }
     } catch {
       continue;
     }
 
+    if (!hasMarker) continue;
+
     results.push({
       name,
       fsPath: absPath,
-      source: "nearby",
-      hasMarker
+      source: "nearby"
     });
   }
 
-  results.sort((a, b) => {
-    if (a.hasMarker !== b.hasMarker) return a.hasMarker ? -1 : 1;
-    return a.name.localeCompare(b.name);
-  });
-
-  return results.slice(0, limit).map(({ name, fsPath, source }) => ({ name, fsPath, source }));
+  results.sort((a, b) => a.name.localeCompare(b.name));
+  return results.slice(0, limit);
 }
 
 module.exports = {

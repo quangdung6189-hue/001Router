@@ -225,7 +225,9 @@ async function runAgentLoop(ctx) {
   };
 
   for (let round = 0; round < maxRounds; round++) {
-    const activeTools = useTools ? getToolsForMode(mode, livePermissions) : [];
+    const activeTools = useTools
+      ? getToolsForMode(mode, livePermissions, { noProject: Boolean(editorContext?.isNoProject) })
+      : [];
     const bodyPayload = {
       model: modelTarget,
       messages: apiMessages,

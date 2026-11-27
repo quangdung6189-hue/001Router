@@ -14,6 +14,7 @@ const {
   ApprovalQueue
 } = require("../vscode-001router/src/permissions/permissionManager.js");
 const { KNOWN_TOOL_NAMES, getToolsForMode } = require("../vscode-001router/src/tools/toolDefinitions.js");
+const { buildSystemPrompt } = require("../vscode-001router/src/agent/systemPrompt.js");
 const { discoverNearbyProjects } = require("../vscode-001router/src/workspace/scanner.js");
 import fs from "node:fs";
 import os from "node:os";
@@ -164,23 +165,36 @@ describe("001Router Extension v1.4 — Anti-Corruption SSE, CloudCode Offsets & 
     assert.ok(askNames.includes("read_file"));
     assert.ok(!askNames.includes("write_to_file"));
     assert.ok(!askNames.includes("execute_command"));
+
+    // No-Project free-chat mode isolates away all workspace/filesystem/terminal tools
+    const noProjNames = getToolsForMode("auto", normalizePermissions({ preset: "yolo" }), { noProject: true }).map(
+      (t) => t.function.name
+    );
+    assert.ok(!noProjNames.includes("read_file"));
+    assert.ok(!noProjNames.includes("write_to_file"));
+    assert.ok(!noProjNames.includes("execute_command"));
+    assert.ok(noProjNames.includes("web_fetch"));
+    const freePrompt = buildSystemPrompt("auto", { isNoProject: true, workspaceSummary: { projectName: "SHOULD_NOT_LEAK" } }, false, true, { webAccess: true });
+    assert.ok(freePrompt.includes("No-Project Free Chat"));
+    assert.ok(!freePrompt.includes("SHOULD_NOT_LEAK"));
   });
 
-  it("8. discoverNearbyProjects finds sibling project directories on disk while excluding active root and system dirs", () => {
+  it("8. discoverNearbyProjects returns only real code projects and filters out non-code OS/app dirs like Config.Msi", () => {
     const base = fs.mkdtempSync(path.join(os.tmpdir(), "001router-proj-"));
     try {
       const curProj = path.join(base, "proj-active");
       const otherProj = path.join(base, "proj-other");
-      const plainDir = path.join(base, "notes");
+      const noiseDir = path.join(base, "Config.Msi");
+      const randomAppDir = path.join(base, "RandomApp");
       fs.mkdirSync(curProj);
       fs.mkdirSync(otherProj);
-      fs.mkdirSync(plainDir);
+      fs.mkdirSync(noiseDir);
+      fs.mkdirSync(randomAppDir);
       fs.writeFileSync(path.join(otherProj, "package.json"), "{}");
 
       const found = discoverNearbyProjects(curProj, [curProj], 10);
-      assert.ok(found.length >= 2);
+      assert.equal(found.length, 1);
       assert.equal(found[0].name, "proj-other");
-      assert.ok(!found.some((p) => p.name === "proj-active"));
     } finally {
       fs.rmSync(base, { recursive: true, force: true });
     }

@@ -2,7 +2,7 @@
   "name": "001router-code",
   "displayName": "001Router",
   "description": "Autonomous AI Coding Agent powered by 001Router — Grok 3D Singularity Core, Precision Effort Rail, Multi-Project Switcher, Cline-Grade Task Trace & Granular Permissions.",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "publisher": "001router",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -136,7 +136,7 @@
   },
   "scripts": {
     "package:vsix": "node ./scripts/pack-vsix.js",
-    "publish:ovsx": "npx ovsx publish ./001router-code-1.5.0.vsix",
+    "publish:ovsx": "npx ovsx publish ./001router-code-1.6.0.vsix",
     "publish:vsce": "npx @vscode/vsce publish"
   }
 }

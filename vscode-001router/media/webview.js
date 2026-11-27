@@ -82,7 +82,9 @@
     listChecks:
       '<svg class="r001-svg" aria-hidden="true" width="12.5" height="12.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 7 5 9 8 5"/><line x1="11" y1="7" x2="21" y2="7"/><polyline points="3 17 5 19 8 15"/><line x1="11" y1="17" x2="21" y2="17"/></svg>',
     blueprint:
-      '<svg class="r001-svg" aria-hidden="true" width="12.5" height="12.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2.5"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg>'
+      '<svg class="r001-svg" aria-hidden="true" width="12.5" height="12.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2.5"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg>',
+    chat:
+      '<svg class="r001-svg" aria-hidden="true" width="12.5" height="12.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>'
   };
 
   const LIGHT_PLATE_FILES = new Set([
@@ -95,11 +97,51 @@
   const DEEPEN_GRAY_FILES = new Set(["xai.png", "glm.png", "nous.png", "openrouter.png"]);
 
   const EFFORT_THEME = {
-    low: { color: "#34D399", accent: "#2DD4BF", glow: "rgba(52, 211, 153, 0.36)", badge: "FAST · LOW", realm: "Phản hồi nhanh & tối ưu chi phí" },
-    medium: { color: "#38BDF8", accent: "#818CF8", glow: "rgba(56, 189, 248, 0.42)", badge: "BALANCED · MED", realm: "Cân bằng tốc độ & độ sâu kỹ thuật" },
-    high: { color: "#F59E0B", accent: "#FB923C", glow: "rgba(245, 158, 11, 0.46)", badge: "DEEP · HIGH", realm: "Suy luận đa tầng & kiểm chứng chặt" },
-    xhigh: { color: "#C084FC", accent: "#E879F9", glow: "rgba(192, 132, 252, 0.56)", badge: "SINGULARITY · XHIGH", realm: "Tư duy kiến trúc cực đại" },
-    max: { color: "#E879F9", accent: "#C084FC", glow: "rgba(232, 121, 249, 0.62)", badge: "SINGULARITY · MAX", realm: "Giải phóng toàn bộ chiều sâu suy luận" }
+    low: {
+      start: "#059669",
+      color: "#10B981",
+      accent: "#2DD4BF",
+      glow: "rgba(16, 185, 129, 0.5)",
+      bars: 1,
+      badge: "SWIFT · LOW",
+      realm: "Phản hồi siêu nhanh & tiết kiệm token"
+    },
+    medium: {
+      start: "#2563EB",
+      color: "#38BDF8",
+      accent: "#818CF8",
+      glow: "rgba(56, 189, 248, 0.56)",
+      bars: 2,
+      badge: "BALANCED · MED",
+      realm: "Cân bằng tốc độ & độ sâu kỹ thuật"
+    },
+    high: {
+      start: "#D97757",
+      color: "#F59E0B",
+      accent: "#FDE047",
+      glow: "rgba(245, 158, 11, 0.64)",
+      bars: 3,
+      badge: "EMBER · HIGH",
+      realm: "Suy luận đa tầng & kiểm chứng chặt"
+    },
+    xhigh: {
+      start: "#9333EA",
+      color: "#EC4899",
+      accent: "#F59E0B",
+      glow: "rgba(236, 72, 153, 0.72)",
+      bars: 4,
+      badge: "SINGULARITY · XHIGH",
+      realm: "Tư duy kiến trúc cực đại · tỏa sáng"
+    },
+    max: {
+      start: "#A855F7",
+      color: "#EC4899",
+      accent: "#FDE047",
+      glow: "rgba(232, 121, 249, 0.78)",
+      bars: 4,
+      badge: "SINGULARITY · MAX",
+      realm: "Giải phóng toàn bộ chiều sâu suy luận"
+    }
   };
 
   const PERMISSION_ITEMS = [
@@ -151,6 +193,7 @@
     editorContext: {
       hasWorkspaceFolder: false,
       hasProjectFolder: false,
+      isNoProject: false,
       isCustomProject: false,
       activeProjectRoot: "",
       workspaceName: "",
@@ -361,6 +404,7 @@
   function applyRootEffortVars(stop, profile) {
     const theme = EFFORT_THEME[stop?.id] || EFFORT_THEME.medium;
     const isSing = isSingularityStop(stop, profile);
+    document.documentElement.style.setProperty("--effort-start", theme.start || theme.color);
     document.documentElement.style.setProperty("--effort-color", theme.color);
     document.documentElement.style.setProperty("--effort-accent", theme.accent);
     document.documentElement.style.setProperty("--effort-glow", theme.glow);
@@ -373,12 +417,12 @@
   function getPermissionBadgeMeta() {
     const p = state.permissions || DEFAULT_PERMS;
     if (p.preset === "yolo" && p.executeTerminal && p.editFiles) {
-      return { label: "Toàn quyền", cls: "perm-yolo", title: "Full Access: Terminal + File + Web + Auto-Retry" };
+      return { label: "Toàn quyền", shortLabel: "YOLO", cls: "perm-yolo", title: "Full Access: Terminal + File + Web + Auto-Retry" };
     }
     if (p.preset === "ask" || (!p.executeTerminal && !p.editFiles)) {
-      return { label: "Hỏi duyệt", cls: "perm-ask", title: "Hỏi xác nhận trước khi sửa file hoặc chạy Terminal" };
+      return { label: "Hỏi duyệt", shortLabel: "Hỏi", cls: "perm-ask", title: "Hỏi xác nhận trước khi sửa file hoặc chạy Terminal" };
     }
-    return { label: "An toàn", cls: "perm-safe", title: "Tự động đọc/sửa an toàn, hỏi lệnh rủi ro" };
+    return { label: "An toàn", shortLabel: "Safe", cls: "perm-safe", title: "Tự động đọc/sửa an toàn, hỏi lệnh rủi ro" };
   }
 
   function formatInlineText(raw) {
@@ -755,39 +799,48 @@
   }
 
   /**
-   * Precision Optical Detent Effort Slider (Ảnh 4)
-   * Native <input type="range" min="0" max="100"> with continuous butter-smooth drag
-   * and magnetic detent snap + optical ripple.
+   * Claude-Style Radiant Gliding Capsule Effort Slider (Ảnh 1)
+   * Native <input type="range" min="0" max="100"> layered over a continuous luminous glider
+   * with spring snap, spectral aurora halo, and kinetic intensity bars.
    */
   function renderEffortBar() {
     const profile = getActiveEffortProfile();
     const stops = profile.effortLevels;
     const stop = getCurrentEffortStop();
     const activeIdx = Math.max(0, stops.findIndex((s) => s.id === stop.id));
-    const ratio = stops.length > 1 ? activeIdx / (stops.length - 1) : 1;
-    const pct = Math.round(ratio * 100);
+    const ratio = stops.length > 1 ? activeIdx / (stops.length - 1) : 0;
+    const centerPct = stops.length > 0 ? Math.round(((activeIdx + 0.5) / stops.length) * 100) : 50;
     const theme = EFFORT_THEME[stop.id] || EFFORT_THEME.medium;
+    const isSing = isSingularityStop(stop, profile);
+    const litBars = theme.bars || Math.min(4, activeIdx + 1);
 
     return `
-      <div class="r001-effort-bar" id="r001-effort-bar">
+      <div class="r001-effort-bar" id="r001-effort-bar" data-singularity="${isSing ? "1" : "0"}" style="--slider-pct:${centerPct}%">
+        <span class="r001-effort-aurora" aria-hidden="true"></span>
         <div class="r001-effort-top">
           <label for="r001-effort-range" class="r001-effort-label">
-            <span>Effort</span>
+            <span>Reasoning Effort</span>
             <span class="r001-effort-val" id="r001-effort-val">${escapeHtml(stop.label)}</span>
           </label>
-          <span class="r001-effort-badge" id="r001-effort-badge">${escapeHtml(theme.badge)}</span>
+          <span class="r001-effort-right">
+            <span class="r001-energy-bars" id="r001-energy-bars" aria-hidden="true">
+              ${[1, 2, 3, 4].map((n) => `<i class="${n <= litBars ? "lit" : ""}"></i>`).join("")}
+            </span>
+            <span class="r001-effort-badge" id="r001-effort-badge">${escapeHtml(theme.badge)}</span>
+          </span>
         </div>
-        <div class="r001-slider-shell" id="r001-slider-shell" style="--slider-pct:${pct}%;--slider-ratio:${ratio.toFixed(4)}">
-          <div class="r001-slider-rail"><div class="r001-slider-beam" id="r001-slider-beam"></div></div>
-          <div class="r001-slider-ticks" id="r001-slider-ticks">
+        <div class="r001-claude-capsule" id="r001-slider-shell" style="--stop-count:${stops.length};--glider-ratio:${ratio.toFixed(4)};--slider-pct:${centerPct}%">
+          <span class="r001-capsule-trail" aria-hidden="true"></span>
+          <span class="r001-effort-glider" aria-hidden="true"></span>
+          <span class="r001-capsule-burst" aria-hidden="true"></span>
+          <div class="r001-capsule-labels" id="r001-capsule-labels" aria-hidden="true">
             ${stops
               .map(
                 (s, i) =>
-                  `<span class="r001-slider-tick ${i < activeIdx ? "passed" : ""} ${i === activeIdx ? "current" : ""}" data-tick-idx="${i}"></span>`
+                  `<span class="r001-capsule-label ${i === activeIdx ? "active" : ""}" data-lbl-idx="${i}">${escapeHtml(s.shortLabel || s.label)}</span>`
               )
               .join("")}
           </div>
-          <span class="r001-slider-pulse" id="r001-slider-pulse" aria-hidden="true"></span>
           <input
             type="range"
             id="r001-effort-range"
@@ -795,19 +848,11 @@
             min="0"
             max="100"
             step="1"
-            value="${pct}"
+            value="${centerPct}"
             aria-label="Mức suy luận Effort"
             aria-valuetext="${escapeHtml(`${stop.label} — ${theme.realm}`)}"
-            style="--control-value:${pct};--attr-min:0;--attr-max:100"
+            style="--control-value:${centerPct};--attr-min:0;--attr-max:100"
           />
-        </div>
-        <div class="r001-slider-stops" id="r001-slider-stops">
-          ${stops
-            .map(
-              (s, i) =>
-                `<button type="button" class="r001-stop-btn ${i === activeIdx ? "active" : ""}" data-action="pick-effort-tier" data-tier="${escapeHtml(s.id)}">${escapeHtml(s.shortLabel || s.label)}</button>`
-            )
-            .join("")}
         </div>
         <div class="r001-effort-sub">
           <span id="r001-effort-realm">${escapeHtml(theme.realm || stop.description || "")}</span>
@@ -976,10 +1021,11 @@
   }
 
   /**
-   * Multi-Project Switcher & Files Popover (Ảnh 2 & Ảnh 3 Upgrade)
+   * Multi-Project Switcher & Files Popover (Ảnh 2 Upgrade: includes No Project Free Chat)
    */
   function renderWorkspacePopover() {
     const ws = state.editorContext?.workspaceSummary;
+    const isNoProject = Boolean(state.editorContext?.isNoProject);
     const projects = state.editorContext?.availableProjects || [];
     const tab = state.workspaceTab || "projects";
 
@@ -997,7 +1043,7 @@
           </div>
         </button>
         <div class="r001-prov-right">
-          <span class="r001-src-tag">${p.source === "ide" ? "IDE" : p.source === "custom" ? "PC" : "Gần đây"}</span>
+          <span class="r001-src-tag">${p.source === "ide" ? "IDE" : p.source === "custom" ? "PC" : "Dự án"}</span>
           ${p.isActive ? `<span style="color:var(--accent-emerald)">${ICONS.check}</span>` : ""}
           ${p.source === "custom" ? `<button type="button" class="r001-mini-btn" data-action="remove-project" data-path="${escapeHtml(p.fsPath)}" title="Gỡ khỏi danh sách">×</button>` : ""}
         </div>
@@ -1009,15 +1055,15 @@
     return `
       <div class="r001-popover" id="r001-popover">
         <div class="r001-popover-head">
-          <span class="r001-popover-title">${ICONS.folderTree}<span>Dự án & Tệp máy tính</span></span>
+          <span class="r001-popover-title">${ICONS.folderTree}<span>Dự án & Chế độ Chat</span></span>
           <div style="display:flex;gap:4px">
             <button type="button" class="r001-back-btn primary" data-action="pick-project-folder">${ICONS.folderPlus}<span>Mở thư mục...</span></button>
             <button type="button" class="r001-back-btn" data-action="close-popover">Đóng</button>
           </div>
         </div>
         <div class="r001-popover-tabs">
-          <button type="button" class="r001-pop-tab ${tab === "projects" ? "active" : ""}" data-action="set-ws-tab" data-tab="projects">Chuyển dự án (${projects.length})</button>
-          <button type="button" class="r001-pop-tab ${tab === "files" ? "active" : ""}" data-action="set-ws-tab" data-tab="files">Tệp trong ${escapeHtml(ws?.projectName || "dự án")} (${ws?.fileCount || 0})</button>
+          <button type="button" class="r001-pop-tab ${tab === "projects" ? "active" : ""}" data-action="set-ws-tab" data-tab="projects">Chọn dự án (${projects.length})</button>
+          <button type="button" class="r001-pop-tab ${tab === "files" ? "active" : ""}" data-action="set-ws-tab" data-tab="files">${isNoProject ? "Tệp (No Project)" : `Tệp trong ${escapeHtml(ws?.projectName || "dự án")} (${ws?.fileCount || 0})`}</button>
         </div>
         ${
           tab === "projects"
@@ -1026,26 +1072,40 @@
                  <button type="submit" class="r001-back-btn primary">Mở</button>
                </form>
                <div class="r001-popover-list">
+                 <button type="button" class="r001-noproject-card ${isNoProject ? "selected" : ""}" data-action="switch-project" data-path="__none__">
+                   <div class="r001-model-left">
+                     <span style="color:#d8b4fe;display:inline-flex">${ICONS.chat}</span>
+                     <div style="min-width:0;flex:1">
+                       <div class="r001-model-name">No Project · Chat tự do</div>
+                       <div class="r001-model-desc">Trò chuyện bình thường, hoàn toàn tách biệt không chạm dự án nào</div>
+                     </div>
+                   </div>
+                   <div class="r001-prov-right">
+                     <span class="r001-src-tag" style="color:#d8b4fe;border-color:rgba(168,85,247,0.35)">Free</span>
+                     ${isNoProject ? `<span style="color:var(--accent-emerald)">${ICONS.check}</span>` : ""}
+                   </div>
+                 </button>
                  ${ideProjects.length ? `<div class="r001-section-label">Đang mở trong IDE</div>${ideProjects.map(renderProjectRow).join("")}` : ""}
                  ${customProjects.length ? `<div class="r001-section-label">Thư mục trên máy tính</div>${customProjects.map(renderProjectRow).join("")}` : ""}
-                 ${nearbyProjects.length ? `<div class="r001-section-label">Dự án lân cận trên ổ đĩa</div>${nearbyProjects.map(renderProjectRow).join("")}` : ""}
-                 ${!projects.length ? `<div class="r001-empty-pop">Bấm "Mở thư mục..." để chọn thư mục bất kỳ trên máy tính.</div>` : ""}
+                 ${nearbyProjects.length ? `<div class="r001-section-label">Dự án code lân cận</div>${nearbyProjects.map(renderProjectRow).join("")}` : ""}
                </div>`
             : `${
-                ws && ws.fileCount > 0
-                  ? `<div class="r001-search-row">
-                       <input type="text" class="r001-search" id="r001-ws-search" placeholder="Tìm tệp trong ${escapeHtml(ws.projectName)}..." value="${escapeHtml(state.workspaceSearch)}" />
-                       <button type="button" class="r001-back-btn" data-action="toggle-auto-workspace">${state.autoWorkspace ? "Auto: Bật" : "Auto: Tắt"}</button>
-                       <button type="button" class="r001-back-btn" data-action="refresh-workspace" title="Quét lại">${ICONS.refresh}</button>
-                     </div>
-                     <div class="r001-popover-list">
-                       ${!q && ws.treePreview ? `<pre class="r001-tree-pre">${escapeHtml(ws.treePreview)}</pre>` : ""}
-                       ${files
-                         .slice(0, 70)
-                         .map((rel) => `<button type="button" class="r001-model-item" data-action="attach-project-file" data-rel="${escapeHtml(rel)}"><div class="r001-model-left">${ICONS.file}<span class="r001-mono-name">${escapeHtml(rel)}</span></div></button>`)
-                         .join("")}
-                     </div>`
-                  : `<div class="r001-empty-pop">Thư mục chưa có tệp. Bấm "Mở thư mục..." để chọn dự án khác.</div>`
+                isNoProject
+                  ? `<div class="r001-empty-pop">Đang ở chế độ <strong>No Project · Chat tự do</strong>.<br/>Bạn vẫn có thể đính kèm tệp lẻ qua nút <code>@ Tệp</code> hoặc chuyển sang một dự án bất kỳ.</div>`
+                  : ws && ws.fileCount > 0
+                    ? `<div class="r001-search-row">
+                         <input type="text" class="r001-search" id="r001-ws-search" placeholder="Tìm tệp trong ${escapeHtml(ws.projectName)}..." value="${escapeHtml(state.workspaceSearch)}" />
+                         <button type="button" class="r001-back-btn" data-action="toggle-auto-workspace">${state.autoWorkspace ? "Auto: Bật" : "Auto: Tắt"}</button>
+                         <button type="button" class="r001-back-btn" data-action="refresh-workspace" title="Quét lại">${ICONS.refresh}</button>
+                       </div>
+                       <div class="r001-popover-list">
+                         ${!q && ws.treePreview ? `<pre class="r001-tree-pre">${escapeHtml(ws.treePreview)}</pre>` : ""}
+                         ${files
+                           .slice(0, 70)
+                           .map((rel) => `<button type="button" class="r001-model-item" data-action="attach-project-file" data-rel="${escapeHtml(rel)}"><div class="r001-model-left">${ICONS.file}<span class="r001-mono-name">${escapeHtml(rel)}</span></div></button>`)
+                           .join("")}
+                       </div>`
+                    : `<div class="r001-empty-pop">Thư mục chưa có tệp. Bấm "Mở thư mục..." để chọn dự án khác.</div>`
               }`
         }
       </div>
@@ -1091,7 +1151,13 @@
                   <button type="button" data-action="select-session" data-id="${escapeHtml(s.id)}" style="flex:1;min-width:0;border:none;background:transparent;color:inherit;text-align:left;cursor:pointer;padding:0">
                     <div class="r001-model-name">${s.bookmarked ? "★ " : ""}${escapeHtml(s.title || "Untitled")}</div>
                     <div class="r001-hist-folder">
-                      ${s.projectName ? `${ICONS.folder}<span>${escapeHtml(s.projectName)}</span>` : `<span>${(s.messages || []).length} tin nhắn</span>`}
+                      ${
+                        s.isNoProject
+                          ? `${ICONS.chat}<span>No Project · Chat tự do</span>`
+                          : s.projectName
+                            ? `${ICONS.folder}<span>${escapeHtml(s.projectName)}</span>`
+                            : `<span>${(s.messages || []).length} tin nhắn</span>`
+                      }
                     </div>
                   </button>
                   <div class="r001-prov-right">
@@ -1210,8 +1276,10 @@
         <header class="r001-topbar" id="r001-topbar"></header>
         <main class="r001-main" id="r001-scroll"></main>
         <footer class="r001-dock" id="r001-dock">
-          <div id="r001-popover-slot"></div>
-          <div id="r001-composer-slot"></div>
+          <div class="r001-dock-inner">
+            <div id="r001-popover-slot"></div>
+            <div id="r001-composer-slot"></div>
+          </div>
         </footer>
         <div id="r001-dialog-slot"></div>
       </div>
@@ -1223,14 +1291,17 @@
     const el = document.getElementById("r001-topbar");
     if (!el) return;
     const activeSession = getActiveSession();
+    const isNoProject = Boolean(state.editorContext?.isNoProject);
     const ws = state.editorContext?.workspaceSummary;
-    const projName = ws?.projectName || state.editorContext?.workspaceName || "Chọn dự án";
+    const projName = isNoProject
+      ? "No Project"
+      : ws?.projectName || state.editorContext?.workspaceName || "Chọn dự án";
     const isCustom = Boolean(state.editorContext?.isCustomProject);
 
     el.innerHTML = `
       <div class="r001-topbar-left">
-        <button type="button" class="r001-proj-trigger ${isCustom ? "custom" : ""}" data-action="open-projects-tab" title="${escapeHtml(state.editorContext?.workingDir || "Chuyển thư mục dự án")}">
-          ${ICONS.folder}
+        <button type="button" class="r001-proj-trigger ${isNoProject ? "no-project" : isCustom ? "custom" : ""}" data-action="open-projects-tab" title="${escapeHtml(isNoProject ? "Chế độ Chat tự do (No Project) — bấm để đổi dự án" : state.editorContext?.workingDir || "Chuyển thư mục dự án")}">
+          ${isNoProject ? ICONS.chat : ICONS.folder}
           <span class="r001-proj-trigger-name">${escapeHtml(projName)}</span>
           <span class="r001-proj-caret">${ICONS.chevronDown}</span>
         </button>
@@ -1240,7 +1311,7 @@
       <div class="r001-topbar-actions">
         <button type="button" class="r001-conn-dot-btn ${state.connected ? "connected" : ""}" data-action="open-auth" title="${escapeHtml(`${state.connected ? "Online" : "Offline"} · ${state.serverUrl}`)}">
           <span class="r001-conn-dot"></span>
-          <span>${state.connected ? "Online" : "Connect"}</span>
+          <span class="r001-conn-label">${state.connected ? "Online" : "Connect"}</span>
         </button>
         ${surface === "sidebar" ? `<button type="button" class="r001-icon-btn" data-action="open-tab" aria-label="Mở sang Editor Tab" title="Mở sang Editor Tab">${ICONS.popout}</button>` : ""}
         <button type="button" class="r001-icon-btn ${activeSession?.bookmarked ? "active" : ""}" data-action="toggle-bookmark" aria-label="Đánh dấu" title="Đánh dấu">${activeSession?.bookmarked ? ICONS.bookmarkFilled : ICONS.bookmark}</button>
@@ -1278,15 +1349,18 @@
     const heroMood = hasRunningTerminal ? "terminal" : state.isTypingDraft ? "listening" : "idle";
 
     if (messages.length === 0 && sessionTerminals.length === 0) {
+      const isNoProject = Boolean(state.editorContext?.isNoProject);
       scrollEl.innerHTML = `
         <div class="r001-hero">
           <div class="r001-hero-center">
             ${renderGrok3DCore("hero", heroMood, isSing)}
             <div class="r001-hero-name">Axiom</div>
             <div class="r001-hero-subtitle">${
-              ws && ws.fileCount > 0
-                ? `Đang làm việc trên <strong>${escapeHtml(ws.projectName)}</strong> (${ws.fileCount}${ws.truncated ? "+" : ""} tệp)`
-                : `Chọn thư mục dự án bất kỳ trên máy tính để bắt đầu tự hành.`
+              isNoProject
+                ? `Chế độ <strong>No Project · Chat tự do</strong> — không ảnh hưởng tới bất kỳ dự án nào.`
+                : ws && ws.fileCount > 0
+                  ? `Đang làm việc trên <strong>${escapeHtml(ws.projectName)}</strong> (${ws.fileCount}${ws.truncated ? "+" : ""} tệp)`
+                  : `Chọn thư mục dự án bất kỳ hoặc bật Chat tự do.`
             }</div>
             <div class="r001-hero-meta">
               <span>${(state.catalog?.providers || []).length} providers</span>
@@ -1294,9 +1368,14 @@
               <span>${totalModels} models</span>
             </div>
             <div class="r001-hero-quick">
-              <button type="button" class="r001-quick-pill" data-action="quick-prompt" data-prompt="Quét toàn bộ dự án đang mở, liệt kê cấu trúc thư mục, kiến trúc chính và các file quan trọng nhất">${ICONS.folderTree}<span>Quét dự án</span></button>
-              <button type="button" class="r001-quick-pill" data-action="quick-prompt" data-prompt="Kiểm tra lỗi Diagnostics trong IDE và chạy git status để báo cáo trạng thái hiện tại">${ICONS.terminal}<span>Lỗi & Git</span></button>
-              <button type="button" class="r001-quick-pill" data-action="open-projects-tab">${ICONS.folderPlus}<span>Đổi thư mục</span></button>
+              ${
+                isNoProject
+                  ? `<button type="button" class="r001-quick-pill" data-action="open-projects-tab">${ICONS.folderPlus}<span>Gắn dự án</span></button>
+                     <button type="button" class="r001-quick-pill" data-action="pick-computer-file">${ICONS.file}<span>Đính kèm tệp</span></button>`
+                  : `<button type="button" class="r001-quick-pill" data-action="quick-prompt" data-prompt="Quét toàn bộ dự án đang mở, liệt kê cấu trúc thư mục, kiến trúc chính và các file quan trọng nhất">${ICONS.folderTree}<span>Quét dự án</span></button>
+                     <button type="button" class="r001-quick-pill" data-action="quick-prompt" data-prompt="Kiểm tra lỗi Diagnostics trong IDE và chạy git status để báo cáo trạng thái hiện tại">${ICONS.terminal}<span>Lỗi & Git</span></button>
+                     <button type="button" class="r001-quick-pill" data-action="switch-project" data-path="__none__">${ICONS.chat}<span>No Project</span></button>`
+              }
             </div>
           </div>
         </div>
@@ -1400,17 +1479,20 @@
     const modeLabel = state.mode === "ask" ? "Ask" : state.mode === "plan" ? "Plan" : "Auto";
     const permBadge = getPermissionBadgeMeta();
     const isStreaming = Boolean(state.streamingSessionId && state.streamingSessionId === activeSession?.id);
+    const isNoProject = Boolean(state.editorContext?.isNoProject);
     const ws = state.editorContext?.workspaceSummary;
     const af = state.editorContext?.activeFile;
 
-    const folderPill =
-      ws && ws.fileCount > 0
-        ? `<button type="button" class="r001-folder-pill ${state.autoWorkspace ? "" : "muted"}" data-action="open-projects-tab" title="Đổi dự án hoặc duyệt tệp (${escapeHtml(ws.projectRoot || "")})">${ICONS.folderTree}<span>${escapeHtml(ws.projectName)}</span><span class="r001-folder-count">${ws.fileCount}${ws.truncated ? "+" : ""}</span></button>`
-        : `<button type="button" class="r001-folder-pill" data-action="pick-project-folder">${ICONS.folderPlus}<span>Chọn dự án...</span></button>`;
+    const folderPill = isNoProject
+      ? `<button type="button" class="r001-folder-pill" data-action="open-projects-tab" style="color:#e9d5ff;border-color:rgba(168,85,247,0.34)" title="Đang ở chế độ Chat tự do — bấm để chọn dự án">${ICONS.chat}<span>No Project</span></button>`
+      : ws && ws.fileCount > 0
+        ? `<button type="button" class="r001-folder-pill ${state.autoWorkspace ? "" : "muted"}" data-action="open-projects-tab" title="Đổi dự án hoặc chuyển sang No Project (${escapeHtml(ws.projectRoot || "")})">${ICONS.folderTree}<span>${escapeHtml(ws.projectName)}</span><span class="r001-folder-count">${ws.fileCount}${ws.truncated ? "+" : ""}</span></button>`
+        : `<button type="button" class="r001-folder-pill" data-action="open-projects-tab">${ICONS.folderPlus}<span>Chọn dự án...</span></button>`;
 
-    const activePill = af
-      ? `<button type="button" class="r001-active-file-pill ${state.autoActiveFile ? "" : "muted"}" data-action="toggle-auto-file" title="Bật/tắt tự đính kèm tệp đang mở">${state.autoActiveFile ? ICONS.eye : ICONS.eyeOff}<span>${escapeHtml(af.fileName)} · ${escapeHtml(af.selectionLabel || `${af.lineCount}L`)}</span>${af.diagnosticErrors > 0 ? `<span class="r001-diag-tag">${af.diagnosticErrors}E</span>` : af.diagnosticWarnings > 0 ? `<span class="r001-diag-tag warn">${af.diagnosticWarnings}W</span>` : ""}</button>`
-      : "";
+    const activePill =
+      !isNoProject && af
+        ? `<button type="button" class="r001-active-file-pill ${state.autoActiveFile ? "" : "muted"}" data-action="toggle-auto-file" title="Bật/tắt tự đính kèm tệp đang mở">${state.autoActiveFile ? ICONS.eye : ICONS.eyeOff}<span>${escapeHtml(af.fileName)} · ${escapeHtml(af.selectionLabel || `${af.lineCount}L`)}</span>${af.diagnosticErrors > 0 ? `<span class="r001-diag-tag">${af.diagnosticErrors}E</span>` : af.diagnosticWarnings > 0 ? `<span class="r001-diag-tag warn">${af.diagnosticWarnings}W</span>` : ""}</button>`
+        : "";
 
     slot.innerHTML = `
       <div class="r001-composer" data-singularity="${isSing ? "1" : "0"}">
@@ -1423,21 +1505,22 @@
             ? `<div class="r001-composer-chips">${state.attachments.map((a) => `<span class="r001-chip">${ICONS.file}<span>${escapeHtml(a.label)}</span><button type="button" data-action="remove-attach" data-id="${escapeHtml(a.id)}">×</button></span>`).join("")}</div>`
             : ""
         }
-        <textarea id="r001-input" class="r001-textarea" rows="1" placeholder="Giao việc cho Axiom, @ đính kèm tệp máy tính, hoặc /project...">${escapeHtml(state.draft)}</textarea>
+        <textarea id="r001-input" class="r001-textarea" rows="1" placeholder="${isNoProject ? "Chat tự do với Axiom (không gắn dự án nào)..." : "Giao việc cho Axiom, @ đính kèm tệp, hoặc /project..."}">${escapeHtml(state.draft)}</textarea>
         <div class="r001-toolbar">
           <div class="r001-toolbar-left">
             <button type="button" class="r001-tool-btn" data-action="toggle-popover" data-popover="attach" title="Đính kèm tệp / đổi dự án">${ICONS.plus}</button>
-            <button type="button" class="r001-tool-btn framed" data-action="toggle-popover" data-popover="slash" title="Commands">${ICONS.slash}</button>
+            <button type="button" class="r001-tool-btn framed slash-btn" data-action="toggle-popover" data-popover="slash" title="Commands">${ICONS.slash}</button>
             <button type="button" class="r001-model-pill" id="r001-model-pill" data-action="open-model-picker" title="${escapeHtml(`${state.selection?.providerName || "Provider"} · ${cleanModelLabel} (${stop.label})`)}">
               ${renderLogoPlate(selLogoFile, selProvider?.monogram || "01", selProvider?.color, "sm")}
               <span class="r001-model-pill-name">${escapeHtml(cleanModelLabel)}</span>
-              <span class="r001-model-pill-effort" id="r001-pill-effort-text"><span class="r001-pill-orb"></span><span>${escapeHtml(stop.shortLabel || stop.label)}</span></span>
+              <span class="r001-model-pill-effort" id="r001-pill-effort-text"><span class="r001-pill-orb"></span><span class="r001-pill-effort-label">${escapeHtml(stop.shortLabel || stop.label)}</span></span>
             </button>
           </div>
           <div class="r001-toolbar-right">
             <button type="button" class="r001-perm-btn ${permBadge.cls}" data-action="toggle-popover" data-popover="permissions" title="${escapeHtml(permBadge.title)}">
               <span class="r001-perm-dot"></span>
-              <span>${escapeHtml(permBadge.label)}</span>
+              <span class="r001-perm-full">${escapeHtml(permBadge.label)}</span>
+              <span class="r001-perm-short">${escapeHtml(permBadge.shortLabel)}</span>
             </button>
             <button type="button" class="r001-mode-btn" data-action="toggle-popover" data-popover="mode" title="Chế độ thực thi">
               <span>${escapeHtml(modeLabel)}</span>
@@ -1519,7 +1602,7 @@
     // Update model pill effort indicator directly without touching chat scroll!
     const pillEff = document.getElementById("r001-pill-effort-text");
     if (pillEff) {
-      pillEff.innerHTML = `<span class="r001-pill-orb"></span><span>${escapeHtml(stop.shortLabel || stop.label)}</span>`;
+      pillEff.innerHTML = `<span class="r001-pill-orb"></span><span class="r001-pill-effort-label">${escapeHtml(stop.shortLabel || stop.label)}</span>`;
     }
 
     if (withPulse) {
@@ -1535,6 +1618,7 @@
   function bindEffortSlider() {
     const slider = document.getElementById("r001-effort-range");
     const shell = document.getElementById("r001-slider-shell");
+    const bar = document.getElementById("r001-effort-bar");
     if (!slider || !shell) return;
 
     const profile = getActiveEffortProfile();
@@ -1545,14 +1629,24 @@
 
     const updateVisual = (rawVal, snapMotion) => {
       const val = Math.max(0, Math.min(100, Number(rawVal) || 0));
-      const ratio = val / 100;
-      const idx = stops.length > 1 ? Math.round(ratio * (stops.length - 1)) : 0;
+      const rawRatio = val / 100;
+      const idx = stops.length > 1 ? Math.min(stops.length - 1, Math.floor(rawRatio * stops.length)) : 0;
+      const gliderRatio =
+        stops.length > 1
+          ? Math.max(0, Math.min(1, (rawRatio * stops.length - 0.5) / (stops.length - 1)))
+          : 0;
       const stop = stops[idx] || stops[0];
       const theme = EFFORT_THEME[stop.id] || EFFORT_THEME.medium;
+      const isSing = isSingularityStop(stop, profile);
+      const litBars = theme.bars || Math.min(4, idx + 1);
 
       shell.classList.toggle("snapping", Boolean(snapMotion));
+      shell.style.setProperty("--glider-ratio", gliderRatio.toFixed(4));
       shell.style.setProperty("--slider-pct", `${val}%`);
-      shell.style.setProperty("--slider-ratio", ratio.toFixed(4));
+      if (bar) {
+        bar.dataset.singularity = isSing ? "1" : "0";
+        bar.style.setProperty("--slider-pct", `${val}%`);
+      }
       slider.style.setProperty("--attr-min", slider.min || 0);
       slider.style.setProperty("--attr-max", slider.max || 100);
       slider.style.setProperty("--control-value", val);
@@ -1565,13 +1659,11 @@
       const realmEl = document.getElementById("r001-effort-realm");
       if (realmEl) realmEl.textContent = theme.realm || stop.description || "";
 
-      shell.querySelectorAll(".r001-slider-tick").forEach((tk) => {
-        const ti = Number(tk.dataset.tickIdx);
-        tk.classList.toggle("passed", ti < idx);
-        tk.classList.toggle("current", ti === idx);
+      document.querySelectorAll("#r001-energy-bars i").forEach((b, bi) => {
+        b.classList.toggle("lit", bi < litBars);
       });
-      document.querySelectorAll("#r001-slider-stops .r001-stop-btn").forEach((b, bi) => {
-        b.classList.toggle("active", bi === idx);
+      shell.querySelectorAll(".r001-capsule-label").forEach((lb) => {
+        lb.classList.toggle("active", Number(lb.dataset.lblIdx) === idx);
       });
 
       if (idx !== lastStopIdx) {
@@ -1590,9 +1682,11 @@
 
     const snapAndCommit = () => {
       const { idx, stop } = updateVisual(slider.value, true);
-      const exactPct = stops.length > 1 ? Math.round((idx / (stops.length - 1)) * 100) : 100;
-      slider.value = String(exactPct);
-      updateVisual(exactPct, true);
+      const exactCenterPct = stops.length > 0 ? Math.round(((idx + 0.5) / stops.length) * 100) : 50;
+      const exactGlider = stops.length > 1 ? idx / (stops.length - 1) : 0;
+      slider.value = String(exactCenterPct);
+      updateVisual(exactCenterPct, true);
+      shell.style.setProperty("--glider-ratio", exactGlider.toFixed(4));
       commitEffortTier(stop.id, true);
     };
 
@@ -2141,17 +2235,17 @@
 
       case "editorContext":
         if (msg.editorContext) {
-          const prevProj = state.editorContext?.workspaceSummary?.projectRoot || "";
+          const prevKey = `${state.editorContext?.isNoProject ? "none" : state.editorContext?.workspaceSummary?.projectRoot || ""}`;
           state.editorContext = msg.editorContext;
-          const nextProj = msg.editorContext?.workspaceSummary?.projectRoot || "";
+          const nextKey = `${state.editorContext?.isNoProject ? "none" : state.editorContext?.workspaceSummary?.projectRoot || ""}`;
           renderTopbar();
           renderComposer();
           if (state.activePopover === "workspace" || state.activePopover === "attach") {
             renderPopover();
           }
-          // Only refresh hero subtitle if on empty state & project folder changed — NEVER reset chat scroll!
+          // Only refresh hero subtitle if on empty state & project mode changed — NEVER reset chat scroll!
           const activeSession = getActiveSession();
-          if ((!activeSession?.messages || activeSession.messages.length === 0) && prevProj !== nextProj) {
+          if ((!activeSession?.messages || activeSession.messages.length === 0) && prevKey !== nextKey) {
             renderMain({ scrollToBottom: false });
           }
         }
